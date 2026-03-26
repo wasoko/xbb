@@ -4,7 +4,7 @@
     "useDefineForClassFields": true,
     // "lib": ["ES2022", "DOM", "DOM.Iterable"],
       "lib": ["ESNext", "DOM", "WebWorker"],
-    "types": ["vite/client"], // import.meta
+    "types": ["vite/client", "vitest/globals"], // import.meta, describe/it
     "module": "ESNext",
     "jsx": "react-jsx",
     "skipLibCheck": true,
@@ -14,6 +14,7 @@
     "isolatedModules": true,
     "noEmit": true,
     "strict": true,
+    // "noUncheckedIndexedAccess": true, // no runtime error but |undefined type to handle
     "forceConsistentCasingInFileNames": true,
     "baseUrl": ".",
     "paths": {}

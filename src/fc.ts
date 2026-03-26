@@ -1,9 +1,14 @@
 import * as cbor from 'cbor-x';
 import { keyBy } from 'es-toolkit';
 import { object } from 'framer-motion/client';
+// import { fromMarkdown } from 'mdast-util-from-markdown';
+// import { toString } from 'mdast-util-to-string';
+import {visit} from 'unist-util-visit';
+import {remark} from 'remark'
 import * as pako from 'pako';
 import { useEffect, useState } from 'react';
-export const isBun = "undefined" !=  typeof Bun
+export const isTEST = 0
+export const isUT = "undefined" !=  typeof UNIT_TEST
 export type Result<T, E> = { ok: true; value: T } | { ok: false; error: E }
 export const HF_OR = [  //'Xenova/jina-embeddings-v2-base-zh',
   // https://developer.volcengine.com/articles/7382408396873400371
@@ -23,6 +28,53 @@ export const HF_OR = [  //'Xenova/jina-embeddings-v2-base-zh',
   'sentence-transformers/distilbert-base-nli-mean-tokens'
 ];
 export const DEF_MODEL = HF_OR[0]
+
+
+const tag2md=(ts)=>  ts.map(t=> t.txt).join('')
+/**
+ * Flattens mdast root children into the requested custom structure.
+ * @param {import('mdast').Root} tree - The mdast tree from fromMarkdown.
+ * 1l xi xp xt
+ *     +-2l xi xp xt
+ *           +-3i xp xt
+ *           +-4i xp xt
+ *  +-5i xp xt
+ * heading text
+ */
+export function md2tag(mdText:string) {
+  mdText = mdText.replace(/[ \t]+$/ugm, "")
+  const tree = remark().parse(mdText);
+  const result = [];
+  let prevEnd = 0
+  visit(tree, (node, index, parent) => {
+    const inlineNode = node.type==='link'
+    if (prevEnd < node.position?.end.offset 
+      && (node.value || node.type==='link') )
+      result.push({ txt: mdText.slice(prevEnd, (prevEnd = 
+        node.type==='link' ? parent.position?.end.offset 
+        : node.position?.end.offset + (parent.type=='strong'? 2 :0)))
+        , ref: ['html','link','blockquote','inlineCode'].includes(node.type)? node.type
+        : parent.type==='paragraph' && parent.parent ? parent.parent.type: parent.type
+        , type:'md'})
+    })
+  return result;
+}
+if(isTEST) {let text = ` ## Heading __strong__ \`inlineCode\`
+- Item 1
+  - Nested item
+  - N2
+    1. NN3
+  * b1
+  - N3
+- I3
+
+# Heading preceded by new-line
+> blockquote
+1. I3`
+  const delog = (...arg:any[]) => { return sideLog(...arg)}
+  let tree = remark().parse(text) //, res = []; visit(tree, n => n.type !== 'root' && res.push({ txt: text.split('\n').slice(n.position.start.line - 1, n.position.end.line).join('\n'), ref: JSON.stringify(n) }))
+  console.log(`md2..`, tree, tag2md(delog('md2tag',md2tag(text))))
+}
 export function reAddCB(callback:
   (message: any, sender: chrome.runtime.MessageSender, sendResponse: (response?: any) => void) => void
 ) {
@@ -96,7 +148,7 @@ export function txtRx(txt:string) {
   offset = Math.min(...TERM.map(sep=> cleaned.indexOf(sep, Math.max(33, keepcode))).filter(o=>o!==-1)) // trunc long paragraph at nearest sentences
   if (offset)  cleaned = cleaned.slice(0, offset).trim()
   return [cleaned, sts]
-} if(isBun)["快讯：昆仑万维公告，第三季度营收为20.72亿元，同比增长56.16%；净利润为1.9亿元，同比增长180.13%。前三季度营收为58.05亿元，同比增长51.63%；净利润亏损6.65亿元，同比下降6.19%。 - 华尔街见闻"
+} if(isUT)["快讯：昆仑万维公告，第三季度营收为20.72亿元，同比增长56.16%；净利润为1.9亿元，同比增长180.13%。前三季度营收为58.05亿元，同比增长51.63%；净利润亏损6.65亿元，同比下降6.19%。 - 华尔街见闻"
   , "快讯：中共中央关于制定国民经济和社会发展第十五个五年规划的建议发布。其中指出，适度超前建设新型基础设施，推进信息通信网络、全国一体化算力网、重大科技基础设施等建设和集约高效利用，推进传统基础设施更新和数智化改造。完善现代化综合交通运输体系，加强跨区域统筹布局、跨方式一体衔接，强化薄弱地区覆盖和通达保障。健全多元化、韧性强的国际运输通道体系。优化能源骨干通道布局，加力建设新型能源基础设施。加快建设现代化水网，增强洪涝灾害防御、水资源统筹调配、城乡供水保障能力。推进城市平急两用公共基础设施建设。 - 华尔街见闻"
   , "平安保险在线客服,平安理赔查询,平安理赔系统- 中国平安官方直销网站"
   , "中港通巴士 - Google Search"
@@ -116,22 +168,22 @@ export function str2tag(str:string ) {
   const all = str.split(/\s+/)
   const hash = all.filter(s=> s.startsWith('#'))
   return {txt: hash.join(' '),  sts:all.filter(s=>!s.startsWith('#'))}
-} if(isBun) ['test   as',].forEach(s=> console.log(s))
+} if(isUT) ['test   as',].forEach(s=> console.log(s))
 export function markdown2tab(markdown: string) {
-  let rx =  /\[(.+)(?<!\\)\]\((.+)\)/g    // escape ]( in url
-  const items = [];
-  let match;
+  let rx =  /^\s*(?:\d+\.)?\s*\[(.+)(?<!\\)\]\s*\((.+)\)\s*$/g    // escape ]( in url
+  const ts = [];
+  let match, endMatch;
   while ((match = rx.exec(markdown)) !== null) 
-    items.push(txtref2tab(match[1], match[2].replaceAll('\\](','](')))
-  return items  // undo escape added from popup.tsx
-} if(isBun) ['[t\\](UR](L)','[t](UR\\](L)','[t](UR](L)'].map(s=> (/\[(.+)(?<!\\)\]\((.+)\)/g.exec(s)))
+    ts.push(txtref2tab(match[1], (match[2]).replaceAll('\\](','](')))
+  return {ts, lastIndex: rx.lastIndex}  // undo escape added from popup.tsx
+} if(isUT) ['[t\\](UR](L)','[t](UR\\](L)','[t](UR](L)'].map(s=> (/\[(.+)(?<!\\)\]\((.+)\)/g.exec(s)))
 export function cleanDomain(url: string) {
     // Remove protocol (http://, https://) and optional "www."
     if (url.startsWith('file:'))
       return url.slice(7, url.indexOf('\/',11))
     const cleanUrl = url.replace(/https?:\/\/(www\.)?/, '');
     return cleanUrl.split('/')[0]
-} if(isBun) ['file:///C:/Users/wso/Downloads/JIRA.html', 'file://ny5-na-risk-01.corp.schonfeld.com/risk_vol1/src/barra/BarraOptimizer9.0/doc/Optimizer_User_Guide.pdf'
+} if(isUT) ['file:///C:/Users/wso/Downloads/JIRA.html', 'file://ny5-na-risk-01.corp.schonfeld.com/risk_vol1/src/barra/BarraOptimizer9.0/doc/Optimizer_User_Guide.pdf'
   ,'blah.co.uk', 'news.yahoo.co.jp', 'tsmc.com.tw', 'news.google.com', 'news.google.com.hk',
 ].forEach(r=> console.log(cleanDomain(r)))
 
@@ -304,6 +356,53 @@ export function userAgentStr() {
   return navigator.userAgentData?.brands?.map(b => b.brand)
   .find(b => !['Not','Chromium','Mozilla'].some(p=>b.startsWith(p)) ) 
   || navigator.userAgent.match(/(\w+)\/([\d.]+)/)?.[1] || 'BrowserX'
+}
+
+
+export const get_weibo_posts = async (user_ids=["1402400261"], cnt=111): Promise<string[]> => {
+  const results: string[] = [];
+    for (const user_id of user_ids) {
+      const ref = `https://m.weibo.cn/api/container/getIndex?containerid=230413${user_id}&page=1&count=${cnt}`;
+      const res = await fetch(ref, { "headers": {// dev tool copy fetch(node.js)
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh-TW;q=0.7,zh;q=0.6,ja;q=0.5,es;q=0.4,fr;q=0.3,ru;q=0.2,de;q=0.1,uk;q=0.1,it;q=0.1",
+        "cache-control": "max-age=0",
+        "priority": "u=0, i",
+        "sec-ch-ua": "\"Chromium\";v=\"142\", \"Opera\";v=\"126\", \"Not_A Brand\";v=\"99\"",
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": "\"Windows\"",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "same-origin",
+        "upgrade-insecure-requests": "1",
+        "cookie": "SCF=AqigtxH74D-kQ06yBD0-_eRkrLYN4LoC_gdDqn725iDDC328UA1QnDKxSeatUd6qyJQTyWNGipg3sCeVjIoT-zA.; SUB=_2A25EkqhGDeRhGedH6lAV9CnEwjyIHXVn0aWOrDV6PUJbktANLUTXkW1NUPW8e4oCGLvJ-etCNBejKlSubB5pl8bA; SUBP=0033WrSXqPxfM725Ws9jqgMF55529P9D9WFnX-7ZxAreXuIO.To0n_fv5JpX5KMhUgL.Fo24eKzXShMR1K52dJLoIEMLxK-LBK2L1K2LxKqL1KqL1K.LxKqL1h.L1-zLxK-LB-BL1KWbIg7t; SSOLoginState=1771493398; ALF=1774085398; WEIBOCN_FROM=1110006030; MLOGIN=1; _T_WM=29857790721; XSRF-TOKEN=f0b169; M_WEIBOCN_PARAMS=luicode%3D10000011%26lfid%3D2304131402400261"
+      },
+      "body": null,
+      "method": "GET"
+    })
+    // console.debug(res)
+    const tt = await res.text();
+    // console.debug(tt.substring(0, 55)); // 如果看到 <!DOCTYPE html>，代表你被踢回登入頁了
+    // console.debug(JSON.parse(tt)); // 如果看到 <!DOCTYPE html>，代表你被踢回登入頁了
+    const js = JSON.parse(tt) // await res.json();
+    const cards: any[] = js?.data?.cards ?? [];
+    
+    // Each card with card_type==9 is a weibo post; take the first one
+    const latest = cards.find((c) => c.card_type === 9);
+    if (latest?.mblog?.text) {
+      // Strip HTML tags from text
+      const text = latest.mblog.text.replace(/<[^>]+>/g, "").trim();
+      results.push(`${user_id}: ${text}`);
+    } else {
+      results.push(`${user_id}: (no post found)`);
+    }
+    const randomSleep_weibo = () => {
+      const ms = Math.floor(Math.random() * 3000) + 1000; // 1 to 4 seconds
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+    randomSleep_weibo()
+  }
+  return results;
 }
 // Generics (? lodash)
 export function topFew<T>(k: number, arr: T[]

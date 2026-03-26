@@ -1,9 +1,9 @@
 import React, { RefObject, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion, PanInfo, useMotionValue, useTransform } from 'framer-motion';
-export function DragTag({current, options, onSelect, onLeft=()=>{}, replace: canReplace=false}
+export function DragTag({current, options, onSelect, onLeft=()=>{}, canReplace=false, ...passProps}
   :{current:string, options:string[]
     , onSelect:(item:string, prev:string)=>void
-    , onLeft?:(item:string)=>void, replace?:boolean }){
+    , onLeft?:(item:string)=>void, canReplace?:boolean, drag?:string|boolean }){
   const [isOpen, setIsOpen] = useState(false);
   const [isLeft, set_isLeft] = useState(false);
   const [isRight, set_isRight] = useState(false);
@@ -80,16 +80,17 @@ export function DragTag({current, options, onSelect, onLeft=()=>{}, replace: can
     <AnimatePresence>
     <div ref={ref} onPointerOver={() => setIsOpen(true)} style={{ display: 'flex', flexDirection: 'column'
     ,zIndex: 20 , alignItems: 'flex-end', position: 'relative', cursor: 'pointer' }}>
-      <motion.button dragSnapToOrigin={true}
-        drag="x" dragConstraints={{ left: -55, right: 55 }} dragElastic={0.1}
+      <motion.button dragSnapToOrigin={true} {...passProps} // drag "x" / false
+        dragConstraints={{ left: -55, right: 55 }} dragElastic={0.1}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd} //whileTap={{ scale: 0.9 }}
         // whileDrag={{ cursor:'grabbing',scale: 1.05, boxShadow: "0px 10px 20px rgba(0,0,0,0.3)" }}
         // {{ opacity: 0.8, backdropFilter: "blur(4px)", zIndex:333 }}
         style={{ display:'flex',flexDirection:'row',  padding: '0.5rem 1.5rem',borderRadius:'50vh',
           borderWidth, borderStyle:'solid' }} > 
-        {selected}<div onPointerDownCapture={(e) => e.stopPropagation()} 
-        onClick={()=>onLeft(current)}>🖉{isLeft && "..."}</div> {" "}
+           {selected} {isLeft && "..."} 
+        <div onPointerDownCapture={(e) => e.stopPropagation()} style={{paddingLeft:'7px'}}
+        onClick={()=>onLeft(current)}> &#x2710;&#xFE0F; </div>
         
       </motion.button> 
       {isOpen && (

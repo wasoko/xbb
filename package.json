@@ -4,9 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "clean": "rm -rf build.out",
     "build": "vite build --base ./",
-    "dev": "vite --host --base ./  -- --watch",
-    "preview": "vite preview"
+    "dev": "vite --base ./ --host 0.0.0.0  -- --watch ### https://share.google/aimode/i0TLb0scRlD2oWEp1",
+	    "test": "bun test",
+    "tsgo:tw": "concurrently --names \"tsgo,tw\" --prefix-colors \"cyan,green\" \"tsgo -p tsconfig.build.json --watch --preserveWatchOutput\" \"tailwindcss -i ./src/app.css -o ./dist/app.css --watch\" ",
+    "preview": "vite preview",
+    "check": "npx biome check --write --error-on-warnings . && tsgo --noEmit  ### && cd packages/web-ui && npm run check",
+    "prepublishOnly": "pnpm run clean && pnpm run build"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.49.10",
@@ -15,18 +20,25 @@
     "cbor-x": "1.6.0",
     "dexie": "^4.2.1",
     "dexie-react-hooks": "^4.2.0",
+    "diff-match-patch": "^1.0.5",
     "es-toolkit": "^1.43.0",
     "framer-motion": "^12.23.26",
     "lodash": "^4.17.21",
     "lucide-react": "^0.548.0",
+    "mdast-util-from-markdown": "^2.0.2",
+    "mdast-util-to-string": "^4.0.0",
     "pako": "^2.1.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-router-dom": "^7.11.0",
-    "three": "^0.170.0"
+    "remark": "^15.0.1",
+    "three": "^0.170.0",
+    "unist-util-visit": "^5.1.0",
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.16",
+    "@types/diff-match-patch": "^1.0.36",
     "@types/lodash": "^4.17.21",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",

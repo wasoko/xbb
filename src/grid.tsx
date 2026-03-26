@@ -8,7 +8,7 @@ import {  flexRender,createColumnHelper,useReactTable,
   SortingState,
 } from '@tanstack/react-table'; // ColumnDef,ColumnFiltersState,getFilteredRowModel,
 import * as idb from './idb'
-import { markdown2tab, sideLog, str2tag, stts, txtref2tab, useDebounce } from './fc';
+import { markdown2tab, md2tag, sideLog, str2tag, stts, useDebounce } from './fc';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { sbg, subRt, upsRt } from './sub';
 import {DragTag} from './dragTag';
@@ -38,7 +38,7 @@ function useLiveTop(){
 // It automatically re-queries and updates whenever:
 // - The parameters (tags or search) change
 // - Relevant data in the database changes
-function useHiRows(search:string,tags:string[],tidNum?:number, tidLoc?:any) {
+function useHiRows(search:string,filters:string[],tidNum?:number, tidLoc?:any) {
   return useLiveQuery(
     async () => {
       // 1. Start with the most restrictive indexed field
@@ -46,29 +46,29 @@ function useHiRows(search:string,tags:string[],tidNum?:number, tidLoc?:any) {
       let str2tid = Number(tidLoc)
       if (str2tid) tidNum = str2tid
       // 2. Filter by tags (using index if 'tags' is a MultiEntry index)
-      if (tags.length > 0) {
-        query = idb.db.tags.where('sts').equals(tags[0])
-        .filter(row=> tags.every(t=> row.sts?.includes(t)));
+      if (filters.length > 0) {
+        query = idb.db.tags.where('sts').equals(filters[0])
+        .filter(row=> filters.every(t=> row.sts?.includes(t)));
       } 
       if (search!=="") query = query  // js custom scan (no index)
         .and(row => {
           // All selected tags must be present (AND logic)
-          const matchesTags = tags.every(tag => row.sts?.includes(tag));
+          const matchesTags = row.sts ? false : row.sts?.includes(search);
           // Text search in 'txt' field (case-insensitive)
           const rowText = row.txt.toLowerCase();
           const terms = (search.match(/"[^"]*"|[^\s]+/g) || [])
             .map(str => str.replace(/^"|"$/g, '').trim().toLowerCase())
           const matchesSearch = terms.every(term => rowText.includes(term));
-          return matchesTags && matchesSearch;
+          return matchesTags || matchesSearch;
         })
       else if (tidNum==-1) 
         return sideLog('live 555',await query.reverse().limit(222).toArray()) satisfies HiRow[]
       else if (tidNum) 
         return (await idb.getRowsAroundTid(tidNum, 33)) satisfies HiRow[]
       // 3. Apply secondary filters (full AND for tags + text search)
-      const res = await query.limit(555).toArray()
+      const res = await query.reverse().limit(555).toArray()
       return res.map(t=>({txt:t.txt, sts:t.sts, ref:t.ref, locTid:t.tid})satisfies HiRow)
-    },  [search,tags,tidNum], [] //re-run when tags or search change, default [] empty prevent undefined
+    },  [search,filters,tidNum], [] //re-run when tags or search change, default [] empty prevent undefined
   );
 }
 
@@ -166,7 +166,7 @@ export function ListTx({ups}) {
   }
   useEffect(()=> {
     const isNotGitHub = !window.location.origin.endsWith('.github.io');
-    if (isNotGitHub && window.location.pathname.startsWith('/sa/'))
+    if (isNotGitHub && window.location.pathname.startsWith('/xbb/'))
       navigate(`/${currentTagsPath || ''}${window.location.search}`, { replace: true })
 
     document.addEventListener('paste', handlePaste);
@@ -207,9 +207,9 @@ export function ListTx({ups}) {
         <div style={{display:'flex', flexDirection:'row', gap: '15px'}}>
           {selectedTags.map(selTag =>
             <DragTag current={selTag} key={selTag} options={[MSG_CROSS,...ttag]}
-             onSelect={repTag} onLeft={editTag} replace={true}/>
-                )} <DragTag current='[Related]' options={ttag} onSelect={(i, p)=> addTag(i)} />
-                <DragTag current='[Add]' options={ttag} onSelect={(i, p)=> addTag(i)} />
+             onSelect={repTag} onLeft={editTag} canReplace={true} drag={"x"}/>
+                )} <DragTag current='&#128161;' options={ttag} onSelect={(i, p)=> addTag(i)} />
+                <DragTag current='&#x2795;' options={ttag} onSelect={(i, p)=> addTag(i)} />
             </div> 
       </div>
       <div style={{overflowX: 'hidden', }}><table>
