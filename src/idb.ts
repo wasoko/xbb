@@ -1,11 +1,13 @@
 import {Dexie} from 'dexie';
 import * as fc from './fc';
 import { countBy } from 'es-toolkit';
-
-export interface Tag { tid?: number, txt: string, ref: string
-  , sts?: string[], ats?:number[] // related tags
-  , dt:Date, type: string } // dt=latest seen b4 save-tags , 'bookmark' | 'history' | 'tab' | 'tag'
+import * as diffmp from 'diff-match-patch'
+export interface Tag { tid?: number, txt: string, ref: string // sync live-->tid less clash
+  , sts?: string[] // no , as `${t.sts}` default join by , (NOTE: largest index space)
+  , dt:Date, type: string, modAt?:Date, rec: Record<string,unknown> } // dt=server dt , 'bookmark' | 'history' | 'tab' | 'tag'
 export const eqTags = (r1: Tag, r2: Tag) => r1.ref === r2.ref && r1.txt === r2.txt && r1.type== r2.type
+export const uniqsTag = (t: Tag) => t.ref+t.type
+export const nopkTag = ({tid:_, ...rest}:any) => rest 
 export const tid_last = async ()=>await db.tags.orderBy(':id').last()
 export async function clean() {
   const now = new Date()
@@ -15,17 +17,6 @@ export async function clean() {
   
   return 0
 }
-export interface Refs {
-
-  id?: number;
-  title: string;
-  /** Array to store the embedding of the title */
-  // embedding?: BigInt[];
-  href: string;
-  dt: Date;
-  type: 'bookmark' | 'history' | 'tab' | 'tag';
-}
-const modelEnum = {'Xenova/bge-small-zh-v1.5':15}
 export const DEF_TREE:{[key:string]: unknown} = { //"cred": "https://PROJECTID.supabase.co|anon"
   "user_browser": "browserX",
   "server": 'https://qhumewjpkzxaltwefqch.supabase.co',
@@ -42,10 +33,10 @@ export class DDB extends Dexie {
   vecs!: Dexie.Table<{ tid: number, mdl: string, vec: Float32Array }>;
   stat!: Dexie.Table<{ tid: number, key: string, value:unknown }>;
   bins!: Dexie.Table<{ key: string, rec: unknown, bin: Uint8Array, addAt?: Date, modAt?:Date}>;
-  refs!: Dexie.Table<Refs>;
 
-  constructor() {
-    super('tagDB_0')
+  constructor(dbName: string = 'tagDB_0') {
+    super(dbName)
+
     this.version(8).stores({  // to infer 2nd generic type
       tree: 'key', // href+title, 
       tags: '++tid, dt, type, *sts, [ref+type]',
@@ -70,22 +61,31 @@ export class DDB extends Dexie {
 
     this.bins.hook('updating', updatingHook)
     this.bins.hook('creating', creatingHook)
-    //.upgrade(async tx=> {});
   }
 }
+export const db = new DDB(); 
+
 export async function getRowsAroundTid(tid: number, n: number) {
   // Get n rows before tid (in reverse order, then reverse back for chronological)
   n = Math.max(3, n)
-  const b4 = await db.tags.where('tid').below(tid).limit(n/2).reverse().toArray()
+  const b4 = await db.tags.where('tid').below(tid).reverse().limit(n/2).toArray()
   const af = await db.tags.where('tid').above(tid).limit(n -n/2 -1).toArray();
   const eq = await db.tags.get(tid)
-  return [...b4.reverse(), eq , ...af] .filter(t=> t!==undefined);
+  return [...af.reverse(), eq , ...b4] .filter(t=> t!==undefined);
 }
-export const db = new DDB(); 
+
+// utils
+export const where_pk_last = (tab: { where: (arg0: string) => { (): any; new(): any; between: { (arg0: any[], arg1: any[]): { (): any; new(): any; last: { (): any; new(): any; }; }; new(): any; }; }; }, pairs: any[]) =>Promise.all(
+  pairs.map((tup: any) => tab.where(':id')
+      .between([...tup, Dexie.minKey], [...tup, Dexie.maxKey])
+      .last() ) )
 
 export const dev_PREFFIX = 'dev_'
 async function stat_tags(){
   let str = ''
+  let cntRef = {}
+  ;(await db.tags.orderBy('[ref+type]').keys()).forEach(k=>  cntRef[k] = 1+(cntRef[k] ??0))
+  // str += `dup ref+type: ` + Object.entries( cntRef).filter(([k,v]) => v >1).map(kv =>kv[0]).join()
   const dts = await db.tags.orderBy('dt').reverse().limit(11).uniqueKeys()
   if (dts.length==0) return str
   str += ` updated ${fc.diffDays(new Date(), dts[0]).toFixed(2)} days ago`
@@ -141,7 +141,7 @@ export function diffTags( ts:Tag[], dl:Tag[]) {
   if (ts.length>0) {
     const tag2str=(t:Tag) => `${t.ref}|${t.txt}|${t.type}|${t.sts}` // for now ignore |${t.ats} 
     const tsSet = new Set(ts.map(tag2str))
-    newDL = dl.filter(rt=> ! tsSet.has(tag2str(rt)))
+    newDL = dl.filter(rt=> ! tsSet.has(tag2str(rt)))  // any diff, except rec
     if (newDL.length >33)
       console.log(`${newDL.length} diff in idb`)
     else
@@ -155,4 +155,37 @@ export function diffTags( ts:Tag[], dl:Tag[]) {
     }
   }
   return { newDL, clash, ts}
+}
+export function patchMod(base: Tag, b4mod: unknown, mod: Tag): any {
+  if (!b4mod) return base
+  const dmp = new diffmp.diff_match_patch()
+  base.txt = dmp.patch_apply(dmp.patch_make(b4mod.txt, mod.txt), base.txt)[0]
+  base.sts = dmp.patch_apply(dmp.patch_make(
+    `${b4mod.sts??[]}`, `${mod.sts??[]}`), `${base.txt}`)[0].split(',')
+  return base
+}
+export function deepMerge(rin: Tag, rl:Tag) {
+  const [newer,older] = rin.dt >rl.dt ? [rin,rl] : [rl,rin]  // TODO if local modAt, patch
+  const seq = [... (rin.rec.seq as any[] ??[]), ...(rl.rec.seq as any[] ??[])]
+  const deduped = [ ...Object.values(Object.fromEntries(seq.map(item => [item.dt, item]))).reverse()]
+  deduped.unshift(({dt: older.dt, txt: older.txt, sts: older.sts}))
+  const {rec, ...b4mod} = Dexie.deepClone(newer)
+  if (older.modAt) patchMod(newer, older.rec.b4mod, older)
+  if (newer.modAt) patchMod(newer, newer.rec.b4mod, newer)
+  rec.seq = deduped
+  rec.b4mod = b4mod
+  return {...newer, rec, modAt: new Date()}
+}
+export async function bulkMerge(clash: Tag[]) {
+  const puts:Tag[] = []
+  const tid2row = Object.fromEntries(clash.map(row=> [row.tid, row]))
+  await db.tags.where(':id').anyOf(tid2row.keys() ).modify((live_row) => {
+    let in_row = tid2row[live_row.tid!]
+    if (uniqsTag(live_row)=== uniqsTag(in_row))
+      in_row = deepMerge(in_row, live_row)
+    else puts.push( {...nopkTag(Dexie.deepClone(live_row)), modAt:new Date()})
+    Object.assign(live_row, in_row)
+    live_row.modAt = new Date()
+    delete tid2row[live_row.tid!]
+  })
 }

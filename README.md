@@ -1,13 +1,11 @@
-# Attention Map - 小本本 Xiao-Ben-Ben ddxbb.cc
-
-## Purpose
-- Attention e.g. urls saved on s3, topic/note/markdown synced realtime
-- Map views of context/purpose pinned/grouped/embedded
+# 小本本 Xiao-Ben-Ben ddxbb.cc
+urls/titles saved on dexie
 
 ## Development
 
 ```bash
-npm install
-npm run dev
+pnpm install
+pnpm dev
+pnpm test  # End-to-end playwright via CDP localhost:9222
+
 ```
-End-to-end test in playwright at localhost:9222

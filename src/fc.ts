@@ -9,6 +9,7 @@ import * as pako from 'pako';
 import { useEffect, useState } from 'react';
 export const isTEST = 0
 export const isUT = "undefined" !=  typeof UNIT_TEST
+export const inChrome = "undefined" !=  typeof chrome
 export type Result<T, E> = { ok: true; value: T } | { ok: false; error: E }
 export const HF_OR = [  //'Xenova/jina-embeddings-v2-base-zh',
   // https://developer.volcengine.com/articles/7382408396873400371
@@ -78,6 +79,7 @@ if(isTEST) {let text = ` ## Heading __strong__ \`inlineCode\`
 export function reAddCB(callback:
   (message: any, sender: chrome.runtime.MessageSender, sendResponse: (response?: any) => void) => void
 ) {
+  if (!inChrome) return
   chrome.runtime.onMessage.removeListener(callback)
   chrome.runtime.onMessage.addListener(callback)
 }
@@ -96,10 +98,12 @@ export const stts = (str: string, scope = '') => {
     console.error(str);
   console.info(str);
   sttsCB({type: 'stts'+scope, stts: str})
-  if (chrome.runtime) chrome.runtime.sendMessage({type:'stts'+scope,stts:str})  // FIXME avoid recur
-  if (chrome.storage) chrome.storage.session.get({[stKey]:''}).then((items) => {
-    if (str!='')chrome.storage.session.set({[stKey]: items[stKey] + str})
-    })
+  if (inChrome) {
+    if (chrome.runtime) chrome.runtime.sendMessage({type:'stts'+scope,stts:str})  // FIXME avoid recur
+    if (chrome.storage) chrome.storage.session.get({[stKey]:''}).then((items) => {
+      if (str!='')chrome.storage.session.set({[stKey]: items[stKey] + str})
+      })
+  }
   return str;
 }
 export const scrollToTbodyN = (tbodyRef: React.RefObject<HTMLTableSectionElement>, n:number) => {
@@ -341,8 +345,8 @@ export function nowWarn(start: DOMHighResTimeStamp, scope:string, note='', msWar
     console.warn(`${scope} ${d.toLocaleString('en-US')} ms - ${note}`)
   const key = `log-maxTime ${scope}`
   const kl = `log-xTime ${scope}`
-  if ('undefined'!== typeof chrome) 
-    if('undefined'!== typeof chrome.storage) {
+  if (inChrome) 
+    if(chrome.storage) {
     chrome.storage.session.get(key).then(kv=> {
       if (kv && kv[key]) if (d > kv[key]) chrome.storage.session.set({[key]:d})
       })

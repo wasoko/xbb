@@ -6,8 +6,8 @@
   "scripts": {
     "clean": "rm -rf build.out",
     "build": "vite build --base ./",
-    "dev": "vite --base ./ --host 0.0.0.0  -- --watch ### https://share.google/aimode/i0TLb0scRlD2oWEp1",
-	    "test": "bun test",
+    "dev": "vite --base ./ --host 0.0.0.0  -- --watch  2>&1 | tee dist.log ### https://share.google/aimode/i0TLb0scRlD2oWEp1 ",
+    "test": "vitest 2>&1 | tee test.log",
     "tsgo:tw": "concurrently --names \"tsgo,tw\" --prefix-colors \"cyan,green\" \"tsgo -p tsconfig.build.json --watch --preserveWatchOutput\" \"tailwindcss -i ./src/app.css -o ./dist/app.css --watch\" ",
     "preview": "vite preview",
     "check": "npx biome check --write --error-on-warnings . && tsgo --noEmit  ### && cd packages/web-ui && npm run check",
@@ -34,7 +34,8 @@
     "remark": "^15.0.1",
     "three": "^0.170.0",
     "unist-util-visit": "^5.1.0",
-    "uuid": "^13.0.0"
+    "uuid": "^13.0.0",
+    "yaml": "^2.8.3"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.16",
@@ -43,11 +44,17 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@types/three": "^0.170.0",
+    "@vitest/ui": "^4.1.4",
     "cross-env": "^7.0.3",
+    "dotenv": "^17.4.2",
     "esbuild": "^0.24.0",
+    "happy-dom": "^20.8.9",
+    "jsdom": "^29.0.2",
+    "playwright": "^1.58.2",
     "supabase": "2.62.10",
     "tailwindcss": "4",
     "typescript": "^5.9.3",
-    "vite": "^7.1.12"
+    "vite": "^7.1.12",
+    "vitest": "^4.1.4"
   }
 }
