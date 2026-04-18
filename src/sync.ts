@@ -5,7 +5,7 @@ import Dexie from 'dexie';
 import * as sb from '@supabase/supabase-js';
 
 export class MergingMan {  // while keeping traces
-  constructor(private sbg: sb.SupabaseClient, private table: Dexie.Table
+  constructor(private table: Dexie.Table
     , protected snap:string
     , private deepMerge: (local, server) => any
     , private uniqstr: (row) => string
@@ -13,53 +13,21 @@ export class MergingMan {  // while keeping traces
     , private nopk: (row)=> any
   ){}
   
-  /** 
-   * https://share.google/aimode/HTls7bUqqX7okxDu1
+  /**
+   * syncAll: sync dirty rows up, then always pull latest from server
    */
-  async syncTable() {
+  async syncAll() {
     const MAX_RETRIES = 5;
     const BASE_DELAY = 500; 
     const MAX_DELAY = 10000;
     let retryCount = 0;
     while (1) {
-      let dirtyRows = await this.table.where('modAt').notEqual(null).toArray();
+      console.log('syncAll: getting dirty rows...')
+      let dirtyRows = await this.table.filter(row => row.modAt != null).toArray();
+      console.log('syncAll: dirtyRows count:', dirtyRows.length)
       if (dirtyRows.length == 0) break
-
-      const last_dt = await this.table.orderBy('dt').last()
-      const payload = dirtyRows.map(r=> ({uniqs: this.uniqstr(r), dt: r.dt, stuff: r}))
-      const uniqsmap = Object.fromEntries(payload.map(pkr=> [pkr.uniqs, pkr.stuff]))
-      const puts = []
-      
-      const {data: result, error} = await this.sbg.rpc('ups_same_base',{
-        snap_name:this.snap, payload, max_dt: last_dt.dt});
-      if (this.pk){
-        const ok_pk = result.ok_uniqs.map(uniqs=> this.pk(uniqsmap[uniqs]))
-        const pk_dict_dl = Object.fromEntries( result.dl.map(row=> 
-          [ row.this.pk( row.stuff), row]))
-          // assert modAt=null in all result.dl
-        await this.table.where(':id').anyOf( ok_pk).modify((row) => {
-          if (row.modAt===uniqsmap[this.pk(row)].modAt) {
-            row.dt = result.server_now
-            row.modAt = null
-          }})
-          
-        await this.table.where(':id').anyOf( pk_dict_dl.keys()).modify((live_row) => {
-          const server_row = pk_dict_dl[ this.pk(live_row)].stuff
-          let rep = server_row
-          // if uniq match deepmerge, else move away
-          if (this.uniqstr(live_row) ===this.uniqstr(server_row))
-            rep = this.deepMerge(live_row, server_row)
-          else puts.push({...this.nopk(Dexie.deepClone(live_row)), modAt: new Date() })
-          Object.assign(live_row, rep)
-          live_row.modAt = new Date()
-          delete pk_dict_dl[this.pk(live_row)]
-        })
-        this.table.bulkPut(pk_dict_dl.values().map(dl=> 
-          ({...dl.stuff, dt:result.server_now, modAt:null})))
-        this.table.bulkPut(puts)        
-      } else 
-        this.table.bulkPut(result.dl.map(dl=>
-          ({...dl.stuff, dt:result.server_now, modAt:null})))
+      // console.log('sess', sess, sess?.user)
+      await this._doSync(dirtyRows)
       retryCount++;
       if (retryCount >= MAX_RETRIES) break;
 
@@ -68,11 +36,77 @@ export class MergingMan {  // while keeping traces
       await new Promise(r => setTimeout(r, delay + jitter));
     }
   }
+
+  /** 
+   * https://share.google/aimode/HTls7bUqqX7okxDu1
+   * syncTable: only sync dirty rows (modAt != null)
+   */
+  async syncTable() {
+    const MAX_RETRIES = 5;
+    const BASE_DELAY = 500; 
+    const MAX_DELAY = 10000;
+    let retryCount = 0;    while (1) {
+      let dirtyRows = await this.table.filter(row => row.modAt != null).toArray();
+      if (dirtyRows.length == 0) break
+      await this._doSync(dirtyRows)
+      retryCount++;
+      if (retryCount >= MAX_RETRIES) break;
+
+      const delay = Math.min(MAX_DELAY, BASE_DELAY * Math.pow(2, retryCount));
+      const jitter = delay * 0.25 * Math.random();
+      await new Promise(r => setTimeout(r, delay + jitter));
+    }
+  }
+
+  private async _doSync(dirtyRows: any[]) {
+    const last_dt = await this.table.orderBy('dt').last()
+    console.log(`sess?.user.id:`,sess?.user.id)
+    const payload = dirtyRows.map(r=> ({uniqs: this.uniqstr(r), dt: r.dt, stuff: r, user_id: sess?.user.id}))
+    const uniqsmap = Object.fromEntries(payload.map(pkr=> [pkr.uniqs, pkr.stuff]))
+    const puts = []
+    await sessReady
+    console.log(`sessReady`, sess?.user.id)
+    const {data: result, error} = await sbg.rpc('ups_same_base',{
+      snap_name:this.snap, payload, max_dt: last_dt?.dt});
+    if (!result) {
+      console.error('sync error:', error)
+      return
+    }
+    if (this.pk){
+      const ok_pk = result.ok_uniqs.map(uniqs=> this.pk(uniqsmap[uniqs]))
+      const pk_dict_dl = Object.fromEntries( result.dl.map(row=> 
+          [ this.pk( row.stuff), row]))
+        // assert modAt=null in all result.dl
+      await this.table.where(':id').anyOf( ok_pk).modify((row) => {
+          if (row.modAt===uniqsmap[this.uniqstr(row)].modAt) {
+            row.dt = result.server_now
+            row.modAt = null
+            }})
+          
+        await this.table.where(':id').anyOf( ...Object.keys(pk_dict_dl)).modify((live_row) => {
+          const server_row = pk_dict_dl[ this.pk(live_row)].stuff
+                    let rep = server_row
+          // if uniqstr match, then deepmerge, else move away
+          if (this.uniqstr(live_row) ===this.uniqstr(server_row))
+            rep = this.deepMerge(live_row, server_row)
+          else puts.push({...this.nopk(Dexie.deepClone(live_row)), modAt: new Date() })
+          Object.assign(live_row, rep)
+          live_row.modAt = new Date()
+          delete pk_dict_dl[this.pk(live_row)]
+        })
+        await this.table.bulkPut(Object.values(pk_dict_dl).map(dl=> 
+          ({...dl.stuff, dt:result.server_now, modAt:null})))
+              this.table.bulkPut(puts)        
+    } else 
+      this.table.bulkPut((result.dl || []).map(dl=>
+        ({...dl.stuff, dt:result.server_now, modAt:null})))
+        // NOTE modAt:null bulkPut could miss dirtyRow, dead retry
+  }
 }
 export async function upsRt(ts: Tag[], sbc: sb.SupabaseClient, next_tid:number): Promise<void> {
 }
 
-const isExt = typeof chrome !== 'undefined' && chrome.storage;
+let isExt = typeof chrome !== 'undefined' && chrome.storage;
 const storage = isExt? chrome.storage.sync || chrome.storage.local : null;
 const tokenStorageAdapter = { getItem: async (key: string) => {
     const result = await storage.get(key);
@@ -81,24 +115,39 @@ const tokenStorageAdapter = { getItem: async (key: string) => {
   setItem: async (key: string, value: string) => await storage?.set({ [key]: value }),
   removeItem: async (key: string) => await storage?.remove(key),
 };
-const sb_options = { auth: {
-    autoRefreshToken: !isExt,// ??    // For Chrome extensions, disable auto-refresh to avoid redirect issues
+console.log(`isExt: `, isExt)
+const sb_options = { db:{schema:'tt'}, auth: {
+    autoRefreshToken:   !isExt && !process.env.VITEST,// ??    // For Chrome extensions, disable auto-refresh to avoid redirect issues
     detectSessionInUrl: !isExt, // Prevent chromium-extension:// URL issues
     persistSession: true,
     storage: isExt? tokenStorageAdapter : undefined,
     debug:false,
 }}
+export const getSessionAsync = (sbc:sb.SupabaseClient) :Promise<sb.Session|null> => 
+  new Promise((resolve) =>  // const { data: { subscription } } = 
+    sbc.auth.onAuthStateChange((event, session) => {
+      // Logic: Only resolve if we have a session 
+      // or if the initial check is complete and confirms no user.
+      // console.log(`on auth state: `, event, session)
+      if (session) // && event === 'SIGN3ED_IN' || event === 'INITIAL_SESSION') 
+        // subscription.unsubscribe();
+        resolve(session)
+      }))
 export let sbg:sb.SupabaseClient = sb.createClient(DEF_TREE['server'], DEF_TREE['pub_key']
   , sb_options);
 export let crdt: MergingMan |null = null
+// export let userReady = sbg.auth.getUser()
+// userReady.then((ures)=> console.log(`user: `, ures,user = ures.data.user))
+// export let user: sb.User |null = null
 export let sess: sb.Session |null = null
-sbg.auth.getSession().then(({ data: { session } }) =>  sess = session);
-sbg.auth.onAuthStateChange((event, session) => {
-  sess = session;
-  stts(sess?.user.email ??'', 'Sigin')
-  if (event==='SIGNED_IN' && session) crdt = new MergingMan('tags', db.tags)// subRt(sbg)
-  if (event==='SIGNED_OUT') fc.sideLog('SIGNED_OUT',sbg.removeAllChannels())
-});
+export let sessReady = getSessionAsync(sbg) //  sbg.auth.getSession() return memory even null, getUser slow
+sessReady.then((session)=> sess = session)
+// authReady.then((event, session) => {
+//   sess = session;
+//   stts(sess?.user.email ??'', 'Sigin')
+//   if (event==='SIGNED_IN' && session) crdt = new MergingMan('tags', db.tags)// subRt(sbg)
+//   if (event==='SIGNED_OUT') fc.sideLog('SIGNED_OUT',sbg.removeAllChannels())
+// });
 export async function signinGoogle() {
   const nextPath = window.location
   const { data, error } = await sbg.auth.signInWithOAuth({

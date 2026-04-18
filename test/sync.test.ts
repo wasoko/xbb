@@ -4,14 +4,15 @@
 import { createClient } from '@supabase/supabase-js';
 import { it, expect, beforeAll, describe } from 'vitest';
 import * as sc from '../src/sync'
-import { setupSB } from './global-setup';
+import { setSessSB } from './global-setup';
 
 const supabase = sc.sbg;
 
 
 describe('sync idb', ()=> {
   beforeAll(async () => {
-    const result = await setupSB();
+    // console.log('sc.sbg: ',sc.sbg)
+    const result = await setSessSB(sc.sbg);
   })
   
 describe('supabase get session', ()=> {

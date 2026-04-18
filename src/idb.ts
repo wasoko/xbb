@@ -179,7 +179,8 @@ export function deepMerge(rin: Tag, rl:Tag) {
 export async function bulkMerge(clash: Tag[]) {
   const puts:Tag[] = []
   const tid2row = Object.fromEntries(clash.map(row=> [row.tid, row]))
-  await db.tags.where(':id').anyOf(tid2row.keys() ).modify((live_row) => {
+  const tidSet = new Set(clash.map(row=> row.tid))
+  await db.tags.filter(row=> tidSet.has(row.tid)).modify((live_row) => {
     let in_row = tid2row[live_row.tid!]
     if (uniqsTag(live_row)=== uniqsTag(in_row))
       in_row = deepMerge(in_row, live_row)

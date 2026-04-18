@@ -1,72 +1,73 @@
 /**
  * @vitest-environment happy-dom
  */
+import 'fake-indexeddb/auto';
 import {Tag, deepMerge, patchMod} from '../src/idb'
 import { md2row, yaml2md } from '../src/conv_md_yaml';
 import * as idb from '../src/idb'
 import * as sc from '../src/sync'
 import { describe, it, expect, beforeAll } from 'vitest';
 import diff_match_patch from 'diff-match-patch'; // Assume installed via npm i diff-match-patch
-import { setupSB } from './global-setup';
-
-// // Mock Dexie.deepClone for testing (simple JSON clone, assuming no circular references)
-// const Dexie = {
-//   deepClone: (obj: any) => JSON.parse(JSON.stringify(obj)),
-// };
-// // Define Tag interface based on usage in the code, with dt as Date
-// interface Tag {
-//   dt: Date;
-//   txt: string;
-//   sts: string[];
-//   rec: {
-//     seq: { dt: Date; txt: string; sts: string[] }[];
-//     b4mod?: Pick<Tag, 'dt' | 'txt' | 'sts' | 'modAt'>;
-//   };
-//   modAt?: Date;
-// }
-
-// function patchMod(base: Tag, b4mod: unknown, mod: Tag): any {
-//   if (!b4mod) return base
-//   const dmp = new diffmp.diff_match_patch()
-//   base.txt = dmp.patch_apply(dmp.patch_make(b4mod.txt, mod.txt), base.txt)[0]
-//   base.sts = dmp.patch_apply(dmp.patch_make(
-//     `${b4mod.sts??[]}`, `${mod.sts??[]}`), `${base.txt}`)[0].split(',')
-//   return base
-// }
-// export function deepMerge(rin: Tag, rl:Tag) {
-//   const [newer,older] = rin.dt >rl.dt ? [rin,rl] : [rl,rin]  // TODO if local modAt, patch
-//   const seq = [... (rin.rec.seq as any[] ??[]), ...(rl.rec.seq as any[] ??[])]
-//   const deduped = [ ...Object.values(Object.fromEntries(seq.map(item => [item.dt, item]))).reverse()]
-//   deduped.unshift(({dt: older.dt, txt: older.txt, sts: older.sts}))
-//   const {rec, ...b4mod} = Dexie.deepClone(newer)
-//   if (older.modAt) patchMod(newer, older.rec.b4mod, older)
-//   if (newer.modAt) patchMod(newer, newer.rec.b4mod, newer)
-//   rec.seq = deduped
-//   rec.b4mod = b4mod
-//   return {...newer, rec, modAt: new Date()}
-// }
+import { setSessSB } from './global-setup';
 
 describe('sync idb', ()=> {
   beforeAll(async () => {
-    const result = await setupSB();
+    const result = await setSessSB(sc.sbg);
   })
   describe('multi db sync via test snap', () => {
-    it('both db equal', () => {
+    it('both db equal', async () => {
       const src = new idb.DDB('test_src');
       const des = new idb.DDB('test_des');
       
-      // show existing in src.tags vs des.tags
+      // clear both test databases
+      await src.tags.clear();
+      await des.tags.clear();
 
-      const smm = new sc.MergingMan(sc.sbg, src.tags, 'test-tags'
+      const smm = new sc.MergingMan(src.tags, 'test-tags'
         , idb.deepMerge, idb.uniqsTag, (r:Tag)=>r.tid,idb.nopkTag)
-      const dmm = new sc.MergingMan(sc.sbg, des.tags, 'test-tags'
+      const dmm = new sc.MergingMan(des.tags, 'test-tags'
         , idb.deepMerge, idb.uniqsTag, (r:Tag)=>r.tid,idb.nopkTag)
         
-      expect(des.tags).toEqual(src.tags);
-      //add test dirty rows to src.tags
+      // add test dirty rows to src.tags
+      const testRows: Tag[] = [
+        { tid: 1, txt: 'test tag 1', ref: 'ref1', type: 'tag', sts: ['a'], dt: new Date(), modAt: new Date(), rec: {} },
+        { tid: 2, txt: 'test tag 2', ref: 'ref2', type: 'tag', sts: ['b'], dt: new Date(), modAt: new Date(), rec: {} },
+      ];
+      await src.tags.bulkPut(testRows);
 
-      expect(des.tags).toEqual(src.tags);
-    });
+      // Mock the RPC call to simulate server response
+      // const originalRpc = sc.sbg.rpc.bind(sc.sbg);
+      // sc.sbg.rpc = async (fn: string, params: any) => {
+      //   if (fn === 'ups_same_base') {
+      //     // Simulate successful upload and return the uploaded rows as "downloaded"
+      //     const payload = params.payload || [];
+      //     return {
+      //       data: {
+      //         ok_uniqs: payload.map((p: any) => p.uniqs),
+      //         dl: payload.map((p: any) => ({ this: { pk: (r: any) => r.tid }, stuff: { ...p.stuff, modAt: null } })),
+      //         server_now: new Date()
+      //       },
+      //       error: null
+      //     };
+      //   }
+      //   return originalRpc(fn, params);
+      // };
+
+      // sync src up to server
+      await smm.syncAll();
+
+      // sync des down from server
+      await dmm.syncAll();
+      
+      // compare actual data, not Table objects
+      const srcData = await src.tags.toArray();
+      const desData = await des.tags.toArray();
+      
+      expect(desData.length).toBe(srcData.length);
+      // Note: dt and modAt may differ slightly due to server timestamp
+      expect(desData.map(d => ({ tid: d.tid, txt: d.txt, ref: d.ref, type: d.type, sts: d.sts })))
+        .toEqual(srcData.map(d => ({ tid: d.tid, txt: d.txt, ref: d.ref, type: d.type, sts: d.sts })));
+    },);
   })
 })
 describe('md2row', ()=>{
