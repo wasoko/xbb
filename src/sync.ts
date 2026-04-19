@@ -15,6 +15,7 @@ export class MergingMan {  // while keeping traces
   
   /**
    * syncAll: sync dirty rows up, then always pull latest from server
+   * https://share.google/aimode/HTls7bUqqX7okxDu1
    */
   async syncAll() {
     const MAX_RETRIES = 5;
@@ -24,31 +25,10 @@ export class MergingMan {  // while keeping traces
     while (1) {
       console.log('syncAll: getting dirty rows...')
       let dirtyRows = await this.table.filter(row => row.modAt != null).toArray();
-      console.log('syncAll: dirtyRows count:', dirtyRows.length)
-      if (dirtyRows.length == 0) break
+      console.debug('syncAll: dirtyRows count:', dirtyRows.length)
       // console.log('sess', sess, sess?.user)
-      await this._doSync(dirtyRows)
-      retryCount++;
-      if (retryCount >= MAX_RETRIES) break;
-
-      const delay = Math.min(MAX_DELAY, BASE_DELAY * Math.pow(2, retryCount));
-      const jitter = delay * 0.25 * Math.random();
-      await new Promise(r => setTimeout(r, delay + jitter));
-    }
-  }
-
-  /** 
-   * https://share.google/aimode/HTls7bUqqX7okxDu1
-   * syncTable: only sync dirty rows (modAt != null)
-   */
-  async syncTable() {
-    const MAX_RETRIES = 5;
-    const BASE_DELAY = 500; 
-    const MAX_DELAY = 10000;
-    let retryCount = 0;    while (1) {
-      let dirtyRows = await this.table.filter(row => row.modAt != null).toArray();
-      if (dirtyRows.length == 0) break
-      await this._doSync(dirtyRows)
+      const res = await this._doSync(dirtyRows)
+      if (res.dl.length==0) break
       retryCount++;
       if (retryCount >= MAX_RETRIES) break;
 
@@ -59,15 +39,19 @@ export class MergingMan {  // while keeping traces
   }
 
   private async _doSync(dirtyRows: any[]) {
+    console.debug(`_doSync START: dirtyRows.length=${dirtyRows.length}, snap=${this.snap}`)
     const last_dt = await this.table.orderBy('dt').last()
-    console.log(`sess?.user.id:`,sess?.user.id)
+    console.debug(`_doSync: last_dt=`, last_dt)
+    console.debug(`_doSync: sess?.user.id:`, sess?.user.id)
     const payload = dirtyRows.map(r=> ({uniqs: this.uniqstr(r), dt: r.dt, stuff: r, user_id: sess?.user.id}))
+    console.debug(`_doSync: payload.length=`, payload.length)
     const uniqsmap = Object.fromEntries(payload.map(pkr=> [pkr.uniqs, pkr.stuff]))
     const puts = []
     await sessReady
-    console.log(`sessReady`, sess?.user.id)
+    console.log(`_doSync: sessReady, user.id=`, sess?.user.id)
     const {data: result, error} = await sbg.rpc('ups_same_base',{
       snap_name:this.snap, payload, max_dt: last_dt?.dt});
+    console.debug(`_doSync: RPC result:`, {ok_uniqs_count: result?.ok_uniqs?.length, dl_count: result?.dl?.length, server_now: result?.server_now})
     if (!result) {
       console.error('sync error:', error)
       return
@@ -101,9 +85,8 @@ export class MergingMan {  // while keeping traces
       this.table.bulkPut((result.dl || []).map(dl=>
         ({...dl.stuff, dt:result.server_now, modAt:null})))
         // NOTE modAt:null bulkPut could miss dirtyRow, dead retry
+    return result
   }
-}
-export async function upsRt(ts: Tag[], sbc: sb.SupabaseClient, next_tid:number): Promise<void> {
 }
 
 let isExt = typeof chrome !== 'undefined' && chrome.storage;
