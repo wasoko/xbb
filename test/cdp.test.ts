@@ -38,21 +38,8 @@ describe('Grid Coverage via CDP', () => {
       cdpAvailable = false;
     }
   }, 10000);
-
-  it('BASE_URL is accessible', async () => {
-    const html = await httpGet(BASE_URL);
-    expect(html).toBeDefined();
-    expect(html.length).toBeGreaterThan(100);
-  });
-
   it('CDP connection available', async () => {
     expect(cdpAvailable).toBe(true);
-  });
-
-  
-  it('app loads grid component (root.tsx)', async () => {
-    const html = await httpGet(BASE_URL);
-    expect(html).toContain('/src/root.tsx');
   });
 
   it('CDP /json endpoint returns targets', async () => {

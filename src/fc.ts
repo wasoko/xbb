@@ -312,6 +312,49 @@ export async function dl(fileApi:any, obj_path: string) {
   nowWarn(start, `dl`,`${obj_path}`)
   return decZip(new Uint8Array(buf ?? new Uint8Array()))
 }
+/**
+ * Recursively merges two objects/arrays up to a specified depth.
+ */
+export function recMerge<T>(target: T, source: any, depth: number = Infinity): T {
+  // If we hit depth 0, we perform a shallow merge (arrays/objects from source overwritten by target)
+  if (depth <= 0) {
+    return { ...target, ...source };
+  }
+
+  // Case 1: Both are Arrays -> Concatenate
+  if (Array.isArray(target) && Array.isArray(source)) {
+    return [...target, ...source] as any;
+  }
+
+  // Case 2: Both are Objects -> Recurse
+  if (isObject(target) && isObject(source)) {
+    const output = { ...target } as any;
+
+    Object.keys(source).forEach((key) => {
+      const targetValue = (target as any)[key];
+      const sourceValue = source[key];
+
+      if (
+        (isObject(targetValue) && isObject(sourceValue)) || 
+        (Array.isArray(targetValue) && Array.isArray(sourceValue))
+      ) {
+        // If both are objects or both are arrays, dive deeper
+        output[key] = recMerge(targetValue, sourceValue, depth - 1);
+      } else {
+        // Otherwise (primitives or mismatched types), source wins
+        output[key] = sourceValue;
+      }
+    });
+
+    return output;
+  }
+
+  // Case 3: Mismatched types or primitives -> source wins
+  return source;
+}
+const isObject = (item: any): item is Record<string, any> => {
+  return item && typeof item === 'object' && !Array.isArray(item);
+};
 // export const pick = <T, K extends keyof T>(obj: T, keys: K[]): Pick<T, K> =>
 //   Object.fromEntries(
 //     keys.filter(key => key in obj).map(key => [key, obj[key]])

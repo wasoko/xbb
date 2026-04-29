@@ -4,90 +4,6 @@ import {DEF_TREE, Tag, db} from './idb'
 import Dexie from 'dexie';
 import * as sb from '@supabase/supabase-js';
 
-export class MergingMan {  // while keeping traces
-  constructor(private table: Dexie.Table
-    , protected snap:string
-    , private deepMerge: (local, server) => any
-    , private uniqstr: (row) => string
-    , private pk: (row)=> any
-    , private nopk: (row)=> any
-  ){}
-  
-  /**
-   * syncAll: sync dirty rows up, then always pull latest from server
-   * https://share.google/aimode/HTls7bUqqX7okxDu1
-   */
-  async syncAll() {
-    const MAX_RETRIES = 5;
-    const BASE_DELAY = 500; 
-    const MAX_DELAY = 10000;
-    let retryCount = 0;
-    while (1) {
-      console.log('syncAll: getting dirty rows...')
-      let dirtyRows = await this.table.filter(row => row.modAt != null).toArray();
-      console.debug('syncAll: dirtyRows count:', dirtyRows.length)
-      // console.log('sess', sess, sess?.user)
-      const res = await this._doSync(dirtyRows)
-      if (res.dl.length==0) break
-      retryCount++;
-      if (retryCount >= MAX_RETRIES) break;
-
-      const delay = Math.min(MAX_DELAY, BASE_DELAY * Math.pow(2, retryCount));
-      const jitter = delay * 0.25 * Math.random();
-      await new Promise(r => setTimeout(r, delay + jitter));
-    }
-  }
-
-  private async _doSync(dirtyRows: any[]) {
-    console.debug(`_doSync START: dirtyRows.length=${dirtyRows.length}, snap=${this.snap}`)
-    const last_dt = await this.table.orderBy('dt').last()
-    console.debug(`_doSync: last_dt=`, last_dt)
-    console.debug(`_doSync: sess?.user.id:`, sess?.user.id)
-    const payload = dirtyRows.map(r=> ({uniqs: this.uniqstr(r), dt: r.dt, stuff: r, user_id: sess?.user.id}))
-    console.debug(`_doSync: payload.length=`, payload.length)
-    const uniqsmap = Object.fromEntries(payload.map(pkr=> [pkr.uniqs, pkr.stuff]))
-    const puts = []
-    await sessReady
-    console.log(`_doSync: sessReady, user.id=`, sess?.user.id)
-    const {data: result, error} = await sbg.rpc('ups_same_base',{
-      snap_name:this.snap, payload, max_dt: last_dt?.dt});
-    console.debug(`_doSync: RPC result:`, {ok_uniqs_count: result?.ok_uniqs?.length, dl_count: result?.dl?.length, server_now: result?.server_now})
-    if (!result) {
-      console.error('sync error:', error)
-      return
-    }
-    if (this.pk){
-      const ok_pk = result.ok_uniqs.map(uniqs=> this.pk(uniqsmap[uniqs]))
-      const pk_dict_dl = Object.fromEntries( result.dl.map(row=> 
-          [ this.pk( row.stuff), row]))
-        // assert modAt=null in all result.dl
-      await this.table.where(':id').anyOf( ok_pk).modify((row) => {
-          if (row.modAt===uniqsmap[this.uniqstr(row)].modAt) {
-            row.dt = result.server_now
-            row.modAt = null
-            }})
-          
-        await this.table.where(':id').anyOf( ...Object.keys(pk_dict_dl)).modify((live_row) => {
-          const server_row = pk_dict_dl[ this.pk(live_row)].stuff
-                    let rep = server_row
-          // if uniqstr match, then deepmerge, else move away
-          if (this.uniqstr(live_row) ===this.uniqstr(server_row))
-            rep = this.deepMerge(live_row, server_row)
-          else puts.push({...this.nopk(Dexie.deepClone(live_row)), modAt: new Date() })
-          Object.assign(live_row, rep)
-          live_row.modAt = new Date()
-          delete pk_dict_dl[this.pk(live_row)]
-        })
-        await this.table.bulkPut(Object.values(pk_dict_dl).map(dl=> 
-          ({...dl.stuff, dt:result.server_now, modAt:null})))
-              this.table.bulkPut(puts)        
-    } else 
-      this.table.bulkPut((result.dl || []).map(dl=>
-        ({...dl.stuff, dt:result.server_now, modAt:null})))
-        // NOTE modAt:null bulkPut could miss dirtyRow, dead retry
-    return result
-  }
-}
 
 let isExt = typeof chrome !== 'undefined' && chrome.storage;
 const storage = isExt? chrome.storage.sync || chrome.storage.local : null;
@@ -106,7 +22,7 @@ const sb_options = { db:{schema:'tt'}, auth: {
     storage: isExt? tokenStorageAdapter : undefined,
     debug:false,
 }}
-export const getSessionAsync = (sbc:sb.SupabaseClient) :Promise<sb.Session|null> => 
+export const getSessionAsync = (sbc:sb.SupabaseClient) :Promise<sb.Session> => 
   new Promise((resolve) =>  // const { data: { subscription } } = 
     sbc.auth.onAuthStateChange((event, session) => {
       // Logic: Only resolve if we have a session 
@@ -118,10 +34,6 @@ export const getSessionAsync = (sbc:sb.SupabaseClient) :Promise<sb.Session|null>
       }))
 export let sbg:sb.SupabaseClient = sb.createClient(DEF_TREE['server'], DEF_TREE['pub_key']
   , sb_options);
-export let crdt: MergingMan |null = null
-// export let userReady = sbg.auth.getUser()
-// userReady.then((ures)=> console.log(`user: `, ures,user = ures.data.user))
-// export let user: sb.User |null = null
 export let sess: sb.Session |null = null
 export let sessReady = getSessionAsync(sbg) //  sbg.auth.getSession() return memory even null, getUser slow
 sessReady.then((session)=> sess = session)

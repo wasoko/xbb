@@ -2,11 +2,13 @@ import {Dexie} from 'dexie';
 import * as fc from './fc';
 import { countBy } from 'es-toolkit';
 import * as diffmp from 'diff-match-patch'
-export interface Tag { tid?: number, txt: string, ref: string // sync live-->tid less clash
-  , sts?: string[] // no , as `${t.sts}` default join by , (NOTE: largest index space)
+import { Session, SupabaseClient } from '@supabase/supabase-js';
+// no , as `${t.sts}` default join by , (NOTE: largest index space)
+export interface Tag { tid?: number, txt: string, ref: string
+  , sts?: string[]
   , dt:Date, type: string, modAt?:Date, rec: Record<string,unknown> } // dt=server dt , 'bookmark' | 'history' | 'tab' | 'tag'
 export const eqTags = (r1: Tag, r2: Tag) => r1.ref === r2.ref && r1.txt === r2.txt && r1.type== r2.type
-export const uniqsTag = (t: Tag) => t.ref+t.type
+export const uniqsTag = (t: Tag) => t.type+t.ref
 export const nopkTag = ({tid:_, ...rest}:any) => rest 
 export const tid_last = async ()=>await db.tags.orderBy(':id').last()
 export async function clean() {
@@ -129,6 +131,78 @@ export async function statStr() {
     (await db.stat.reverse().last())?.tid},  ${await db.vecs.count()} vecs max(tid=${
       (await db.vecs.reverse().last())?.tid})`)
 }
+
+/** fuse rows, with deepMerge on uniqstr, pk avoidance
+ * 
+ */
+export class Fuser<R,PK=unknown> {
+  constructor(private table: Dexie.Table<R>
+    , protected sessReady:Promise<Session>, protected sbg:SupabaseClient, protected snap:string
+    , private deepMerge: (local:R, server:R) => any
+    , private uniqstr: (row:R) => string  // uniq string for unique key(s)
+    , private pk: (row:R)=> PK
+    , private nopk: (row:R)=> Partial<R> // remove pk for auto-gen
+  ) {}
+  async pullPush() {
+    const MAX_RETRIES = 5, MIN_LOOP=3;
+    const BASE_DELAY = 500; 
+    const MAX_DELAY = 10000;
+    let loopCount = 0;
+    while (1) {
+      console.log('pullPush: getting dirty rows...')
+      let modrw = await this.table.filter(row => row.modAt != null).toArray();
+      console.debug('pullPush mod rows: ', modrw.length >5? modrw.length: modrw)
+      const last_dt = await this.table.orderBy('dt').last();
+      const sess = await this.sessReady;
+  
+      const { data: res, error } = await this.sbg.rpc('ups_same_base', { 
+        snap_name: this.snap, payload: modrw.map(r => ({ 
+          uniqs: this.uniqstr(r), dt: r.dt, stuff: r, user_id: sess?.user.id 
+        })), last_dt: last_dt?.dt // ?? '-infinity'
+      });
+      console.debug(`_doSync: RPC result:`, {ok_uniqs: res?.ok_uniqs, dl_len: res?.dl?.length, server_now: res?.server_now})
+  
+      if (!res) continue ; // console.error('Sync error:', error), null;
+      await this.table.db.transaction('rw', this.table, async () => {
+        const okUniqs = new Set(res.ok_uniqs);
+        const okPks = modrw.filter(r => okUniqs.has(this.uniqstr(r))).map(r => this.pk(r));
+        if (okPks.length) 
+          await this.table.where(':id').anyOf(okPks).modify({ modAt: null, dt: res.server_now });
+
+        const dlStuff = (res.dl || []).map(d => d.stuff);
+        const localClash = await this.table.where(':id').anyOf(dlStuff.map(s => this.pk(s))).toArray();
+        const clashClean = localClash.filter(c=> c.modAt) // assert
+        if (clashClean.length >0) console.error('clash pk in clean local: ', clashClean)
+        if (res.dl.filter(d=>d.category!='newer').length >0) console.error('clash pk in clean local: ', clashClean)
+
+        const localByDlPk = new Map(localClash.map(r => [this.pk(r), r]));
+        const modrwByUniq = new Map(modrw.map(r => [this.uniqstr(r), r]));
+        const toPut:R[] = [];
+        for (const serverStuff of dlStuff) 
+          this.row2put({ ...serverStuff, modAt: null }
+            , modrwByUniq.get(this.uniqstr(serverStuff)) 
+            , localByDlPk.get(this.pk(serverStuff)), toPut)
+        if (toPut.length) await this.table.bulkPut(toPut);
+      })  // TODO FIXME init dl /w 1st empty payload
+      if (res.dl.length==0 && res.ok_uniqs.length==0) break
+      if (++ loopCount > MIN_LOOP+MAX_RETRIES) break;
+      if (loopCount<MIN_LOOP) continue
+
+      const delay = Math.min(MAX_DELAY, BASE_DELAY * Math.pow(2, loopCount));
+      const jitter = delay * 0.25 * Math.random();
+      await new Promise(r => setTimeout(r, delay + jitter));
+    }
+  }
+  row2put(serverRow:R, modrw2merge:R, local2move:R, toPut:R[]) {
+    if (modrw2merge) // merge as dirty to push, /w local pk
+      toPut.push(this.deepMerge(modrw2merge, serverRow)) 
+    else toPut.push(serverRow)
+    if (local2move && (!modrw2merge || 
+      this.uniqstr(local2move) !== this.uniqstr(modrw2merge))) // accept server pk
+      toPut.push({ ...this.nopk(local2move), modAt: new Date() } as unknown as R);
+  }
+}
+
 /** ignore identicals, split clashing by tid, ignoring exact match
  * @param ts 
  * @param dl 
@@ -145,7 +219,7 @@ export function diffTags( ts:Tag[], dl:Tag[]) {
     if (newDL.length >33)
       console.log(`${newDL.length} diff in idb`)
     else
-      newDL.forEach(d=> console.log(`diff:[${d.txt}]\n  vs:(${d.ref})`))
+      newDL.forEach(d=> console.log(`dif  f:[${d.txt}]\n  vs:(${d.ref})`))
     // upsert do not 
     const idSet = new Set(ts.map(t=> t.tid))
     if (newDL.some(t=> idSet.has(t.tid))) {
@@ -156,35 +230,39 @@ export function diffTags( ts:Tag[], dl:Tag[]) {
   }
   return { newDL, clash, ts}
 }
-export function patchMod(base: Tag, b4mod: unknown, mod: Tag): any {
+const arr2lines=(sts: string[] | undefined): string => (sts ?? []).join('\n')
+function lines2arr(s: string): string[] | undefined {
+  const arr = s.split('\n').filter(Boolean);
+  return arr.length ? arr : undefined;
+}
+export function patchMod(base: Tag, b4mod: Tag, mod: Tag): any {
   if (!b4mod) return base
   const dmp = new diffmp.diff_match_patch()
-  base.txt = dmp.patch_apply(dmp.patch_make(b4mod.txt, mod.txt), base.txt)[0]
-  base.sts = dmp.patch_apply(dmp.patch_make(
-    `${b4mod.sts??[]}`, `${mod.sts??[]}`), `${base.txt}`)[0].split(',')
-  return base
+  return { ...base, // Create the new object and new array here
+    txt: dmp.patch_apply(dmp.patch_make(b4mod.txt, mod.txt), base.txt)[0],
+    sts: dmp.patch_apply(dmp.patch_make(
+      arr2lines(b4mod.sts), arr2lines(mod.sts)), arr2lines(base.sts))[0].split('\n')
+  }
 }
-export function deepMerge(rin: Tag, rl:Tag) {
-  const [newer,older] = rin.dt >rl.dt ? [rin,rl] : [rl,rin]  // TODO if local modAt, patch
-  const seq = [... (rin.rec.seq as any[] ??[]), ...(rl.rec.seq as any[] ??[])]
-  const deduped = [ ...Object.values(Object.fromEntries(seq.map(item => [item.dt, item]))).reverse()]
-  deduped.unshift(({dt: older.dt, txt: older.txt, sts: older.sts}))
-  const {rec, ...b4mod} = Dexie.deepClone(newer)
-  if (older.modAt) patchMod(newer, older.rec.b4mod, older)
-  if (newer.modAt) patchMod(newer, newer.rec.b4mod, newer)
-  rec.seq = deduped
-  rec.b4mod = b4mod
-  return {...newer, rec, modAt: new Date()}
+export function deepMerge(rl: Tag, rin:Tag) {
+  console.debug('deepMerging: ', rl, rin)
+  // const [newer,older] = rl.dt >rin.dt ? [rl,rin] :[rin,rl]   // TODO if local modAt, patch
+  //{...newer.rec.b4mod as any} as any
+  // const {_rec, ...curr} = {...newer} as any // deep clone
+  if (rl.rec?.b4mod) patchMod(rin, rl.rec.b4mod as Tag, rl)
+  rin.rec = fc.recMerge(rl.rec, rin.rec, 3) // server rin overwitten by rl local
+  rin.modAt= new Date()
+  return fc.sideLog(`deepMerge returning: `,rin)
 }
 export async function bulkMerge(clash: Tag[]) {
-  const puts:Tag[] = []
+  const toPut:Tag[] = []
   const tid2row = Object.fromEntries(clash.map(row=> [row.tid, row]))
   const tidSet = new Set(clash.map(row=> row.tid))
   await db.tags.filter(row=> tidSet.has(row.tid)).modify((live_row) => {
     let in_row = tid2row[live_row.tid!]
     if (uniqsTag(live_row)=== uniqsTag(in_row))
       in_row = deepMerge(in_row, live_row)
-    else puts.push( {...nopkTag(Dexie.deepClone(live_row)), modAt:new Date()})
+    else toPut.push( {...nopkTag(Dexie.deepClone(live_row)), modAt:new Date()})
     Object.assign(live_row, in_row)
     live_row.modAt = new Date()
     delete tid2row[live_row.tid!]

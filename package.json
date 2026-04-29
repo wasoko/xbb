@@ -7,7 +7,7 @@
     "clean": "rm -rf build.out",
     "build": "vite build --base ./",
     "dev": "vite --base ./ --host 0.0.0.0  -- --watch  2>&1 | tee dist.log ### https://share.google/aimode/i0TLb0scRlD2oWEp1 ",
-    "test": "vitest 2>&1 | tee test.log",
+    "test": "vitest --reporter=verbose --silent=false 2>&1 | tee test.log",
     "tsgo:tw": "concurrently --names \"tsgo,tw\" --prefix-colors \"cyan,green\" \"tsgo -p tsconfig.build.json --watch --preserveWatchOutput\" \"tailwindcss -i ./src/app.css -o ./dist/app.css --watch\" ",
     "preview": "vite preview",
     "check": "npx biome check --write --error-on-warnings . && tsgo --noEmit  ### && cd packages/web-ui && npm run check",
