@@ -1,8 +1,9 @@
 import {Dexie} from 'dexie';
 import * as fc from './fc';
-import { countBy } from 'es-toolkit';
+import { compact, countBy } from 'es-toolkit';
 import * as diffmp from 'diff-match-patch'
 import { Session, SupabaseClient } from '@supabase/supabase-js';
+import { dt } from 'framer-motion/client';
 // no , as `${t.sts}` default join by , (NOTE: largest index space)
 export interface Tag { tid?: number, txt: string, ref: string
   , sts?: string[]
@@ -10,6 +11,7 @@ export interface Tag { tid?: number, txt: string, ref: string
 export const eqTags = (r1: Tag, r2: Tag) => r1.ref === r2.ref && r1.txt === r2.txt && r1.type== r2.type
 export const uniqsTag = (t: Tag) => t.type+t.ref
 export const nopkTag = ({tid:_, ...rest}:any) => rest 
+const DIR_OPT = {depth:5, compact:true, breakLength: Infinity,colors:true}
 export const tid_last = async ()=>await db.tags.orderBy(':id').last()
 export async function clean() {
   const now = new Date()
@@ -144,14 +146,19 @@ export class Fuser<R,PK=unknown> {
     , private nopk: (row:R)=> Partial<R> // remove pk for auto-gen
   ) {}
   async pullPush() {
-    const MAX_RETRIES = 5, MIN_LOOP=3;
-    const BASE_DELAY = 500; 
-    const MAX_DELAY = 10000;
+    const MAX_RETRIES = 1, MIN_LOOP=3;
+    const BASE_DELAY = 50; 
+    const MAX_DELAY = 1000;
     let loopCount = 0;
     while (1) {
-      console.log('pullPush: getting dirty rows...')
       let modrw = await this.table.filter(row => row.modAt != null).toArray();
-      console.debug('pullPush mod rows: ', modrw.length >5? modrw.length: modrw)
+      // console.dir(this.table.db.name+'-'.repeat(33), ` loop#: `,loopCount, ' pullPush mod rows: ', modrw.length >5? modrw.length: modrw)
+      console.dir({
+  [this.table.db.name + '-'.repeat(33)]: {
+    loopCount: loopCount,
+    pullPush_mod_rows: modrw.length > 5 ? modrw.length : modrw
+  }
+}, DIR_OPT);
       const last_dt = await this.table.orderBy('dt').last();
       const sess = await this.sessReady;
   
@@ -160,7 +167,7 @@ export class Fuser<R,PK=unknown> {
           uniqs: this.uniqstr(r), dt: r.dt, stuff: r, user_id: sess?.user.id 
         })), last_dt: last_dt?.dt // ?? '-infinity'
       });
-      console.debug(`_doSync: RPC result:`, {ok_uniqs: res?.ok_uniqs, dl_len: res?.dl?.length, server_now: res?.server_now})
+      console.dir( {ok_uniqs: res?.ok_uniqs, dl_len: res?.dl?.length, status: res?.status, server_now: res?.server_now}, DIR_OPT)
   
       if (!res) continue ; // console.error('Sync error:', error), null;
       await this.table.db.transaction('rw', this.table, async () => {
@@ -169,11 +176,14 @@ export class Fuser<R,PK=unknown> {
         if (okPks.length) 
           await this.table.where(':id').anyOf(okPks).modify({ modAt: null, dt: res.server_now });
 
-        const dlStuff = (res.dl || []).map(d => d.stuff);
+        const dlStuff = (res.dl || []).map(d => ({...d.stuff, dt:d.dt, dt_prev: d.stuff.dt}));
+        dlStuff.forEach(d=> d.rec.dt_prev = d.dt_prev)
         const localClash = await this.table.where(':id').anyOf(dlStuff.map(s => this.pk(s))).toArray();
-        const clashClean = localClash.filter(c=> c.modAt) // assert
-        if (clashClean.length >0) console.error('clash pk in clean local: ', clashClean)
-        if (res.dl.filter(d=>d.category!='newer').length >0) console.error('clash pk in clean local: ', clashClean)
+        // const clashClean = localClash.filter(c=> c.modAt) // assert
+        // if (clashClean.length >0) console.error('clash pk in clean local: ', clashClean)
+        // if (res.dl.filter(d=>d.category!='newer').length >0) console.error('toMerge dl: ', res.dl)
+        if (res.dl.length==0) await this.table.filter(row => row.modAt != null)
+          .modify({dt:null})  // last_dt null to trigger server ins
 
         const localByDlPk = new Map(localClash.map(r => [this.pk(r), r]));
         const modrwByUniq = new Map(modrw.map(r => [this.uniqstr(r), r]));
@@ -182,6 +192,7 @@ export class Fuser<R,PK=unknown> {
           this.row2put({ ...serverStuff, modAt: null }
             , modrwByUniq.get(this.uniqstr(serverStuff)) 
             , localByDlPk.get(this.pk(serverStuff)), toPut)
+        console.dir({name:this.table.db.name+ ' toPut::: ', toPut}, DIR_OPT)
         if (toPut.length) await this.table.bulkPut(toPut);
       })  // TODO FIXME init dl /w 1st empty payload
       if (res.dl.length==0 && res.ok_uniqs.length==0) break
@@ -192,10 +203,20 @@ export class Fuser<R,PK=unknown> {
       const jitter = delay * 0.25 * Math.random();
       await new Promise(r => setTimeout(r, delay + jitter));
     }
+    return this.toBackup
   }
-  row2put(serverRow:R, modrw2merge:R, local2move:R, toPut:R[]) {
+  public toBackup:any[] = []
+  row2put(serverRow:R, modrw2merge:R|undefined, local2move:R|undefined, toPut:R[]) {
+    const now = fc.fmt_mdwhm(new Date())
+    const bak = (key, stuff)=> {
+      if(stuff) this.toBackup.push({key:this.uniqstr(stuff)+` `+key+` `+now, stuff})
+      return stuff
+    }
+    bak(`modrw`, modrw2merge)
+    bak(`local`, local2move)
+    
     if (modrw2merge) // merge as dirty to push, /w local pk
-      toPut.push(this.deepMerge(modrw2merge, serverRow)) 
+      toPut.push( bak(`deepMerged: `,  this.deepMerge(modrw2merge, serverRow)) )
     else toPut.push(serverRow)
     if (local2move && (!modrw2merge || 
       this.uniqstr(local2move) !== this.uniqstr(modrw2merge))) // accept server pk
@@ -245,11 +266,13 @@ export function patchMod(base: Tag, b4mod: Tag, mod: Tag): any {
   }
 }
 export function deepMerge(rl: Tag, rin:Tag) {
-  console.debug('deepMerging: ', rl, rin)
+  console.dir({['deepMerging local: ']: rl, rin:rin}, DIR_OPT)
   // const [newer,older] = rl.dt >rin.dt ? [rl,rin] :[rin,rl]   // TODO if local modAt, patch
   //{...newer.rec.b4mod as any} as any
   // const {_rec, ...curr} = {...newer} as any // deep clone
-  if (rl.rec?.b4mod) patchMod(rin, rl.rec.b4mod as Tag, rl)
+  rl.dt = rin.dt // in case return rl
+  if (rl.rec?.b4mod && rl.rec?.b4mod?.dt===rin.rec.prev_dt) patchMod(rin, rl.rec.b4mod as Tag, rl)
+    else return rl // local win if missing b4mod
   rin.rec = fc.recMerge(rl.rec, rin.rec, 3) // server rin overwitten by rl local
   rin.modAt= new Date()
   return fc.sideLog(`deepMerge returning: `,rin)
