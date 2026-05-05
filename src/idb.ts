@@ -195,7 +195,7 @@ export class Fuser<R,PK=unknown> {
         console.dir({name:this.table.db.name+ ' toPut::: ', toPut}, DIR_OPT)
         if (toPut.length) await this.table.bulkPut(toPut);
       })  // TODO FIXME init dl /w 1st empty payload
-      if (res.dl.length==0 && res.ok_uniqs.length==0) break
+      if (res.dl.length==0 && res.ok_uniqs.length==0 && modrw.length==0) break
       if (++ loopCount > MIN_LOOP+MAX_RETRIES) break;
       if (loopCount<MIN_LOOP) continue
 
@@ -265,17 +265,29 @@ export function patchMod(base: Tag, b4mod: Tag, mod: Tag): any {
       arr2lines(b4mod.sts), arr2lines(mod.sts)), arr2lines(base.sts))[0].split('\n')
   }
 }
+/**
+ * Merge a locally-modified row (rl) with the server row (rin).
+ *
+ * Condition: if local row has a b4mod snapshot AND its dt matches the server's
+ * prev_dt, the local modifications (computed as patches from b4mod→rl) are
+ * applied atop the server copy, rec is merged, and the result is marked dirty
+ * (modAt) for re-push.
+ *
+ * Otherwise: the server row is stale / unrelated — return the local row with
+ * the server dt ("merged" flag) so it can be re-pushed as-is.
+ */
 export function deepMerge(rl: Tag, rin:Tag) {
   console.dir({['deepMerging local: ']: rl, rin:rin}, DIR_OPT)
-  // const [newer,older] = rl.dt >rin.dt ? [rl,rin] :[rin,rl]   // TODO if local modAt, patch
-  //{...newer.rec.b4mod as any} as any
-  // const {_rec, ...curr} = {...newer} as any // deep clone
-  rl.dt = rin.dt // in case return rl
-  if (rl.rec?.b4mod && rl.rec?.b4mod?.dt===rin.rec.prev_dt) patchMod(rin, rl.rec.b4mod as Tag, rl)
-    else return rl // local win if missing b4mod
-  rin.rec = fc.recMerge(rl.rec, rin.rec, 3) // server rin overwitten by rl local
-  rin.modAt= new Date()
-  return fc.sideLog(`deepMerge returning: `,rin)
+  if (rl.rec?.b4mod && rl.rec?.b4mod?.dt===rin.rec?.prev_dt) {
+    // common ancestor confirmed → apply local patches on server copy
+    const merged = patchMod(rin, rl.rec.b4mod as Tag, rl)
+    merged.rec = fc.recMerge(rl.rec, merged.rec, 3)
+    merged.modAt = new Date()
+    return fc.sideLog(`deepMerge returning: `, merged)
+  }
+  // no common base → local wins, flag merged via server dt
+  rl.dt = rin.dt
+  return rl
 }
 export async function bulkMerge(clash: Tag[]) {
   const toPut:Tag[] = []
