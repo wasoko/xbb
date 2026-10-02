@@ -9,32 +9,32 @@ permissions:
   pages: write
   id-token: write
 
+# FORCEFULLY CANCEL PREVIOUS HANGING RUNS TO RELEASE LOCKED FILESYSTEMS
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  # JOB 1: Build the project clean
+  build:
     runs-on: ubuntu-latest
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
-        # with:
-        #   fetch-depth: 0  # Shallow clones should be disabled for a better reference repository
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9  # latest stable
+          version: 9
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'pnpm'  # enables pnpm cache
+          cache: 'pnpm'
 
       - name: Install dependencies
-        run: pnpm install  # Adjust if using yarn/pip/etc.
+        run: pnpm install
 
       - name: Build
         run: pnpm run build --base=/${{ github.event.repository.name }}/
@@ -45,8 +45,17 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
         with:
-          path: './dist'  # Path to your built site
+          path: './dist'
 
+  # JOB 2: Dedicated deployment runner to prevent loop mounting bottlenecks
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        
