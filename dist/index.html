@@ -24,7 +24,118 @@
       button:hover {color:white; background-color: #222;}
       button.selected { background-color: #38bff83a;}
       button{ color:var(--bt-color); font-size:larger;background: none; border: none;}
-      
+
+      /* --- Layout & Shared --- */
+      .app-root { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
+      .content { position: relative; z-index: 1; width: 100%; height: 100%; overflow: auto; }
+      .tabs-page { width: 100vw; height: 100vh; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(8px); }
+      .sea-canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 0; }
+      .split-container { display: flex; width: 100%; height: 100%; position: relative; }
+      .left-panel { overflow: auto; background: rgba(30, 30, 40, 0.9); border-right: 1px solid rgba(255, 255, 255, 0.1); }
+      .right-panel { overflow: auto; }
+      .resize-handle { width: 4px; background: rgba(255, 255, 255, 0.2); cursor: col-resize; transition: background 0.2s; }
+      .resize-handle:hover { background: #3b82f6; }
+
+      /* --- Navigation & Bars --- */
+      .user-menu-container { position: relative; pointer-events: auto; }
+      .user-avatar { width: 40px; height: 40px; margin: 11px; border-radius: 50%; overflow: hidden; background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.2); color: white; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.2s; font-size: 20px; }
+      .avatar-img { width: 100%; height: 100%; object-fit: cover; }
+      .user-avatar:hover { background: rgba(255, 255, 255, 0.2); transform: scale(1.05); }
+      .user-dropdown { position: absolute; top: 77px; right: 0; background: rgba(0, 0, 0, 0.8); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 12px; padding: 8px; display: flex; flex-direction: column; gap: 4px; min-width: 222px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); max-height: calc(100vh - 100px); overflow-y: auto; }
+      .user-dropdown-item { padding: 8px 12px; color: white; text-decoration: none; font-size: 13px; border-radius: 6px; cursor: pointer; transition: background 0.2s; border: none; background: none; text-align: left; width: 100%; }
+      .user-dropdown-item:hover { background: rgba(255, 255, 255, 0.1); }
+      .signin-btn { pointer-events: auto; background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(10px); color: white; border: 1px solid rgba(255, 255, 255, 0.2); padding: 6px 16px; border-radius: 20px; cursor: pointer; font-size: 14px; transition: all 0.2s; }
+      .signin-btn:hover { background: rgba(255, 255, 255, 0.2); transform: scale(1.05); }
+      .filter-bar { z-index: 2; position: fixed; display: flex; bottom: 77px; left: 0; right: 0; align-items: flex-end; }
+
+      /* --- View Containers --- */
+      .editor-split-pane { display: flex; flex-direction: column; height: 100%; background: rgba(20, 20, 30, 0.95); }
+      .editor-container { flex: 2; min-height: 0; border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
+      .chat-container { display: flex; flex-direction: column; height: 100%; background: rgba(0, 0, 0, 0.3); flex: 1; min-height: 0; }
+      .Artfact-container { height: 100%; display: flex; flex-direction: column; }
+      .code-editor { flex: 1; overflow: auto; }
+      .Artfact-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 15px; color: white; }
+
+      /* --- Tables & Lists --- */
+      .tags-table-container { height: 100%; display: flex; flex-direction: column; }
+      .table-wrapper { flex: 1; overflow: auto; }
+      .tags-table { width: 100%; border-collapse: collapse; color: white; }
+      .tags-table th { text-align: left; padding: 12px; background: rgba(0, 0, 0, 0.5); position: sticky; top: 0; font-weight: 600; }
+      .tag-row { cursor: pointer; transition: background 0.2s; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+      .tag-row:hover { background: rgba(59, 130, 246, 0.2); }
+      .tag-row.selected { background: rgba(59, 130, 246, 0.3); }
+      .tag-row td { padding: 12px; }
+      .ref-cell { font-family: monospace; font-size: 12px; color: #a0a0a0; }
+
+      /* --- Badges & Status --- */
+      .status-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+      .status-badge { padding: 2px 8px; border-radius: 12px; font-size: 10px; font-weight: 500; }
+      .status-active { background: #22c55e; color: black; }
+      .status-deprecated { background: #ef4444; }
+      .status-experimental { background: #f59e0b; }
+      .status-stable { background: #3b82f6; }
+      .status-beta { background: #8b5cf6; }
+
+      /* --- UI Elements (Input, Buttons, etc) --- */
+      .search-bar { padding: 15px; border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
+      .search-input { width: 100%; padding: 10px; background: rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-size: 14px; }
+      .search-input:focus { outline: none; border-color: #3b82f6; }
+      .add-tab-btn { padding: 10px 20px; background: #3b82f6; border: none; border-radius: 8px; color: white; cursor: pointer; }
+
+      /* --- Tabs & Artifacts --- */
+      .tab-bar { display: flex; background: rgba(0, 0, 0, 0.5); border-bottom: 1px solid rgba(255, 255, 255, 0.1); overflow-x: auto; flex-shrink: 0; }
+      .tab { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: rgba(255, 255, 255, 0.05); border-right: 1px solid rgba(255, 255, 255, 0.1); cursor: pointer; font-size: 12px; white-space: nowrap; }
+      .tab.active { background: rgba(59, 130, 246, 0.3); border-bottom: 2px solid #3b82f6; }
+      .tab-name { color: white; }
+      .tab-name.active-ref { cursor: pointer; transition: text-decoration 0.2s; }
+      .tab-name.active-ref:hover { text-decoration: underline; }
+      .tab-close { background: none; border: none; color: #888; cursor: pointer; font-size: 18px; padding: 0 4px; }
+      .tab-close:hover { color: white; }
+      .new-tab-btn { background: none; border: none; color: white; font-size: 18px; cursor: pointer; padding: 8px 12px; }
+
+      /* --- Dropdowns & Portals --- */
+      .tab-dropdown-portal { position: absolute; top: 35px; z-index: 1000; pointer-events: auto; }
+      .tab-dropdown-content { background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-width: 200px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); color: white; }
+      .dropdown-field { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
+      .dropdown-field label { color: #aaa; }
+      .dropdown-field input, .dropdown-field select { background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 4px; color: white; padding: 2px 6px; font-size: 12px; }
+      .dropdown-meta { border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 8px; margin-top: 4px; }
+      .meta-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; font-size: 12px; }
+      .meta-item span:first-child { color: #888; }
+      .dropdown-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+      .dropdown-actions button { padding: 4px 12px; font-size: 12px; border-radius: 4px; background: rgba(255, 255, 255, 0.1); color: white; cursor: pointer; border: 1px solid rgba(255, 255, 255, 0.1); }
+      .dropdown-actions .btn-save { background: #3b82f6; border-color: #3b82f6; }
+      .dropdown-actions button:hover { background: rgba(255, 255, 255, 0.2); }
+
+      /* --- Chat UI --- */
+      .chat-header { padding: 12px; background: rgba(0, 0, 0, 0.5); border-bottom: 1px solid rgba(255, 255, 255, 0.1); flex-shrink: 0; }
+      .chat-header h3 { color: white; font-size: 14px; }
+      .chat-messages { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 12px; }
+      .message { display: flex; gap: 10px; animation: fadeIn 0.3s ease; }
+      .message-avatar { width: 32px; height: 32px; border-radius: 50%; background: rgba(255, 255, 255, 0.1); display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
+      .message-content { flex: 1; }
+      .message-text { background: rgba(255, 255, 255, 0.1); padding: 8px 12px; border-radius: 12px; color: white; font-size: 14px; }
+      .message.user .message-text { background: #3b82f6; }
+      .message-time { font-size: 10px; color: #888; margin-top: 4px; margin-left: 8px; }
+      .typing-indicator { background: rgba(255, 255, 255, 0.1); padding: 8px 12px; border-radius: 12px; color: white; font-size: 14px; }
+      .chat-input-area { padding: 12px; border-top: 1px solid rgba(255, 255, 255, 0.1); display: flex; gap: 10px; flex-shrink: 0; }
+      .chat-input { flex: 1; padding: 8px 12px; background: rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; }
+      .send-btn { padding: 8px 16px; background: #3b82f6; border: none; border-radius: 8px; color: white; cursor: pointer; }
+      .load-more-trigger { text-align: center; padding: 20px; color: #888; }
+      .mobile-drilldown-hint { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); background: rgba(0, 0, 0, 0.8); padding: 5px 10px; border-radius: 20px; font-size: 12px; color: white; pointer-events: none; z-index: 3; }
+      @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+      /* --- cs1 card renderer --- */
+      .cs1-match { color: var(--bt-color); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; text-decoration: none; }
+      button.cs1-match { background: rgba(255,255,255,0.05); border: 1px solid var(--bt-color); }
+      a.cs1-match:hover { text-decoration: underline; }
+
+      /* --- Scrollbars --- */
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.3); }
+      ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.3); }
+
       .ascii-wrap {
         /* font-family: monospace; */
         font-size: 32px;
@@ -47,11 +158,11 @@
         }
       }
     </style>
-    <script type="module" crossorigin src="./assets/index-Bl-Ig5qZ.js"></script>
+    <script type="module" crossorigin src="./assets/index-BxVWujv7.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-_E41CB_i.css">
   </head>
   <body>
     <div id="root"> <div class="ascii-wrap">小本本<br>x b b</div> </div>
-      <canvas id="three"> </canvas>
       <div class="progress" id="progress" style="display: none;"><div class="bar" id="progress-bar" /> </div>
   </body>
   </html>

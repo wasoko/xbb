@@ -4,13 +4,16 @@ import { object } from 'framer-motion/client';
 // import { fromMarkdown } from 'mdast-util-from-markdown';
 // import { toString } from 'mdast-util-to-string';
 import {visit} from 'unist-util-visit';
-import {remark} from 'remark'
+// import {remark} from 'remark'  // document not found, crash loading bg service worker
 import * as pako from 'pako';
 import { useEffect, useState } from 'react';
+import { noticeStore } from './ui/notice';
 export const isTEST = 0
-export const isUT = "undefined" !=  typeof UNIT_TEST
-export const inChrome = "undefined" !=  typeof chrome
+export const isUT = "undefined" !==  typeof UNIT_TEST
+export const extChrom = ()=> "undefined" !==  typeof chrome
+export const defDoc = () =>  "undefined" !==  typeof document
 export type Result<T, E> = { ok: true; value: T } | { ok: false; error: E }
+export const DIR_OPT = {depth:5, compact:true, breakLength: Infinity,colors:true}
 export const HF_OR = [  //'Xenova/jina-embeddings-v2-base-zh',
   // https://developer.volcengine.com/articles/7382408396873400371
   // 'TownsWu/PEG', // onnx missing https://developer.volcengine.com/articles/7382408396873400371
@@ -29,7 +32,6 @@ export const HF_OR = [  //'Xenova/jina-embeddings-v2-base-zh',
   'sentence-transformers/distilbert-base-nli-mean-tokens'
 ];
 export const DEF_MODEL = HF_OR[0]
-
 
 const tag2md=(ts)=>  ts.map(t=> t.txt).join('')
 /**
@@ -79,32 +81,32 @@ if(isTEST) {let text = ` ## Heading __strong__ \`inlineCode\`
 export function reAddCB(callback:
   (message: any, sender: chrome.runtime.MessageSender, sendResponse: (response?: any) => void) => void
 ) {
-  if (!inChrome) return
-  chrome.runtime.onMessage.removeListener(callback)
-  chrome.runtime.onMessage.addListener(callback)
+  if (extChrom()) {
+    chrome.runtime.onMessage.removeListener(callback)
+    chrome.runtime.onMessage.addListener(callback)
+  } else console.error('fc.reAddCB outside ext context')
 }
+/** show or pass on */
 export const sttsCB =  (message:any, _s?:any, _sr?:any) => {
-  if (typeof document === 'undefined') return
-  const dd = document.getElementById(message.type)
-  if (dd !==null && message.type.startsWith('stts') )
-    dd.textContent = message.stts
+  if (defDoc()) {
+    const dd = document.getElementById(message.type)
+    if (dd !==null && message.type.startsWith('stts') )
+      dd.textContent = message.stts
+  } else if (extChrom())
+    chrome.runtime.sendMessage(message)
   return false
 }
 export const sttsDict:{[key:string]:string} = {}
-export const stts = (str: string, scope = '') => {
+export const stts = (message: string, scope = '') => {
   const stKey=scope+'STTS'
-  sttsDict[stKey] = str
-  if (str.startsWith("err"))
-    console.error(str);
-  console.info(str);
-  sttsCB({type: 'stts'+scope, stts: str})
-  if (inChrome) {
-    if (chrome.runtime) chrome.runtime.sendMessage({type:'stts'+scope,stts:str})  // FIXME avoid recur
-    if (chrome.storage) chrome.storage.session.get({[stKey]:''}).then((items) => {
-      if (str!='')chrome.storage.session.set({[stKey]: items[stKey] + str})
-      })
-  }
-  return str;
+  sttsDict[stKey] = message
+  const isErr = message.slice(0,3).toLowerCase().startsWith("err")
+  if (isErr)
+    console.error(scope,message);
+  console.info(scope,message);
+  noticeStore({scope, message, level:isErr? 'error': 'info'})
+  sttsCB({type: 'stts'+scope, stts: message})
+  return message;
 }
 export const scrollToTbodyN = (tbodyRef: React.RefObject<HTMLTableSectionElement>, n:number) => {
   if (tbodyRef.current && tbodyRef.current.children.length >0) {
@@ -122,36 +124,64 @@ export function input2options(id:string, options:string[]) {
     input.setAttribute('list', datalist.id);
   }
 } // let UT=1  ;if (typeof exports === 'undefined') { var exports = {}} // for bun repl
+export const handleDisable = (handler: () => Promise<void> | void) => {
+  return async (e: React.MouseEvent<HTMLElement>) => {
+    const target = e.currentTarget;
+    
+    // Save current states
+    const wasDisabled = (target as HTMLButtonElement).disabled;
+    const wasPointerEvents = target.style.pointerEvents;
+    const origOpacity = target.style.opacity;
+    
+    // Apply "disabled" state to both possible types
+    if (target instanceof HTMLButtonElement) {
+      target.disabled = true;
+    }
+    target.style.pointerEvents = 'none';
+    target.style.opacity = '0.5'; 
+    
+    try {
+      await handler();
+    } finally {
+      // Restore states
+      if (target instanceof HTMLButtonElement) {
+        target.disabled = wasDisabled;
+      }
+      target.style.opacity = origOpacity;
+      target.style.pointerEvents = wasPointerEvents;
+    }
+  };
+};
 const hashtagRegex = /\s#[\p{L}\p{N}_]+/gu
 const hashtail = /(?:\s+#[\p{L}\p{N}_]+#?)+$/gu;  // (?:... group non-capture
 const hashDelSymbols = /[^\p{L}\p{N}_]/gu
-export function t2txt(txt:string, sts:string[]) {
+export function t2txt(txt:string, tags:string[]) {
     const exHash = txt.match(hashtagRegex)?.map((m:string)=> 
       m.trim().slice(1).toLocaleLowerCase()) || []
     // console.info(exHash)
-    return `${txt} ${sts.filter(s=> !exHash.includes(s.toLocaleLowerCase()))
+    return `${txt} ${tags.filter(s=> !exHash.includes(s.toLocaleLowerCase()))
         .map(s => ` ${s.replace(hashDelSymbols,'')}`).join('')}`
 }
-export function txtRx(txt:string) {
+export function txtRx(txt:string):[string, string[]] {
   let cleaned = txt
   let MIN_SUFFIX = 33
-  let sts:string[] = []
+  let tags:string[] = []
   // if (txt.length <=MIN_SUFFIX) 
-  //   return [txt, sts]
+  //   return [txt, tags]
   ; let SEP =  [' - ', ' | ', '-','|',' _',' · ',' — ',' – ','/ X',' 鸡娃客','_哔哩哔哩_bilibili']
   ; let offset = Math.max(...SEP.map(sep=> txt.lastIndexOf(sep)))
   if (offset > Math.max(1,txt.length-MIN_SUFFIX)) {
     // console.debug('txtRx:', txt.slice(offset,txt.length))
-    sts.unshift(`suffix_`+txt.slice(offset,txt.length).replace(hashDelSymbols, ''))
+    tags.unshift(`suffix_`+txt.slice(offset,txt.length).replace(hashDelSymbols, ''))
     cleaned = txt.slice(0, offset).trim()
   }
-  sts.unshift(...new Set(cleaned.match(hashtagRegex)?.map(s=> s.slice(1)) as string[]))
+  tags.unshift(...new Set(cleaned.match(hashtagRegex)?.map(s=> s.slice(1)) as string[]))
   cleaned = cleaned.replace(hashtail,'')
   ; let TERM = ['. ', '。','; ','；'] // first 
   const keepcode = cleaned.indexOf('`', cleaned.indexOf('`')+1)  // keep `code`
   offset = Math.min(...TERM.map(sep=> cleaned.indexOf(sep, Math.max(33, keepcode))).filter(o=>o!==-1)) // trunc long paragraph at nearest sentences
   if (offset)  cleaned = cleaned.slice(0, offset).trim()
-  return [cleaned, sts]
+  return [cleaned, tags]
 } if(isUT)["快讯：昆仑万维公告，第三季度营收为20.72亿元，同比增长56.16%；净利润为1.9亿元，同比增长180.13%。前三季度营收为58.05亿元，同比增长51.63%；净利润亏损6.65亿元，同比下降6.19%。 - 华尔街见闻"
   , "快讯：中共中央关于制定国民经济和社会发展第十五个五年规划的建议发布。其中指出，适度超前建设新型基础设施，推进信息通信网络、全国一体化算力网、重大科技基础设施等建设和集约高效利用，推进传统基础设施更新和数智化改造。完善现代化综合交通运输体系，加强跨区域统筹布局、跨方式一体衔接，强化薄弱地区覆盖和通达保障。健全多元化、韧性强的国际运输通道体系。优化能源骨干通道布局，加力建设新型能源基础设施。加快建设现代化水网，增强洪涝灾害防御、水资源统筹调配、城乡供水保障能力。推进城市平急两用公共基础设施建设。 - 华尔街见闻"
   , "平安保险在线客服,平安理赔查询,平安理赔系统- 中国平安官方直销网站"
@@ -165,15 +195,15 @@ export function txtRx(txt:string) {
   , "👍九龍灣出租 EPSON FF-680W FastFoto scan 相片 相 高速掃描器, Computers & Tech, Printers, Scanners & Copiers on Carousell"
   ].forEach(t=> console.log(txtRx(t)))
 export function txtref2tab(txt:string, ref:string) {
-  const [cleaned, sts] = txtRx(txt)
-  return { txt: cleaned, ref, sts} //: ['ref_'+cleanDomain(ref).replace('.','_'),...sts] }
+  const [cleaned, tags] = txtRx(txt)
+  return { txt: cleaned, ref, tags} //: ['ref_'+cleanDomain(ref).replace('.','_'),...tags] }
 }
 export function str2tag(str:string ) {
   const all = str.split(/\s+/)
   const hash = all.filter(s=> s.startsWith('#'))
-  return {txt: hash.join(' '),  sts:all.filter(s=>!s.startsWith('#'))}
+  return {txt: hash.join(' '),  tags:all.filter(s=>!s.startsWith('#'))}
 } if(isUT) ['test   as',].forEach(s=> console.log(s))
-export function markdown2tab(markdown: string) {
+export function mdlink2tab(markdown: string) {
   let rx =  /^\s*(?:\d+\.)?\s*\[(.+)(?<!\\)\]\s*\((.+)\)\s*$/g    // escape ]( in url
   const ts = [];
   let match, endMatch;
@@ -191,6 +221,20 @@ export function cleanDomain(url: string) {
   ,'blah.co.uk', 'news.yahoo.co.jp', 'tsmc.com.tw', 'news.google.com', 'news.google.com.hk',
 ].forEach(r=> console.log(cleanDomain(r)))
 
+// input: h in [0,360] and s,v in [0,1] - output: r,g,b in [0,1]
+function hsl2rgb(h,s,l) 
+{ // https://stackoverflow.com/a/54014428/1773507
+  let a= s *Math.min(l, 1-l);
+  let f= (n:number ,k=(n +h /30) %12) => Math.floor(256* ( l - a *Math.max(Math.min(k-3 ,9-k ,1),-1) ))
+  // return [f(0),f(8),f(4)];
+  const toHex = (n: number) => n.toString(16).padStart(2, "0").toUpperCase();
+  return `#${toHex( f(0))}${toHex( f(8))}${toHex( f(4))}`
+}   
+export const getColorChar11 = (phrase: string) => {
+  const hash = phrase.split('').slice(0,11).reduce((acc, char) => acc + char.charCodeAt(0), 0);
+  //const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#ffeead'];
+  return hsl2rgb(hash%360, .8, .2) //colors[hash % colors.length];
+};
 export function useDebounce(value, delay=400) {
   const [debouncedValue, setDebouncedValue] = useState(value);
   useEffect(() => { 
@@ -202,6 +246,21 @@ export function useDebounce(value, delay=400) {
       return () => clearTimeout(timer) 
     }, [value, delay]);
   return debouncedValue;
+}
+export function useIsMobile(breakpoint = 768) {
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(window.innerWidth < breakpoint);
+    };
+
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, [breakpoint]);
+
+  return isMobile;
 }
 export function extractLinksFromSelection(selection: Selection): string[] {
   const links: string[] = [];
@@ -289,19 +348,21 @@ export function showOpenLinksButton(event: MouseEvent | TouchEvent, links: strin
   document.body.appendChild(btn);
 }
 export async function ul(data:any, fileApi:any, obj_prefix: string, checksum:number) {
-  let start = performance.now()
+  let st = performance.now()
+  let msg = ''
   const b2 = encZip(data)
-  nowWarn(start, `ul_${obj_prefix}`,"encZip",111)
+  nowWarn(st, `ul_${obj_prefix}`,"encZip",111)
   if (b2.byteLength /1024/1025 > 50)
     console.error(`${obj_prefix} too large >50MB after cbor.encode ${(b2.byteLength/1024/1024).toFixed(3)}MB`)
   else {
-    const { error } = await fileApi.upload(`${obj_prefix}.${checksum}.cbor.pako`
+    const { error } = await fileApi.upload(msg = `${obj_prefix}.${checksum}.cbor.pako`
       , b2, {contentType: 'application/octet-stream', upsert: true})
     if (error)
-      console.error(`uploading :${obj_prefix}`, error);
-    else stts(`${obj_prefix} stored in ${performance.now() - start} msec`) 
+      console.error(msg = `err uploading :${obj_prefix}`, error);
+    else console.log(msg = msg.concat(` stored in ${performance.now() - st} msec`)) 
   }
-  nowWarn(start, `ul_${obj_prefix}`)
+  nowWarn(st, `ul_${obj_prefix}`)
+  return msg
 }
 export function encZip(data: any) { return pako.gzip(cbor.encode(data))}
 export function decZip(data: pako.Data) { return cbor.decode(pako.ungzip(data))}
@@ -388,7 +449,7 @@ export function nowWarn(start: DOMHighResTimeStamp, scope:string, note='', msWar
     console.warn(`${scope} ${d.toLocaleString('en-US')} ms - ${note}`)
   const key = `log-maxTime ${scope}`
   const kl = `log-xTime ${scope}`
-  if (inChrome) 
+  if (extChrom()) 
     if(chrome.storage) {
     chrome.storage.session.get(key).then(kv=> {
       if (kv && kv[key]) if (d > kv[key]) chrome.storage.session.set({[key]:d})
@@ -400,11 +461,17 @@ export function nowWarn(start: DOMHighResTimeStamp, scope:string, note='', msWar
   return performance.now()
 }
 export function userAgentStr() {
-  return navigator.userAgentData?.brands?.map(b => b.brand)
-  .find(b => !['Not','Chromium','Mozilla'].some(p=>b.startsWith(p)) ) 
-  || navigator.userAgent.match(/(\w+)\/([\d.]+)/)?.[1] || 'BrowserX'
+  const brands = navigator.userAgentData?.brands;
+  const brand = (brands && brands.length > 0) 
+    ? brands.find(b => !['Not','Chromium','Mozilla'].some(p=>b.brand.startsWith(p)))?.brand
+    : null;
+
+  return brand?.trim().split(' ').pop()
+    || navigator.userAgent.match(/(\w+)\/([\d.]+)/)?.[1] 
+    || 'BrowserX';
 }
 
+export const BUILD_TIME = (typeof __BUILD_TIME__ !== 'undefined') ? __BUILD_TIME__ : (import.meta.env?.MODE || 'unknown');
 
 export const get_weibo_posts = async (user_ids=["1402400261"], cnt=111): Promise<string[]> => {
   const results: string[] = [];
@@ -466,6 +533,9 @@ export function topFew<T>(k: number, arr: T[]
 }
 
 export const diffDays = (d1, d2) => (d1-d2)/(1000 *60*60 *24)
+export const fmt_md = new Intl.DateTimeFormat('en-US', { month: 'numeric', day: '2-digit', })
+export const fmtB = (n: number): string =>
+  n < 1024 ? `${n}B` : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)}KB` : `${(n / 1024 ** 2).toFixed(1)}MB`
 export function fmt_ym(dt) { 
   const p=fmt2parts(dt) 
   return`${p.year}-${p.month.padStart(2,'0')}`
@@ -474,6 +544,22 @@ export function fmt_mdwhm(dt) {
   const p=fmt2parts(dt) 
   return`${p.year} ${p.month.padStart(2,' ')}/${p.day.padStart(2,'0')} ${p.weekday} ${p.hour}:${p.minute}`
 }
+export function fmt_hms(dt) { 
+  const p=fmt2parts(dt) 
+  return`${p.hour}:${p.minute}:${p.second}`
+}
+export function fmt_ymddHMS(dt) {
+  const p = fmt2parts(dt);
+  const yy = p.year.slice(-2);
+  const mm = p.month.padStart(2, '0');
+  const dd = p.day.padStart(2, '0');
+  const www = p.weekday; 
+  const hh = p.hour.padStart(2, '0');
+  const mm_ = p.minute.padStart(2, '0');
+  const ss = p.second.padStart(2, '0');
+  const ms = dt.getMilliseconds().toString().padStart(3, '0');
+  return `${yy}${mm}${dd}_${www}${hh}-${mm_}${ss}.${ms}`;
+}
 export function fmt2parts(dt) { return Object.fromEntries( new Intl.DateTimeFormat('en-US', {
     month: 'numeric', // MM
     day: '2-digit',   // dd
@@ -481,10 +567,42 @@ export function fmt2parts(dt) { return Object.fromEntries( new Intl.DateTimeForm
     weekday: 'short',  // ddd
   hour: '2-digit',
   minute: '2-digit',
+  second: '2-digit',
   hour12: false
   }).formatToParts(dt).map(({type,value})=> [type,value]))
 }; // { // new Intl.NumberFormat('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 }) // #,##0.##
-export const fmt_md = new Intl.DateTimeFormat('en-US', { month: 'numeric', day: '2-digit', })
+export const fmtAgo = (ts: number | undefined, from=new Date()): string => {
+  if (ts === undefined || ts===0) return '-';
+  const date = new Date(ts);
+
+  const diffMs = Math.max(0, from.getTime() - date.getTime());
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHrs = Math.floor(diffMins / 60);
+
+  const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+
+// Reset to midnight to accurately compare calendar days
+  const today = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+  const msgDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const diffDays = Math.floor((today.getTime() - msgDay.getTime()) / (1000 * 60 * 60 * 24));
+
+  if (diffDays === 0) {
+    if (diffHrs > 0) {
+      const remainingMins = diffMins % 60;
+      return remainingMins > 0 ? `${diffHrs}h ${remainingMins}m ago` : `${diffHrs}h ago`;
+    }
+    if (diffMins > 0) return `${diffMins}m ago`;
+    return 'Just now';
+  }
+  if (diffDays === 1) return `Yesterday ${timeStr}` 
+  if (diffDays < 7) {
+    const weekday = date.toLocaleDateString([], { weekday: 'short' });
+    return `${weekday} ${timeStr}`;
+  }
+
+  const dateStr = date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return `${dateStr} ${timeStr}`;
+};
 // //unused
 // function setKVjoin(rec: Record<string,string>, arg1: string, arg2: string) {
 //     rec[arg1] = arg2;

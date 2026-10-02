@@ -12,11 +12,12 @@
     "moduleResolution": "Bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
+    "noImplicitAny": false, // 
     "noEmit": true,
     "strict": true,
     // "noUncheckedIndexedAccess": true, // no runtime error but |undefined type to handle
     "forceConsistentCasingInFileNames": true,
-    "baseUrl": ".",
+    // "baseUrl": ".",
     "paths": {}
   },
   "include": ["src"]
