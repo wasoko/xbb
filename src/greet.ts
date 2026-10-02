@@ -8,6 +8,27 @@ let extChrom = typeof chrome !== 'undefined' &&
 const isVitest = typeof process !== 'undefined' && Boolean(process.env.VITEST)
   || typeof globalThis !== 'undefined' && '__vitest__' in globalThis;
 const storage = extChrom? chrome.storage.sync || chrome.storage.local : null;
+
+function parseSessionFromHash() {
+  const hash = window.location.hash;
+  if (!hash) return null;
+
+  // Handle double hash for hash-routed apps: #/route#access_token=...
+  const parts = hash.split('#');
+  const sessionFragment = parts.length > 2 ? parts[parts.length - 1] : parts[1];
+  
+  if (!sessionFragment) return null;
+
+  const params = new URLSearchParams(sessionFragment);
+  const access_token = params.get('access_token');
+  const refresh_token = params.get('refresh_token');
+
+  if (access_token && refresh_token) {
+    return { access_token, refresh_token };
+  }
+  return null;
+}
+
 const tokenStorageAdapter = { getItem: async (key: string) => {
     const result = await storage.get(key);
     return result[key] || null;
@@ -26,7 +47,17 @@ const sb_options = { db:{schema:'tt'}, auth: {
 export const updSessionAsync = async (env:any=undefined)=> { //   // expect {access_token, refresh_token} 
   // await sdb.treeCacReady
   console.log(`sbg.createClient at `,sdb.treeCac['server'])
-  // sbg = sb.createClient(sdb.treeCac['server'] as string, sdb.treeCac['pub_key'] as string, sb_options);
+  
+  // 1. Try manual hash parsing for double-hash URLs
+  const hashSession = parseSessionFromHash();
+  if (hashSession) {
+    const { data } = await sbg.auth.setSession(hashSession);
+    // Clean URL to remove tokens
+    const routeHash = window.location.hash.split('#').slice(0, -1).join('#');
+    window.history.replaceState(null, '', routeHash || '#/');
+    console.log('Session recovered from double-hash URL');
+  }
+
   const res = env? await sbg.auth.setSession(env) : await sbg.auth.getSession()
   console.log(`upd sess`, res)
   return (sess = res.data.session)
