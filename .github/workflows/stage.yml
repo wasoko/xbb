@@ -9,10 +9,6 @@ permissions:
   pages: write
   id-token: write
 
-# FORCEFULLY CANCEL PREVIOUS HANGING RUNS TO RELEASE LOCKED FILESYSTEMS
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
 
 jobs:
   # JOB 1: Build the project clean
@@ -34,7 +30,7 @@ jobs:
           cache: 'pnpm'
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Build
         run: pnpm run build --base=/${{ github.event.repository.name }}/
@@ -42,6 +38,11 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
+      - name: Dist size
+        run: du -sh dist
+      - name: File count
+        run: find dist -type f | wc -l
+        
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
         with:
@@ -57,5 +58,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
-        
+        uses: actions/deploy-pages@v5
