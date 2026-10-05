@@ -30,22 +30,25 @@ function makeGreeter(db: sdb.DDB, snap = SNAP_NAME) {
     sc.sbg,
     snap,
     sdb.deepMerge,
-    sdb.uniqsTag,
+    sdb.daUniq,
     (r: sdb.Da) => r.tid,
-    sdb.nopkTag,
+    sdb.daNoPk,
   );
 }
 
-/** Edit `txt` the way the editor does: shelf the pre-edit version, then mark the row dirty. */
+/** Edit `txt` the way the editor does: shelf the row's own version, then mark it dirty. */
 async function edit(db: sdb.DDB, tid: number, txt: string) {
   const row = await db.das.get(tid);
-  await db.das.update(tid, { txt, modAt: new Date()
-    , rec: sdb.shelfVer(row!.rec, sdb.verKey(row!.dt, row!.modAt), sdb.verSnap(row!)) });
+  await db.das.update(tid, sdb.daEdit(row!, txt));
 }
 
 /** Text of every version shelved in a row's `rec.ver`. */
 const shelvedTxts = (row?: sdb.Da) =>
   Object.values((row?.rec?.ver ?? {}) as sdb.VerHist).map(v => v.txt);
+
+/** Text of every discarded local edit a row still carries in `rec.cr`. */
+const crTxts = (row?: sdb.Da) =>
+  Object.values((row?.rec?.cr ?? {}) as sdb.VerHist).map(v => v.txt);
 
 /** Empty one snap on the server, so `ins` is not gated on unrelated rows. */
 async function clearSnap(snap: string) {
@@ -89,13 +92,13 @@ describe('greet two-client text edit', () => {
     expect(rowB?.modAt == null).toBe(true);
     expect(rowA?.txt).toBe(rowB?.txt);
     expect(rowA?.txt).not.toBe('hello');
-    // A holds the version it pushed; B's losing edit survives in its own history
+    // A holds the versions it pushed; B's losing edit is kept in its own cr, not in ver
     expect(shelvedTxts(rowA)).toContain(rowA!.txt);
     expect(shelvedTxts(rowA)).toContain('hello');
-    expect(shelvedTxts(rowB)).toContain('hell');
+    expect(crTxts(rowB)).toContain('hell');
   }, 25_000);
 
-  it('conflict without an exact dt copy: server wins, local version shelved', async () => {
+  it('conflict without an exact dt copy: server wins, local edit filed in cr', async () => {
     const dbA = new sdb.DDB('tdb_stale_a');
     const dbB = new sdb.DDB('tdb_stale_b');
     const fusA = makeGreeter(dbA, SNAP_STALE);
@@ -118,14 +121,14 @@ describe('greet two-client text edit', () => {
     await fusB.pullPush();
 
     const rowB = await dbB.das.get(112);
-    expect(rowB?.txt).toBe('bAse txt');            // server version stands
-    expect(rowB?.modAt).toBeUndefined();           // merged, not left dirty
-    expect(shelvedTxts(rowB)).toContain('BBse txt'); // B's version kept in rec.ver
-    expect(shelvedTxts(rowB)).toContain('base txt');
+    expect(rowB?.txt).toBe('bAse txt');             // server version stands
+    expect(rowB?.modAt).toBeUndefined();            // merged, not left dirty
+    expect(crTxts(rowB)).toContain('BBse txt');     // B's edit kept in rec.cr
+    expect(shelvedTxts(rowB)).toContain('bAse txt'); // the adopted server version is shelved
   }, 25_000);
 
   if(0) // wrong hypothesis: local tid detection/merging, not server
-  it.concurrent('R4: should not create duplicate rows when server tid differs from local tid', async () => {
+  it.concurrent('R3: should not create duplicate rows when server tid differs from local tid', async () => {
     const dbA = new sdb.DDB('tdb_r4_a');
     const dbB = new sdb.DDB('tdb_r4_b');
     const fusA = makeGreeter(dbA);

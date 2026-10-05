@@ -12,4 +12,3 @@
 
 ## Style
 - answers/code short and concise
-- No emojis/fluff/filler in commits, issues, PR comments, or code

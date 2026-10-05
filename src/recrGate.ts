@@ -16,7 +16,7 @@
  */
 
 import { bulletKv, splitSections } from './recrMd';
-import { getLatestByRefType, DEL_TAG } from './sdb';
+import { daRead, DEL_TAG } from './sdb';
 import { GATE_REF, TASK_COMPLETE } from './recrConst';
 import type { ToolDef } from './recr';
 
@@ -61,7 +61,7 @@ export function filterTools(tools: ToolDef[], level: GateLevel): ToolDef[] {
  *   the document is absent, tombstoned, or names a level that does not exist
  */
 export async function loadGate(): Promise<GateConfig> {
-  const row = await getLatestByRefType(GATE_REF, 'md');
+  const row = await daRead(GATE_REF, 'md');
   if (!row || row.tags?.includes(DEL_TAG)) {
     console.warn(`[recr] ${GATE_REF} not found; gate level defaults to "read"`);
     return { level: 'read', endpoints: [] };

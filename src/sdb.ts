@@ -9,8 +9,10 @@ export interface Da { tid?: number, txt: string, ref: string, type: string
   , tags?: string[]
   , dt?:Date, modAt?:Date, rec: Record<string,unknown> } // dt=server dt , 'bookmark' | 'history' | 'tab' | 'tag'
 export const eqDas = (r1: Da, r2: Da) => r1.ref === r2.ref && r1.txt === r2.txt && r1.type== r2.type
-export const uniqsTag = (t: Da) => t.type+t.ref
-export const nopkTag = ({tid:_, ...rest}:any) => rest 
+export const daUniq = (t: Da) => t.type+t.ref
+export const daPk = (t: Da) => t.tid
+/** Row without its auto-increment key, for a relocated copy that must take a fresh `tid`. */
+export const daNoPk = ({tid:_, ...rest}:any) => rest 
 export const tags2str=(t:Da) => JSON.stringify([t.ref, t.txt, t.type, t.tags ?? []])
 export const tid_last = async ()=>await db.das.orderBy(':id').last()
 export async function clean() {
@@ -263,30 +265,122 @@ export const where_pk_last = (tab: { where: (arg0: string) => { (): any; new(): 
 
 export const dev_PREFFIX = 'dev_'
 export const DEL_TAG = '[del]'
+/** Marks a row whose local edit a server-wins merge discarded, so the tag UI can list and
+ *  clean the rows that still carry a `rec.cr` log. */
+export const CHG_REJ_TAG = 'FIXMEchange_rejected'
 
 /** Rows the tag UI owns. recr keeps its session, settings, and tool rows in the same table. */
 export const isUiTag = (r: Da) => r.type !== RECR_TYPE
 
-/** The `secret.md` document carrying the agent's provider, model, and key selection.
- *  A tombstoned row counts as absent, matching how `IRecrStore` resolves the same key. */
+/** The `secret.md` document carrying the agent's provider, model, and key selection. */
 export async function getSecret(): Promise<string | undefined> {
-  const row = await getLatestByRefType(SECRET_REF, 'md')
-  return row && !row.tags?.includes(DEL_TAG) ? row.txt : undefined
+  return (await daRead(SECRET_REF, 'md'))?.txt
 }
 
-/** Get the latest (max dt) row for ref+type, or ref alone if type is empty/omitted.
- *  Returns null if deleted ([del] tag on max-dt row). */
-export async function getLatestByRefType(ref: string, type?: string): Promise<Da | null> {
-  const rows = type
-    ? await db.das.where('[ref+type]').equals([ref, type]).toArray()
-    : await db.das.filter(t => t.ref === ref && !t.tags?.includes(DEL_TAG)).toArray()
-  if (rows.length === 0) return null
-  // max dt wins
-  const latest = rows.reduce((a, b) => (new Date(a.dt ?? 0).getTime()) > (new Date(b.dt ?? 0).getTime()) ? a : b)
-  // if (latest.tags?.includes(DEL_TAG)) return null
-  // console.debug(`getLatestby..`, latest)
-  return latest
+/** Row type for a file ref, matching the `src`/`md` pair the editor offers. */
+export function daType(ref: string): string {
+  return ref.toLowerCase().endsWith('.md') ? 'md' : 'src'
 }
+
+/** Row types the editor writes for a tab; `daType` maps a ref onto this pair. */
+export const EDITOR_TYPES = ['md', 'src'] as const
+
+/** Rows with no `[del]` tombstone. */
+export const daLive = (rows: Da[]) => rows.filter(r => !r.tags?.includes(DEL_TAG))
+
+/** A row whose local edit has not reached the server yet. */
+export const daDirty = (row: Da) => row.modAt != null
+
+/** The row carries a discarded-edit log (`rec.cr`): an edit of its own met a server version
+ *  whose ancestor copy this client did not hold, so the merge kept the server text and filed
+ *  the local text under `cr`. The log is the row's obligation until the diff tab offers it
+ *  back, and it merges across clients, so a row can carry another client's discarded edit. */
+export const daStale = (row: Da) =>
+  Object.keys((row.rec?.cr ?? {}) as Record<string, unknown>).length > 0
+
+/** A row's effective update time: the later of its server `dt` and its local `modAt`. */
+export function daStamp(row: Da): number {
+  const t = (v?: Date) => (v ? new Date(v).getTime() : -Infinity)
+  return Math.max(t(row.dt), t(row.modAt))
+}
+
+/** Live rows for `ref`, read through indexes: dirty rows via `modAt`, synced rows via
+ *  `[ref+type]`. Only the types the editor writes are searched. */
+export async function daRows(ref: string, types: readonly string[] = EDITOR_TYPES): Promise<Da[]> {
+  const dirty = await db.das.where('modAt').above(new Date(0)).filter(r => r.ref === ref).toArray()
+  const synced = (await Promise.all(types.map(t =>
+    db.das.where('[ref+type]').equals([ref, t]).toArray()))).flat()
+  const byTid = new Map<number, Da>()
+  for (const r of [...dirty, ...synced]) if (r.tid != null) byTid.set(r.tid, r)
+  return [...byTid.values()]
+}
+
+/** The row that wins among live rows of one `ref`+`type`: a local edit (`modAt`) shadows the
+ *  synced copy, otherwise the newest server `dt`. Callers pass rows already free of `[del]`
+ *  tombstones. This is the rule `IRecrStore` resolves reads with. */
+export function daWin(live: Da[]): Da | undefined {
+  if (live.length === 0) return undefined
+  const dirty = live.filter(daDirty)
+  if (dirty.length > 0) return dirty[dirty.length - 1]
+  return daNewest(live)
+}
+
+/** The newest server `dt` among rows, ignoring `modAt`. */
+export function daNewest(rows: Da[]): Da | undefined {
+  if (rows.length === 0) return undefined
+  return rows.reduce((a, b) => (new Date(a.dt ?? 0).getTime() > new Date(b.dt ?? 0).getTime() ? a : b))
+}
+
+/** The row with the newest effective stamp, tombstone included: it decides whether a key
+ *  still exists at all. */
+export function daLatest(rows: Da[]): Da | undefined {
+  if (rows.length === 0) return undefined
+  return rows.reduce((a, b) => (daStamp(a) > daStamp(b) ? a : b))
+}
+
+/** Stamps already reported, so one stale row alerts once per version rather than per read. */
+const staleReported = new Set<string>()
+
+/** `daStale` is the case the diff tab exists for: log it critically once per discarded edit. */
+function reportStale(row: Da) {
+  if (!daStale(row)) return
+  const keys = Object.keys((row.rec?.cr ?? {}) as Record<string, unknown>)
+  const key = `${daUniq(row)}@${keys[keys.length - 1]}`
+  if (staleReported.has(key)) return
+  staleReported.add(key)
+  fc.stts(`err ${keys.length} discarded local edit(s) on ${daUniq(row)}`
+    + ` [${keys.join()}] — ancestor version not held, offer the diff tab`, 'sync')
+}
+
+/** The row for `ref` (+ optional `type`) the app resolves: a tombstoned newest row means the
+ *  key is gone; otherwise the dirty-wins rule picks the visible row.
+ *  @param ref row ref
+ *  @param type row type; omitted searches the editor's `md`/`src` pair
+ *  @returns the winning row, or undefined when absent or deleted */
+export async function daRead(ref: string, type?: string): Promise<Da | undefined> {
+  const rows = await daRows(ref, type ? [type] : EDITOR_TYPES)
+  const newest = daLatest(rows)
+  if (newest?.tags?.includes(DEL_TAG)) return undefined
+  const win = daWin(daLive(rows))
+  if (win) reportStale(win)
+  return win
+}
+
+/** The single local-write recipe: replace the text and mark the row dirty.
+ *  The first edit of a clean row also shelves the row under its own server `dt` in `rec.ver`:
+ *  that copy is the ancestor `deepMerge` patches the edit back through when the server
+ *  re-delivers the same version. A later edit while the row is still dirty shelves nothing,
+ *  because the row then holds post-edit text, which is not the version its `dt` names.
+ *  @param row the row as read before the edit
+ *  @param txt the new text
+ *  @returns the Dexie update spec for the row */
+export function daEdit(row: Da, txt: string) {
+  const shelf = row.dt != null && row.modAt == null && !pickVer(row.rec, row.dt)
+  return shelf
+    ? { txt, modAt: new Date(), rec: putVer(row.rec, row.dt, row) }
+    : { txt, modAt: new Date() }
+}
+
 async function stat_tags(){
   let str = ''
   let cntRef = {}
@@ -379,78 +473,175 @@ function lines2arr(s: string): string[] | undefined {
   return arr.length ? arr : undefined;
 }
 
-/** A row as kept in `rec.ver`: everything but `rec`, so history cannot nest itself. */
+/** A row as kept in a `rec.ver`/`rec.cr` entry: everything but `rec`, so history cannot nest. */
 export type DaVer = Omit<Da, 'rec'>
-/** One row's version history; key = the ISO stamp `verKey` derives for that version. */
+/** One row's history: `rec.ver` keyed by server `dt`, `rec.cr` keyed by local `modAt`. */
 export type VerHist = Record<string, DaVer>
-/** Shelf life of a `rec.ver` entry before the next shelf drops it. */
-export const VER_KEEP_MS = 30 * 24 * 3600 * 1000
 
-/** ISO stamp naming a row version: the later of its server `dt` and its local `modAt`.
- * Undefined when the row carries neither, i.e. the version cannot be named. */
-export function verKey(dt?: Date|string|null, modAt?: Date|string|null): string|undefined {
-  const ms = (v?: Date|string|null) => (v ? new Date(v).getTime() : -Infinity)
-  const t = Math.max(ms(dt), ms(modAt))
-  return Number.isFinite(t) ? new Date(t).toISOString() : undefined
+/** ISO stamp naming one `ver` entry: a server `dt`.
+ * Undefined when the row carries no such stamp, i.e. the entry cannot be named. */
+export function stamp(d?: Date|string|null): string|undefined {
+  return d ? new Date(d).toISOString() : undefined
 }
-/** Snapshot of `row` for `rec.ver`, minus `rec`. */
+/** The ISO tail of a history key: the part `stampTime` reads off a `cr` key. */
+const ISO_TAIL = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/
+/** Key of one `cr` entry: the discarding client's `devAgent` plus the local `modAt` ISO stamp,
+ *  so a log that merged across clients names the client each discarded edit came from.
+ *  @param modAt the discarded edit's local stamp
+ *  @returns the key, or undefined when the edit carries no stamp */
+export function crStamp(modAt?: Date|string|null): string|undefined {
+  const iso = stamp(modAt)
+  return iso ? `${treeCac['devAgent']}_${iso}` : undefined
+}
+/** The time a history key names.
+ * @param key a `ver` key, or a `cr` key carrying its ISO stamp after the `devAgent` prefix
+ * @returns the epoch milliseconds that key names */
+export function stampTime(key: string): number {
+  return Date.parse(ISO_TAIL.exec(key)?.[0] ?? key)
+}
+/** Snapshot of `row` for a history entry, minus `rec`. */
 export function verSnap<R extends { rec?: unknown }>(row: R): Omit<R, 'rec'> {
   const { rec:_, ...snap } = row
   return snap
 }
-/** Add one version to `rec.ver` under `key`, dropping entries older than `VER_KEEP_MS`.
- * No-op without a key (unnamed version). */
-export function shelfVer(rec: Record<string,unknown>|undefined, key: string|undefined, snap: unknown) {
+/** Add the server version `dt` to `rec.ver`. No-op when the row carries no `dt`:
+ *  nothing the server has named, so nothing to key a version by. */
+export function putVer<R extends { rec?: unknown }>(rec: Record<string,unknown>|undefined
+  , dt: Date|string|null|undefined, row: R) {
+  const key = stamp(dt)
   if (!key) return rec ?? {}
-  return { ...rec, ver: { ...pruneVer(rec?.ver), [key]: snap } } as Record<string,unknown>
+  return { ...rec, ver: { ...(rec?.ver as VerHist|undefined), [key]: verSnap(row) }
+    } as Record<string,unknown>
 }
-/** Union two version histories, local entries winning; entries older than `VER_KEEP_MS` dropped. */
+/** File the discarded local edit `modAt` under `rec.cr`, so the merge that dropped it can
+ *  still offer its wording for a diff/apply. Same no-op rule as `putVer`. */
+export function putCr<R extends { rec?: unknown }>(rec: Record<string,unknown>|undefined
+  , modAt: Date|string|null|undefined, row: R) {
+  const key = crStamp(modAt)
+  if (!key) return rec ?? {}
+  return { ...rec, cr: { ...(rec?.cr as VerHist|undefined), [key]: verSnap(row) }
+    } as Record<string,unknown>
+}
+/** Union two histories, local entries winning. */
 export function mergeVer(local?: unknown, srv?: unknown): VerHist {
-  return { ...pruneVer(srv), ...pruneVer(local) }
+  return { ...(srv as VerHist|undefined), ...(local as VerHist|undefined) }
 }
 /** The stored copy of exactly server version `dt`, or undefined when this client never held it. */
 export function pickVer(rec: Record<string,unknown>|undefined, dt?: Date|string|null): DaVer|undefined {
-  const key = dt ? verKey(dt, null) : undefined
+  const key = stamp(dt)
   return key ? (rec?.ver as VerHist|undefined)?.[key] : undefined
 }
-function pruneVer(ver: unknown): VerHist {
-  const cutoff = Date.now() - VER_KEEP_MS
-  const kept: VerHist = {}
-  for (const [k, v] of Object.entries((ver ?? {}) as VerHist))
-    if (Date.parse(k) >= cutoff) kept[k] = v
-  return kept
+/** Add or drop the discarded-edit marker on the row's `tags`, so the tag UI can list the rows
+ *  that lost a local edit.
+ *  @param row row to mark
+ *  @param on whether the row carries a `rec.cr` log
+ *  @returns the marked row, or the same row when the tag is already correct */
+export function withChgTag<R extends { tags?: string[] }>(row: R, on: boolean): R {
+  const tags = row.tags ?? []
+  if (tags.includes(CHG_REJ_TAG) === on) return row
+  return { ...row, tags: on ? [...tags, CHG_REJ_TAG] : tags.filter(t => t !== CHG_REJ_TAG) }
 }
 
-/** 3-way text/tags merge: apply the local diff `b4mod`→`mod` onto the server copy `base`. */
-export function patchMod(base: Da, b4mod: DaVer|undefined, mod: Da): Da {
-  if (!b4mod) return base
+/** Carry a discarded-edit log onto the row that replaces a local one, so a `cr` entry survives
+ *  a snap merge or a PK relocation. The marker tag follows the log.
+ *  @param srv the row that replaces the local one
+ *  @param local the local row being replaced, when there is one
+ *  @returns the server row carrying the union of both logs */
+export function withCr<R extends { rec?: Record<string, unknown>; tags?: string[] }>(
+  srv: R, local?: R): R {
+  const cr = { ...((srv.rec?.cr ?? {}) as VerHist), ...((local?.rec?.cr ?? {}) as VerHist) }
+  const on = Object.keys(cr).length > 0
+  const row = withChgTag(srv, on)
+  return on ? { ...row, rec: { ...(row.rec ?? {}), cr } } : row
+}
+
+/** Drop one `cr` entry and, with the last one, the marker tag. The caller writes the returned
+ *  update spec, so an apply retires the version and the tag in one write.
+ *  @param row the row the entry came from
+ *  @param key the `cr` key to drop
+ *  @returns the Dexie update spec for the row */
+export function dropCrEntry(row: Da, key: string) {
+  const { [key]: _consume, ...rest } = (row.rec?.cr ?? {}) as VerHist
+  const remaining = Object.keys(rest).length
+  const { cr: _drop, ...rec } = row.rec ?? {}
+  const tags = remaining > 0 ? row.tags : withChgTag(row, false).tags
+  const next = remaining > 0 ? { ...rec, cr: rest } : rec
+  return tags === row.tags ? { rec: next } : { rec: next, tags }
+}
+
+/** One row as the CDN snapshot stores it: the client-held `ver` history is dropped, so the
+ *  snapshot carries row state rather than the history the RPC already delivers.
+ *  @param row row to strip
+ *  @returns the row without `rec.ver` */
+export function withoutVer<R extends { rec?: Record<string, unknown> }>(row: R): R {
+  if (!row.rec?.ver) return row
+  const { ver:_, ...rec } = row.rec
+  return { ...row, rec } as R
+}
+
+/** 3-way text/tags merge: apply the local diff `ancestor`→`mod` onto the server copy `base`.
+ *  A hunk the patch cannot place keeps the server text for that region and is counted in
+ *  `rec.patchFail`, so a partially applied merge is visible instead of looking clean. */
+export function patchMod(base: Da, ancestor: DaVer|undefined, mod: Da): Da {
+  if (!ancestor) return base
   const dmp = new diffmp.diff_match_patch()
+  const [txt, txtFlags] = dmp.patch_apply(dmp.patch_make(ancestor.txt, mod.txt), base.txt)
+  const [tags] = dmp.patch_apply(dmp.patch_make(
+    arr2lines(ancestor.tags), arr2lines(mod.tags)), arr2lines(base.tags))
+  const failed = txtFlags.filter(ok => !ok).length
   return { ...base, // Create the new object and new array here
-    txt: dmp.patch_apply(dmp.patch_make(b4mod.txt, mod.txt), base.txt)[0],
-    tags: dmp.patch_apply(dmp.patch_make(
-      arr2lines(b4mod.tags), arr2lines(mod.tags)), arr2lines(base.tags))[0].split('\n')
+    txt,
+    tags: tags.split('\n'),
+    rec: failed > 0
+      ? { ...base.rec, patchFail: { at: new Date().toISOString(), hunks: failed } }
+      : base.rec,
   }
 }
+/** Conflicts `deepMerge` discarded since the last drain; the greet round announces them so the
+ *  editor can offer the diff tab. Kept here because a merge is where the edit is dropped. */
+const crAdded: { ref: string; stamp: string; reason: string }[] = []
+/** Take the conflicts added since the last call.
+ * @returns one entry per discarded local edit, in merge order, each naming why the patch
+ *  gate had no ancestor (`no-base-dt`, `server-no-dt`, `server-ahead`, `server-behind`) */
+export function drainCr(): { ref: string; stamp: string; reason: string }[] {
+  return crAdded.splice(0)
+}
+
+/** Why the patch gate had no ancestor for the server row: the local edit named no base
+ *  version, the server row carries none, or the server moved ahead of / behind that base. */
+function missReason(rl: Da, rin: Da): string {
+  if (!rl.dt) return 'no-base-dt'
+  if (!rin.dt) return 'server-no-dt'
+  return new Date(rin.dt).getTime() > new Date(rl.dt).getTime() ? 'server-ahead' : 'server-behind'
+}
+
 /**
  * Merge a locally-modified row (rl) with the server row (rin).
  * Ver gate: `rl.rec.ver` holding an exact copy of server version `rin.dt` is the only
  * trusted ancestor — patch that copy against rl and apply the diff onto rin, then
- * re-push (dirty). Without it the server copy wins outright (`modAt` null, not pushed),
- * and rl's own version plus the adopted version are shelved into `rec.ver`.
+ * re-push (dirty). Without it the server copy wins outright (`modAt` null, not pushed):
+ * its version is adopted into `rec.ver`, and the discarded local edit is filed under
+ * `rec.cr` for the diff/apply tab.
  * tid avoid: keep local tid only for fixed special tid <0 (e.g. -1 tabstat-cnt), else
  * follow the server tid so uniq+tid pairs converge instead of clients dead-looping.
  */
 export function deepMerge(rl: Da, rin: Da): Da {
-  const { ver: rlVer, ...rlRec } = (rl.rec ?? {}) as Record<string, unknown>
-  const { ver: rinVer, ...rinRec } = (rin.rec ?? {}) as Record<string, unknown>
-  // ver merged by hand: recMerge concatenates arrays, which would duplicate tags per version
-  const rec = { ...fc.recMerge(rlRec, rinRec, 5), ver: mergeVer(rlVer, rinVer) }
+  const { ver: rlVer, cr: rlCr, ...rlRec } = (rl.rec ?? {}) as Record<string, unknown>
+  const { ver: rinVer, cr: rinCr, ...rinRec } = (rin.rec ?? {}) as Record<string, unknown>
+  // ver and cr merged by hand: recMerge lets the server side win same-stamp entries, and a
+  // cr key names the client that discarded the edit, so a union keeps every client's log
+  const cr = { ...(rinCr as VerHist|undefined), ...(rlCr as VerHist|undefined) }
+  const tagged = Object.keys(cr).length > 0
+  const rec = { ...fc.recMerge(rlRec, rinRec, 5), ver: mergeVer(rlVer, rinVer)
+    , ...(tagged ? { cr } : {}) }
   const base = pickVer(rl.rec, rin.dt)
-  if (base) return patchMod({ ...rin, rec, modAt: new Date() }, base, rl)
-  let kept = shelfVer(rec, verKey(rl.dt, rl.modAt), verSnap(rl))
-  kept = shelfVer(kept, verKey(rin.dt, null), verSnap(rin))
-  return { ...rin, rec: kept, modAt: undefined
-    , tid: rl.tid === -1 ? rl.tid : rin.tid }
+  if (base) return withChgTag(patchMod({ ...rin, rec, modAt: new Date() }, base, rl), tagged)
+  const key = crStamp(rl.modAt)
+  if (key) crAdded.push({ ref: rl.ref, stamp: key, reason: missReason(rl, rin) })
+  const kept = putCr(rec, rl.modAt, rl)
+  const out = { ...rin, rec: putVer(kept, rin.dt, rin), modAt: undefined
+    , tid: rl.tid === -1 ? rl.tid : rin.tid } as Da
+  return withChgTag(out, tagged || Boolean(key))
 }
 /** bulk resolving clash of uniq ref+type and PK */
 export async function bulkMerge(clash: Da[]) {
@@ -459,9 +650,9 @@ export async function bulkMerge(clash: Da[]) {
   const tidSet = new Set(clash.map(row=> row.tid))
   await db.das.filter(row=> tidSet.has(row.tid)).modify((live_row) => {
     let in_row = tid2row[live_row.tid!]
-    if (uniqsTag(live_row)=== uniqsTag(in_row))
+    if (daUniq(live_row)=== daUniq(in_row))
       in_row = deepMerge(in_row, live_row)
-    else toPut.push( {...nopkTag(Dexie.deepClone(live_row)), modAt:new Date()})
+    else toPut.push( {...daNoPk(Dexie.deepClone(live_row)), modAt:new Date()})
     Object.assign(live_row, in_row)
     live_row.modAt = new Date()
     delete tid2row[live_row.tid!]

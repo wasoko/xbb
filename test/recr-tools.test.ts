@@ -4,7 +4,7 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../src/sdb';
-import { createDefaultExecutor, getStore, type ToolCall } from '../src/recr';
+import { createDefaultExecutor, getStore, isModuleSource, type ToolCall } from '../src/recr';
 
 const UUID = '11111111-1111-4111-8111-111111111111';
 
@@ -18,6 +18,11 @@ function call(name: string, args: Record<string, unknown>): ToolCall {
 async function run(name: string, args: Record<string, unknown>) {
   const [msg] = await ex().execute([call(name, args)], getStore());
   return msg.content;
+}
+
+/** Seed a script row the way the browser check does: a raw put carrying the `srcType` tag. */
+async function putSrc(ref: string, txt: string) {
+  await db.das.put({ ref, type: 'src', txt, tags: ['srcType'], rec: {}, dt: new Date() });
 }
 
 beforeEach(async () => {
@@ -34,13 +39,15 @@ describe('file tools', () => {
     expect(row?.tags).toEqual(['ai']);
   });
 
-  it('shelves the pre-edit version on rewrite, like the editor does', async () => {
+  it('marks a rewrite dirty without shelving a version of its own', async () => {
     await run('write_file', { filePath: 'src/b.ts', content: 'one' });
     await run('write_file', { filePath: 'src/b.ts', content: 'two' });
 
     const row = await db.das.where('[ref+type]').equals(['src/b.ts', 'src']).first();
     expect(row?.txt).toBe('two');
-    expect(Object.values(row?.rec.ver ?? {}).map(v => (v as { txt: string }).txt)).toEqual(['one']);
+    expect(row?.modAt).toBeInstanceOf(Date);
+    // no server has named this text: a version enters rec.ver only when one does
+    expect(row?.rec.ver).toBeUndefined();
   });
 
   it('selects a markdown row by extension rather than by the write path', async () => {
@@ -107,5 +114,58 @@ describe('run_src', () => {
 
   it('reports an unknown script', async () => {
     expect(await run('run_src', { ref: 'scripts/none.ts' })).toBe('Error: script not found: scripts/none.ts');
+  });
+
+  it('ignores the srcType tag when resolving the row', async () => {
+    await putSrc('scripts/tagged.js', 'return "tagged"');
+    expect(await run('run_src', { ref: 'scripts/tagged.js' })).toBe('tagged');
+  });
+});
+
+describe('run_src module rows', () => {
+  it('imports a module row and calls its default export with ctx', async () => {
+    await putSrc('scripts/mod.js', 'export default async function (ctx) { return ctx.args.n * 2 }');
+    expect(await run('run_src', { ref: 'scripts/mod.js', args: { n: 21 } })).toBe('42');
+  });
+
+  it('stringifies a non-string module result', async () => {
+    await putSrc('scripts/mod_obj.js', 'export default () => ({ ok: true })');
+    expect(await run('run_src', { ref: 'scripts/mod_obj.js' })).toBe('{\n  "ok": true\n}');
+  });
+
+  it('reports a module without a default function', async () => {
+    await putSrc('scripts/mod_named.js', 'export const value = 1');
+    expect(await run('run_src', { ref: 'scripts/mod_named.js' }))
+      .toBe('Error running scripts/mod_named.js: module row must export a default function(ctx)');
+  });
+
+  it('reports a module syntax error with the ref', async () => {
+    await putSrc('scripts/mod_bad.js', 'export default function (');
+    expect(await run('run_src', { ref: 'scripts/mod_bad.js' }))
+      .toContain('Error running scripts/mod_bad.js:');
+  });
+
+  it('detects module syntax that shares a line with earlier statements', async () => {
+    await putSrc('scripts/mod_inline.js', 'let n = 0; export default () => ++n');
+    expect(await run('run_src', { ref: 'scripts/mod_inline.js' })).toBe('1');
+  });
+
+  it('keeps module state across two calls while the text is unchanged', async () => {
+    await putSrc('scripts/mod_state.js', 'let n = 0\nexport default () => ++n');
+    expect(await run('run_src', { ref: 'scripts/mod_state.js' })).toBe('1');
+    expect(await run('run_src', { ref: 'scripts/mod_state.js' })).toBe('2');
+  });
+});
+
+describe('run_src source classification', () => {
+  it('separates module statements from function-body expressions', () => {
+    expect(isModuleSource('export default 1')).toBe(true);
+    expect(isModuleSource('import x from "y"')).toBe(true);
+    expect(isModuleSource('  export{ a }')).toBe(true);
+    expect(isModuleSource('import.meta.url')).toBe(true);
+    expect(isModuleSource('exports.n = 1')).toBe(false);
+    expect(isModuleSource('const m = await import("x")')).toBe(false);
+    expect(isModuleSource('import("x")')).toBe(false);
+    expect(isModuleSource('return 1')).toBe(false);
   });
 });

@@ -9,13 +9,13 @@
  * `type='recr'`. Markdown keys (`secret.md`, `gate.md`) resolve in the `md`
  * namespace, so one table serves both the agent and the tag UI.
  * Message passing: unified wrapper for chrome.runtime.sendMessage / window.postMessage.
- * Built-in tools: Dexie-backed file tools plus `run_src` script execution.
+ * Built-in tools: Dexie-backed file tools plus `run_src` script and module execution.
  *
  * Reference: /mnt/c/q/t/vscode/extensions/copilot/src/extension/intents/node/toolCallingLoop.ts
  */
 
 import type { Table } from 'dexie';
-import { db, DEL_TAG, getLatestByRefType, shelfVer, verKey, verSnap, treeCac, treeCacOpts, treeCacCurrent } from './sdb';
+import { db, DEL_TAG, daDirty, daEdit, daLive, daType as fileType, daWin, treeCac, treeCacOpts, treeCacCurrent } from './sdb';
 import type { Da } from './sdb';
 import * as fc from './fc';
 import { bulletKv, bulletList, splitSections, subSections } from './recrMd';
@@ -50,9 +50,7 @@ export { GATE_REF, RECR_TYPE, SECRET_REF, TASK_COMPLETE };
 export const AI_TAG = 'ai';
 
 /** Row type for a file ref, matching the `src`/`md` pair the editor offers. */
-export function fileType(ref: string): string {
-  return ref.toLowerCase().endsWith('.md') ? 'md' : 'src';
-}
+export { fileType };
 
 export interface IRecrStore {
   get(key: string): Promise<string | undefined>;
@@ -96,11 +94,7 @@ class DexieTagStore implements IRecrStore {
   /** The row that currently wins for `ref`+`type`, skipping tombstones. */
   private async row(ref: string, type: string): Promise<Da | undefined> {
     const rows = await this.table.where('[ref+type]').equals([ref, type]).toArray();
-    const live = rows.filter(r => !r.tags?.includes(DEL_TAG));
-    if (live.length === 0) return undefined;
-    const dirty = live.filter(r => r.modAt != null);
-    if (dirty.length > 0) return dirty[dirty.length - 1];
-    return live.reduce((a, b) => (new Date(a.dt ?? 0).getTime() >= new Date(b.dt ?? 0).getTime() ? a : b));
+    return daWin(daLive(rows));
   }
 
   async get(key: string): Promise<string | undefined> {
@@ -113,7 +107,7 @@ class DexieTagStore implements IRecrStore {
     const existing = await this.row(ref, type);
     if (existing?.tid != null) {
       // `modAt` marks the row dirty, which is what `greet` pushes to the server.
-      await this.table.update(existing.tid, { txt: value, modAt: new Date() });
+      await this.table.update(existing.tid, daEdit(existing, value));
       return;
     }
     await this.table.put({ ref, type, txt: value, modAt: new Date(), rec: {} });
@@ -128,7 +122,7 @@ class DexieTagStore implements IRecrStore {
     const byRef = new Map<string, Da>();
     for (const r of rows) {
       const held = byRef.get(r.ref);
-      if (!held || (held.modAt == null && r.modAt != null)) byRef.set(r.ref, r);
+      if (!held || (!daDirty(held) && daDirty(r))) byRef.set(r.ref, r);
     }
     return [...byRef.values()].map(r => ({ key: r.ref, value: r.txt }));
   }
@@ -155,9 +149,8 @@ class DexieTagStore implements IRecrStore {
     const type = fileType(norm);
     const existing = await this.row(norm, type);
     if (existing?.tid != null) {
-      // same shelving recipe the editor uses, so a later sync can patch against it
-      await this.table.update(existing.tid, { txt, modAt: new Date()
-        , rec: shelfVer(existing.rec, verKey(existing.dt, existing.modAt), verSnap(existing)) });
+      // the editor's own write recipe, so a later sync can patch against the shelved ancestor
+      await this.table.update(existing.tid, daEdit(existing, txt));
       return;
     }
     await this.table.put({ ref: norm, type, txt, tags: [AI_TAG], modAt: new Date(), rec: {} });
@@ -774,12 +767,102 @@ async function listDir(args: Record<string, unknown>, store: IRecrStore): Promis
 const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor as
   new (...args: string[]) => (...args: unknown[]) => Promise<unknown>;
 
+/** Value `run_src` hands a script: the row's ref, its arguments, and the page's Dexie tables. */
+export interface RecrScriptContext {
+  db: typeof db;
+  ref: string;
+  args: unknown;
+  console: Console;
+}
+
+/**
+ * Dynamic `import()` of a specifier that is not a literal. `@vite-ignore` keeps
+ * the bundler from trying to resolve a `data:` URL at build time.
+ *
+ * `new Function`/indirect `eval` cannot carry this: the test environment runs
+ * them in a vm context whose `import()` needs a callback Node does not install.
+ */
+const nativeImport = (u: string): Promise<{ default?: unknown }> =>
+  import(/* @vite-ignore */ u) as Promise<{ default?: unknown }>;
+
+/**
+ * Whether a `type='src'` body is an ES module rather than a function body.
+ *
+ * The two are mutually exclusive: `export` is a syntax error inside
+ * `AsyncFunction`, and a top-level `return` is a syntax error inside a module.
+ * A line whose first token is a static `import` or an `export` names the module
+ * form; `import(` and `exports.x` are expressions a function body may hold.
+ *
+ * @param body row text of a `type='src'` row
+ * @returns true when the body opens a line with `import` or `export`
+ */
+export function isModuleSource(body: string): boolean {
+  return /^[ \t]*(?:export(?![$\w])|import(?![$\w(]))/m.test(body);
+}
+
+/**
+ * Module specifier for a `type='src'` body: a `data:` URL, which browsers and
+ * Node both `import()`.
+ *
+ * The URL carries the whole body, so identical text yields one module instance
+ * and module-level state survives a later `run_src` call that reads the same
+ * text. A `data:` module has no base URL, so a relative specifier inside it
+ * cannot resolve.
+ *
+ * @param body source text of the module row
+ * @returns a `data:text/javascript` URL carrying `body`
+ */
+export function moduleSourceUrl(body: string): string {
+  return 'data:text/javascript;charset=utf-8,' + encodeURIComponent(body);
+}
+
+/**
+ * Imports a module row and calls its default export with `ctx`.
+ *
+ * @param body module source text
+ * @param ctx value passed to the default export
+ * @returns the default export's result
+ * @throws when the module exports no default function
+ */
+async function runModule(body: string, ctx: RecrScriptContext): Promise<unknown> {
+  const mod = await nativeImport(moduleSourceUrl(body));
+  const fn = mod.default;
+  if (typeof fn !== 'function') throw new Error('module row must export a default function(ctx)');
+  return await (fn as (ctx: RecrScriptContext) => unknown)(ctx);
+}
+
+/**
+ * Runs `body` on the path its syntax allows.
+ *
+ * A one-line body such as `let n = 0; export default ...` puts the module
+ * keyword off the line start, so the constructor's syntax error is the
+ * tie-breaker: it names `export`/`import` only for module-only syntax.
+ *
+ * @param body row text of a `type='src'` row
+ * @param ctx value passed to the script
+ * @returns the script's result
+ */
+async function runBody(body: string, ctx: RecrScriptContext): Promise<unknown> {
+  if (isModuleSource(body)) return runModule(body, ctx);
+  let run: (ctx: RecrScriptContext) => Promise<unknown>;
+  try {
+    run = new AsyncFunction('ctx', body) as (ctx: RecrScriptContext) => Promise<unknown>;
+  } catch (e) {
+    if (e instanceof SyntaxError && /\b(?:export|import)\b/.test(e.message)) {
+      return runModule(body, ctx);
+    }
+    throw e;
+  }
+  return await run(ctx);
+}
+
 /**
  * run_src: run the body of a `type='src'` row in page context.
  *
- * The body receives one `ctx` argument — `{ db, ref, args, console }` — so it can
- * reach the Dexie tables and the live DOM directly. That reach is why the gate
- * level, not this tool, is the authorization point: only `rwr` and above offer it.
+ * The script receives one `ctx` argument — `{ db, ref, args, console }` — so it
+ * can reach the Dexie tables and the live DOM directly. That reach is why the
+ * gate level, not this tool, is the authorization point: only `rwr` and above
+ * offer it. A module row must export a default function that takes `ctx`.
  *
  * @param args `ref` names the script row; `args` is forwarded to the script as `ctx.args`
  * @param store store holding the script row
@@ -790,9 +873,9 @@ async function runSrc(args: Record<string, unknown>, store: IRecrStore): Promise
   if (!ref) return 'Error: ref is required';
   const body = await store.readScript(ref);
   if (body === undefined) return `Error: script not found: ${ref}`;
+  const ctx: RecrScriptContext = { db, ref, args: args.args ?? {}, console };
   try {
-    const run = new AsyncFunction('ctx', body);
-    const out = await run({ db, ref, args: args.args ?? {}, console });
+    const out = await runBody(body, ctx);
     if (out === undefined) return `${ref} completed with no result`;
     return (typeof out === 'string' ? out : JSON.stringify(out, null, 2)).slice(0, 8000);
   } catch (e) {
@@ -1647,7 +1730,7 @@ function getDefaultToolDefs(): ToolDef[] {
     },
     {
       name: 'run_src',
-      description: 'Runs the body of a source row (type=src) in the page, awaiting its result. The body receives one ctx argument: { db, ref, args, console }.',
+      description: 'Runs a source row (type=src) in the page, awaiting its result. A function body receives one ctx argument: { db, ref, args, console }. A body that opens a line with import/export runs as an ES module instead and must export a default function(ctx).',
       parameters: {
         type: 'object',
         properties: {

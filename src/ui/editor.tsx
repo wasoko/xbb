@@ -1,9 +1,9 @@
 // src/components/EditorSplitPane.tsx
 
 // src/components/Chat.tsx
-import { useState, useEffect, useRef } from 'react';
-import { db, DEL_TAG, getLatestByRefType, shelfVer, verKey, verSnap, type Da, treeCacOpts, treeCacCurrent } from '../sdb';
-import { greet } from '../greet';
+import { useState, useEffect, useRef, useSyncExternalStore } from 'react';
+import { db, DEL_TAG, daEdit, daRead, stampTime, type Da, type VerHist, treeCacOpts, treeCacCurrent } from '../sdb';
+import { consumeConflict, getConflicts, greet, softGreet, subscribeConflicts } from '../greet';
 import * as fc from '../fc';
 import {
   buildPromptFromNode, getStore, loadBranchingSession, parseSecrets, rcr, recrBus, SECRET_REF,
@@ -19,6 +19,10 @@ import { javascript } from '@codemirror/lang-javascript';
 import { markdown } from '@codemirror/lang-markdown';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { LocalErrorBoundary } from './ErrorBoundaryOutlet';
+import { useTabSyncState } from './tabSync';
+import { tabVisual, type TabSyncState } from './tabState';
+import { reapplyBuffer } from './reapply';
+import { DiffTab } from './diffTab';
 
 interface ArtfactProps {
   openTabs: string[];
@@ -26,11 +30,59 @@ interface ArtfactProps {
   onTabChange: (activeTab: string, openTabs: string[]) => void;
 }
 
-function TagMeta({ ref }: { ref: string }) {
+/** Diff tabs are not rows: the tab ref carries the row ref, the history, and its stamp. */
+const DIFF_PREFIX = 'diff|'
+interface DiffTarget { ref: string; source: 'ver' | 'cr'; stamp: string }
+/** Parse a `diff|<source>|<stamp>|<ref>` tab ref.
+ * @param tab tab ref from the tab bar
+ * @returns the target, or undefined when the ref names a row */
+function parseDiffRef(tab: string): DiffTarget | undefined {
+  if (!tab.startsWith(DIFF_PREFIX)) return undefined
+  const [source, stamp, ...rest] = tab.slice(DIFF_PREFIX.length).split('|')
+  if ((source !== 'ver' && source !== 'cr') || !stamp || rest.length === 0) return undefined
+  return { ref: rest.join('|'), source, stamp }
+}
+/** The tab ref for one diff target; `encodeTabs` URL-encodes the separators. */
+const diffTabRef = (t: DiffTarget) => `${DIFF_PREFIX}${t.source}|${t.stamp}|${t.ref}`
+/** Tab label: a diff tab names its version, a draft reads untitled, a row shows its basename. */
+function tabLabel(tab: string, draft: boolean | undefined): string {
+  const d = parseDiffRef(tab)
+  if (d) return `⇄ ${d.source} ${fc.fmtAgo(stampTime(d.stamp))} ${d.ref.split('/').pop()}`
+  return draft ? 'untitled' : tab.split('/').pop() ?? tab
+}
+
+/** The `ver`/`cr` history of the dropdown's row: one button per version, opening the diff tab. */
+function Versions({ source, rec, onPick }: {
+  source: 'ver' | 'cr';
+  rec: Record<string, unknown>;
+  onPick: (stamp: string) => void;
+}) {
+  const hist = (rec[source] ?? {}) as VerHist;
+  const stamps = Object.keys(hist);
+  if (stamps.length === 0) return null;
+  return (
+    <div className="dropdown-field" style={{ display: 'block', fontSize: 11 }}>
+      <div style={{ opacity: 0.75 }}>{source} ({stamps.length})</div>
+      {stamps.map(stamp => (
+        <button
+          key={stamp}
+          onClick={() => onPick(stamp)}
+          title={`diff the row against this ${source === 'cr' ? 'discarded edit' : 'server version'}`}
+          style={{ display: 'block', width: '100%', textAlign: 'left', fontSize: 11
+            , padding: '2px 4px', cursor: 'pointer', opacity: 0.9 }}
+        >
+          {new Date(stampTime(stamp)).toLocaleString()} · {(hist[stamp].txt ?? '').slice(0, 40)}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TagMeta({ ref, sync }: { ref: string, sync?: TabSyncState }) {
   const [meta, setMeta] = useState<{ dtAgo?: string, visitAgo?: string }>({});
 
   useEffect(() => {
-    getLatestByRefType(ref).then(tag => {
+    daRead(ref).then(tag => {
       if (!tag) return;
       const visitTime = (tag.rec as any)?.visitTime ?? 0;
       
@@ -54,6 +106,11 @@ function TagMeta({ ref }: { ref: string }) {
     <div className="meta-grid">
       <div className="meta-item"><span>Synced:</span> <span>{meta.dtAgo}</span></div>
       <div className="meta-item"><span>Visit:</span> <span>{meta.visitAgo}</span></div>
+      {sync && (
+        <div className="meta-item" style={{ display: 'block', whiteSpace: 'normal' }}>
+          <span>{sync.row}:</span> <span>{sync.detail}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -109,10 +166,19 @@ function ProviderSelector() {
 
 export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
   const [contents, setContents] = useState<Record<string, string>>({});
+  /** Tabs with no durable row yet: the label reads "untitled" until the tab dropdown saves one. */
+  const [drafts, setDrafts] = useState<Record<string, boolean>>({});
   const [dropdownTab, setDropdownTab] = useState<string | null>(null);
   const [dropdownX, setDropdownX] = useState(0);
   const [editVal, setEditVal] = useState({ ref: '', type: '', tags: [] as string[] });
+  /** `rec` of the dropdown's row, whose `ver`/`cr` histories the dropdown lists. */
+  const [dropdownRec, setDropdownRec] = useState<Record<string, unknown>>({});
   const dropdownRef = useRef<HTMLDivElement | null>(null);
+  /** Set when the active tab is a diff tab, which has no row and no code editor. */
+  const diffTarget = parseDiffRef(activeTab);
+  /** Sync state of the active tab; other tabs stay unmarked. A diff tab has no row to mark. */
+  const syncState = useTabSyncState(diffTarget ? '' : activeTab, contents[activeTab]);
+  const activeVisual: ReturnType<typeof tabVisual> = diffTarget ? { glyph: '' } : tabVisual(syncState);
   
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -133,33 +199,54 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
       const newContents = { ...contents };
       let changed = false;
 
+      const draftNext: Record<string, boolean> = {};
       for (const tab of openTabs) {
+        if (parseDiffRef(tab)) continue; // a diff tab has no row of its own
         if (!newContents[tab]) {
-          const tag = await getLatestByRefType(tab);
-          newContents[tab] = tag?.txt ?? `// ${tab}\n// New content`;
+          const row = await daRead(tab);
+          newContents[tab] = row?.txt ?? `// ${tab}\n// New content`;
+          draftNext[tab] = !row;
           changed = true;
         }
       }
-      if (changed) setContents(newContents);
+      if (changed) {
+        setContents(newContents);
+        setDrafts(prev => ({ ...prev, ...draftNext }));
+      }
 
-      // Sync with server and update if changed
-      greet(db.das).then(async () => {
-        const current = { ...contents };
-        let hasUpdates = false;
-        for (const tab of openTabs) {
-          const tag = await getLatestByRefType(tab);
-          if (tag && tag.txt !== current[tab]) {
-            current[tab] = tag.txt;
-            hasUpdates = true;
-          }
+      // text each buffer was loaded from: the ancestor a reapply diffs the local text against
+      const baselines = { ...newContents };
+
+      // an early round, so a conflict meets a shelved ancestor instead of a stale copy
+      await greet(db.das);
+      const fetched: Record<string, string> = {};
+      for (const tab of openTabs) {
+        if (parseDiffRef(tab)) continue;
+        const row = await daRead(tab);
+        if (row) fetched[tab] = row.txt;
+      }
+      if (Object.keys(fetched).length === 0) return;
+      setContents(prev => {
+        const next = { ...prev };
+        for (const [ref, txt] of Object.entries(fetched)) {
+          const live = prev[ref];
+          if (live === undefined) continue;
+          // keystrokes typed while the round ran are reapplied onto the fetched text
+          next[ref] = reapplyBuffer(live, baselines[ref] ?? txt, txt).txt;
         }
-        if (hasUpdates) setContents(current);
+        return next;
       });
     };
     loadContents();
   }, [openTabs]);
 
+  const softGreetAt = useRef(0);
   const handleContentChange = (value: string) => {
+    // an early round while the user types: cheap, throttled, and it keeps an ancestor shelved
+    if (Date.now() - softGreetAt.current > 5000) {
+      softGreetAt.current = Date.now();
+      softGreet();
+    }
     setContents(prev => ({
       ...prev,
       [activeTab]: value
@@ -177,12 +264,32 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
     setDropdownX(e.pageX);
 
     // greet first to get latest server/peer updates before reading
-    // await greet(db.das);
-    const da = await getLatestByRefType(tab);
-    if (da) {
-      setEditVal({ ref: da.ref, type: da.type, tags: da.tags || [] });
-    }
+    const da = await daRead(tab);
+    setEditVal(da
+      ? { ref: da.ref, type: da.type, tags: da.tags || [] }
+      : { ref: tab, type: 'md', tags: [] });
+    setDropdownRec(da?.rec ?? {});
+    softGreet();
   };
+
+  /** Open (or focus) the diff tab for one row version, and retire its conflict notice. */
+  const popDiff = (t: DiffTarget) => {
+    const tab = diffTabRef(t);
+    consumeConflict({ ref: t.ref, stamp: t.stamp });
+    onTabChange(tab, openTabs.includes(tab) ? openTabs : [...openTabs, tab]);
+  };
+
+  // A discarded edit a greet round announced opens its diff, so the loss is visible at once.
+  // Only rows already open, one per batch: a snap merge must not open a tab per row.
+  const conflicts = useSyncExternalStore(subscribeConflicts, getConflicts);
+  const poppedConflicts = useRef(new Set<string>());
+  useEffect(() => {
+    const fresh = conflicts.find(c => openTabs.includes(c.ref)
+      && !poppedConflicts.current.has(`${c.ref}@${c.stamp}`));
+    if (!fresh) return;
+    poppedConflicts.current.add(`${fresh.ref}@${fresh.stamp}`);
+    popDiff({ ref: fresh.ref, source: 'cr', stamp: fresh.stamp });
+  }, [conflicts, openTabs]);
 
   const saveTagMetadata = async () => {
     if (!dropdownTab) return;
@@ -195,15 +302,42 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
     // greet to sync before modifying
     await greet(db.das);
 
-    const tag = await getLatestByRefType(dropdownTab);
-    if (!tag || !tag.tid) return;
+    const tag = await daRead(dropdownTab);
+
+    // Unsaved draft: the tab dropdown is its save action.
+    if (!tag?.tid) {
+      const draftRef = dropdownTab;
+      await db.das.put({
+        ref: editVal.ref,
+        type: editVal.type,
+        tags: editVal.tags,
+        txt: contents[draftRef] ?? '',
+        rec: {},
+        modAt: new Date(),
+      } as Da);
+      await greet(db.das);
+
+      const newTabs = openTabs.map(t => t === draftRef ? editVal.ref : t);
+      const newActive = activeTab === draftRef ? editVal.ref : activeTab;
+      onTabChange(newActive, newTabs);
+
+      setDrafts(prev => {
+        const next = { ...prev };
+        delete next[draftRef];
+        next[editVal.ref] = false;
+        return next;
+      });
+
+      setDropdownTab(null);
+      return;
+    }
 
     const oldRef = tag.ref;
 
     if (oldRef !== editVal.ref) {
       // Rename: mark old ref row with [del], insert new row with new ref
       const delTags = [...(tag.tags || []).filter(t => t !== DEL_TAG), DEL_TAG];
-      await db.das.update(tag.tid, { tags: delTags, modAt: new Date() });
+      await db.das.update(tag.tid, { ...daEdit(tag, tag.txt), tags: delTags });
 
       // Insert new row with new ref, carrying over content
       const { tid, dt, rec, ...rest } = tag;
@@ -228,34 +362,60 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
       window.history.pushState({}, '', url);
     } else {
       // Same ref — just update metadata
-      await db.das.update(tag.tid, {
-        type: editVal.type,
-        tags: editVal.tags,
-        modAt: new Date(),
-      });
+      await db.das.update(tag.tid, { ...daEdit(tag, tag.txt)
+        , type: editVal.type, tags: editVal.tags });
       await greet(db.das);
     }
     setDropdownTab(null);
   };
 
   const saveToDb = async () => {
-    if (!activeTab) return;
+    if (!activeTab || parseDiffRef(activeTab)) return; // a diff tab has no buffer to save
     const content = contents[activeTab];
     if (content === undefined) return;
 
-    await greet(db.das);
-    const tag = await getLatestByRefType(activeTab);
-    if (tag && tag.tid) {
-      const updateData: any = { 
-        txt: content,
-        modAt: new Date(),
-        // shelf the pre-edit version: the exact dt copy deepMerge can later patch against
-        rec: shelfVer(tag.rec, verKey(tag.dt, tag.modAt), verSnap(tag)),
-      };
+    // the row the app resolves, not the newest dt: writing onto a different row of the same ref
+    // is what splits one key into two
+    const row = await daRead(activeTab);
+    if (!row?.tid) return;             // a draft is created by the tab dropdown save
+    if (row.txt === content) return;   // nothing typed since the last write
 
-      await db.das.update(tag.tid, updateData);
-    }
+    // replace the text and mark the row dirty; the sync side records the versions
+    await db.das.update(row.tid, daEdit(row, content));
+    softGreet();                       // push in the background; the edit stays usable
   };
+  const saveRef = useRef(saveToDb);
+  saveRef.current = saveToDb;
+
+  /** Persist the buffer when focus leaves the editor, the pointer goes elsewhere, the page is
+   *  hidden or unloaded, or typing pauses: the row write is what makes the edit durable. */
+  useEffect(() => {
+    const flush = () => { void saveRef.current(); };
+    const onPointerDown = (e: PointerEvent) => {
+      if (!(e.target as Element | null)?.closest?.('.code-editor')) flush();
+    };
+    const onVisibility = () => { if (document.visibilityState === 'hidden') flush(); };
+    // Page Lifecycle 'freeze' is absent from the DOM typings; EventTarget takes the name as a string
+    const lifecycle: EventTarget = document;
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('blur', flush);
+    window.addEventListener('pagehide', flush);
+    lifecycle.addEventListener('freeze', flush);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('blur', flush);
+      window.removeEventListener('pagehide', flush);
+      lifecycle.removeEventListener('freeze', flush);
+    };
+  }, []);
+
+  // a pause in typing is enough to make the edit durable
+  useEffect(() => {
+    const id = setTimeout(() => { void saveRef.current(); }, 2000);
+    return () => clearTimeout(id);
+  }, [contents[activeTab], activeTab]);
   
   const handleCloseTab = (tabToClose: string) => {
     const newTabs = openTabs.filter(t => t !== tabToClose);
@@ -292,6 +452,8 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
           <div
             key={tab}
             className={`tab ${activeTab === tab ? 'active' : ''}`}
+            style={activeTab === tab ? activeVisual.tabStyle : undefined}
+            title={activeTab === tab ? activeVisual.title : undefined}
             onClick={() => onTabChange(tab, openTabs)}            onMouseDown={(e) => {
               if (e.button === 1) {
                 e.preventDefault();
@@ -300,14 +462,22 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
             }}          >
             <span 
               className={`tab-name ${activeTab === tab ? 'active-ref' : ''}`}
+              style={activeTab === tab
+                ? { ...(drafts[tab] ? { color: '#888' } : {}), ...activeVisual.labelStyle }
+                : drafts[tab] ? { color: '#888' } : undefined}
               onClick={(e) => { 
-                if (activeTab === tab) {
+                if (activeTab === tab && !parseDiffRef(tab)) {
                   e.stopPropagation(); 
                   openDropdown(tab, e); 
                 }
               }}
             >
-              {tab.split('/').pop()}
+              {activeTab === tab && activeVisual.glyph ? activeVisual.glyph + ' ' : ''}
+              {tabLabel(tab, drafts[tab])}
+              {activeTab === tab && activeVisual.badge && (
+                <span style={{ marginLeft: 4, fontSize: 10, padding: '0 3px', borderRadius: 6
+                  , background: 'rgba(245, 158, 11, 0.35)' }}>{activeVisual.badge}</span>
+              )}
             </span>
             <button
               className="tab-close"
@@ -372,8 +542,14 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
               </div>
             </div>
             <div className="dropdown-meta">
-              <TagMeta ref={dropdownTab} />
+              <TagMeta ref={dropdownTab} sync={syncState} />
             </div>
+            <Versions source="ver" rec={dropdownRec}
+              onPick={stamp => { setDropdownTab(null)
+                ; popDiff({ ref: dropdownTab!, source: 'ver', stamp }) }} />
+            <Versions source="cr" rec={dropdownRec}
+              onPick={stamp => { setDropdownTab(null)
+                ; popDiff({ ref: dropdownTab!, source: 'cr', stamp }) }} />
             <div className="dropdown-actions">
               <button onClick={() => setDropdownTab(null)}>Cancel</button>
               <button onClick={saveTagMetadata} className="btn-save">Save</button>
@@ -382,30 +558,39 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
         </div>
       )}
       
-      <div className="code-editor" onBlur={saveToDb}>
-        <CodeMirror
-          value={contents[activeTab] || ''}
-          onChange={handleContentChange}
-          extensions={
-            (() => {
-              if (!activeTab) return [];
-              if (activeTab.endsWith('.md')) return [markdown()];
-              if (/\.(ts|tsx|js|jsx)$/.test(activeTab)) return [javascript({ jsx: true })];
-              return [];
-            })()
-          }
-          theme={oneDark}
-          height="100%"
-          basicSetup={{
-            lineNumbers: true,
-            highlightActiveLineGutter: true,
-            foldGutter: true,
-            dropCursor: true,
-            allowMultipleSelections: true,
-            indentOnInput: true,
-          }}
+      {diffTarget ? (
+        <DiffTab
+          refName={diffTarget.ref}
+          source={diffTarget.source}
+          stamp={diffTarget.stamp}
+          onApplied={(ref, txt) => setContents(prev => ({ ...prev, [ref]: txt }))}
         />
-      </div>
+      ) : (
+        <div className="code-editor" onBlur={saveToDb} onFocus={() => softGreet()}>
+          <CodeMirror
+            value={contents[activeTab] || ''}
+            onChange={handleContentChange}
+            extensions={
+              (() => {
+                if (!activeTab) return [];
+                if (activeTab.endsWith('.md')) return [markdown()];
+                if (/\.(ts|tsx|js|jsx)$/.test(activeTab)) return [javascript({ jsx: true })];
+                return [];
+              })()
+            }
+            theme={oneDark}
+            height="100%"
+            basicSetup={{
+              lineNumbers: true,
+              highlightActiveLineGutter: true,
+              foldGutter: true,
+              dropCursor: true,
+              allowMultipleSelections: true,
+              indentOnInput: true,
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -606,17 +791,53 @@ interface EditorSplitPaneProps {
   onTabChange: (activeTab: string, openTabs: string[]) => void;
 }
 
+/**
+ * Editor pane over the chat pane, with a draggable divider and the editor
+ * dropped entirely (chat at full height) while no tab is open.
+ */
 export function EditorSplitPane({ openTabs, activeTab, sessionId, onTabChange }: EditorSplitPaneProps) {
+  const [editorPct, setEditorPct] = useState(66);
+  const [dragging, setDragging] = useState(false);
+  const paneRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (e: MouseEvent) => {
+      const box = paneRef.current?.getBoundingClientRect();
+      if (!box || box.height === 0) return;
+      const pct = ((e.clientY - box.top) / box.height) * 100;
+      setEditorPct(Math.min(85, Math.max(20, pct)));
+    };
+    const stop = () => setDragging(false);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', stop);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', stop);
+    };
+  }, [dragging]);
+
+  const hasTabs = openTabs.length > 0;
+
   return (
-    <div className="editor-split-pane">
-      <div className="editor-container">
-        <LocalErrorBoundary>
-        <Artfact
-          openTabs={openTabs}
-          activeTab={activeTab}
-          onTabChange={onTabChange}
-        /></LocalErrorBoundary>
-      </div>
+    <div className="editor-split-pane" ref={paneRef}>
+      {hasTabs && (
+        <>
+          <div className="editor-container" style={{ flex: `0 0 ${editorPct}%` }}>
+            <LocalErrorBoundary>
+            <Artfact
+              openTabs={openTabs}
+              activeTab={activeTab}
+              onTabChange={onTabChange}
+            /></LocalErrorBoundary>
+          </div>
+          <div
+            className="resize-handle"
+            style={{ flex: '0 0 auto', width: '100%', height: 6, cursor: 'row-resize' }}
+            onMouseDown={(e) => { e.preventDefault(); setDragging(true); }}
+          />
+        </>
+      )}
       <div className="chat-container">
         <LocalErrorBoundary>
         <Chat sessionId={sessionId} /></LocalErrorBoundary>

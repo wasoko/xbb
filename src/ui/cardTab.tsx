@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { fmtAgo, sideLog } from '../fc';
 import { iqWithCrumbs, type Da } from '../sdb';
-import { Cs1Renderer } from './cs1';
+import { cardDoubleClick, Cs1Renderer, matchedRefsByPins } from './cs1';
 
 /** Rows read per page; the sentinel widens the read window by this much. */
 const PAGE = 555;
@@ -82,6 +82,21 @@ export function CardTab({ filters, onSelectTag, selectedRef, tidLoc, renderer }:
     return { pinRows: pin, ungrouped: rest };
   }, [das]);
 
+  /* Every ref a pin card renders is dropped from the list below it. */
+  const pinKey = useMemo(
+    () => pinRows.map((p) => `${p.ref}\u0000${p.tid}\u0000${p.txt}`).join('\u0001'),
+    [pinRows],
+  );
+  const pinMatchedRefs = useLiveQuery(
+    async () => matchedRefsByPins(pinRows),
+    [pinKey],
+    new Set<string>(),
+  );
+  const listedUngrouped = useMemo(
+    () => ungrouped.filter((d) => !pinMatchedRefs.has(d.ref)),
+    [ungrouped, pinMatchedRefs],
+  );
+
   /* A page shorter than asked for means the table is exhausted. */
   const canGrow = !tidLoc && das.length >= limit;
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -105,7 +120,8 @@ export function CardTab({ filters, onSelectTag, selectedRef, tidLoc, renderer }:
             <div
               key={p.ref + String(p.tid)}
               className="pin-card-row"
-              style={{ height: `${pinHeightVh}vh`, overflow: 'auto' }}
+              style={{ height: `${pinHeightVh}vh`, overflow: 'auto', touchAction: 'manipulation' }}
+              onDoubleClick={cardDoubleClick(p.ref, onSelectTag)}
             >
               {sideLog(`rend:`,renderer) === 'cs1'
                 ? <Cs1Renderer da={p} onSelectTag={onSelectTag} />
@@ -116,7 +132,7 @@ export function CardTab({ filters, onSelectTag, selectedRef, tidLoc, renderer }:
       )}
 
       <div className="ungrouped-das">
-        {ungrouped.map((d) => (
+        {listedUngrouped.map((d) => (
           <Cs2Renderer
             key={d.ref + String(d.tid)}
             da={d}

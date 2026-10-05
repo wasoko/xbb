@@ -167,3 +167,43 @@ export function Cs1Renderer({ da, onSelectTag }: { da: Da; onSelectTag: (ref: st
     </div>
   );
 }
+
+/**
+ * Double-click handler for a pin card's non-interactive area. Events from the
+ * card's own controls (tag buttons, matched-row buttons and links) are ignored
+ * so they keep their own click behavior.
+ *
+ * @param ref - Pin card ref to open for editing.
+ * @param onEdit - Opens the ref in the editor pane.
+ * @returns Mouse handler that forwards only background double-clicks.
+ */
+export function cardDoubleClick(ref: string, onEdit: (ref: string) => void) {
+  return (e: React.MouseEvent<Element>) => {
+    const target = e.target as Element | null;
+    if (target?.closest('button, a, input, textarea, select, [contenteditable]')) return;
+    onEdit(ref);
+  };
+}
+
+/**
+ * Refs rendered by pin cards: one `iq` lookup per heading, using the same
+ * per-H1-group cumulative tag snapshot as `Cs1Line`/`MatchedDas`, so the
+ * ungrouped list can omit rows a pin card already shows.
+ *
+ * @param pins - Pin card rows whose markdown headings are parsed.
+ * @returns Refs matched by any pin card heading.
+ */
+export async function matchedRefsByPins(pins: Da[]): Promise<Set<string>> {
+  const refs = new Set<string>();
+  for (const pin of pins) {
+    for (const group of groupByH1(parseHeadings(pin.txt || ''))) {
+      const accumulated: string[] = [];
+      for (const h of group) {
+        accumulated.push(...h.tags);
+        if (accumulated.length === 0) continue;
+        for (const d of await iq([...accumulated])) refs.add(d.ref);
+      }
+    }
+  }
+  return refs;
+}

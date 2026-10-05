@@ -14,7 +14,7 @@ pre-port `idb.db.tags` design, so this one is the authority for xbb. Grounded in
 - `src/recrGate.ts` — `GateLevel`, `loadGate`, `gateTools`, `filterTools`
 - `src/recrMd.ts` — the `## Section` / `* Key:` / `- item:` dialect
 - `src/recrConst.ts` — shared ids · `src/recrPlugin.ts` — hook host (unused, R2)
-- `src/sdb.ts` — `Da`, `db.das`, `isUiTag`, `getSecret`, `getLatestByRefType`
+- `src/sdb.ts` — `Da`, `db.das`, `isUiTag`, `getSecret`, `daRead`
 - `src/ui/editor.tsx` — `Chat` · `vite.config.ts` — `/llm` dev proxy
 
 Entity: `Da { tid, txt, ref, type, tags?, dt, modAt, rec }`, unique on
@@ -50,7 +50,7 @@ flowchart TD
     TC -->|"no"| DONE["recr-done → Chat shows text"]
     TC -->|"yes"| G{"gate allows?"}
     G -->|"no"| REF["refusal text recorded as the tool result"]
-    G -->|"yes"| EX["run tool against db.das / AsyncFunction"]
+    G -->|"yes"| EX["run tool against db.das / src body"]
     REF --> S["saveTurnNode: assistant + tool results"]
     EX --> S
     S --> STOP{"task_complete,<br/>maxIterations,<br/>maxToolCalls?"}
@@ -88,9 +88,9 @@ rows are skipped. Writes set `modAt`, which is exactly what `greet` pushes, so
 sessions and settings replicate across clients like any other row (`docs/greet.md`).
 Recr rows are hidden from the tag UI by `sdb.isUiTag` (`iq`, `stat_tags`).
 
-File writes reuse the editor's versioning recipe — `shelfVer(rec, verKey(dt,
-modAt), verSnap(row))` — so the agent's edit can later be patched onto the server
-copy by `deepMerge`.
+File writes go through the editor's own recipe, `sdb.daEdit(row, txt)`: the text is
+replaced and `modAt` set, which is exactly what `greet` pushes. A version enters
+`rec.ver` or `rec.cr` only on the sync side (`docs/greet.md` §3).
 
 ---
 
@@ -103,17 +103,23 @@ missing, tombstoned, or names an unknown level.
 |---|---|---|
 | `read` | `read_file`, `search_content`, `list_dir` | reads and searches existing rows |
 | `rw` | `write_file` | creates rows (tagged `ai`), shelving the pre-edit version |
-| `rwr` | `run_src` | runs a `type='src'` body in page context |
+| `rwr` | `run_src` | runs a `type='src'` body or module in page context |
 | `all` | `run_command` | REST calls to `## Endpoints` prefixes |
 
 `task_complete` is never gated. The level is applied twice: `filterTools` keeps
 the tools out of the request, and `ToolExecutor.denial` refuses the call if the
 model asks for one from memory — a filter alone is not enforcement.
 
-`run_src` builds an `AsyncFunction` from the row body and calls it with one `ctx`
-argument (`{ db, ref, args, console }`). It runs in the page's realm with the
-page's privileges, which is why the gate level, not the tool, is the
-authorization point. `run_command` fails closed: an empty endpoint list refuses
+`run_src` reads the row body and picks one of two execution paths. A body whose
+first token on a line is a static `import` or an `export` is imported as a module
+from a `data:text/javascript` URL, and its default export is called with one `ctx`
+argument (`{ db, ref, args, console }`); any other body builds an `AsyncFunction`
+from the text, and a module keyword that shares a line with earlier statements is
+detected from the constructor's syntax error. A specifier carries the whole body,
+so identical text resolves to one module instance and module-level state survives
+a repeated call. Both paths run in the page's realm with the page's privileges,
+which is why the gate level, not the tool, is the authorization point.
+`run_command` fails closed: an empty endpoint list refuses
 every URL, and the caller's `Authorization` header is passed through rather than
 stored server-side.
 

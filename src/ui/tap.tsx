@@ -1,9 +1,9 @@
 // src/components/BottomIconBar.tsx
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useSyncExternalStore } from 'react';
 import * as li from 'lucide-react'
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { sess, signinGoogle, sbg, greet,greeter, fmtSyncCnt } from '../greet';
+import { sess, signinGoogle, sbg, greet,greeter, fmtSyncCnt, getGreetStat, subscribeGreetStat } from '../greet';
 import * as idb from '../sdb';
 import * as fc from '../fc';
 import { toast } from 'sonner';
@@ -124,16 +124,104 @@ export function CreateBar() {
   );
 }
 
+/** Determinate progress arc over an avatar: `frac` of the circle is drawn. The ring never takes
+ *  pointer events, so the avatar keeps its own hit area. */
+function SyncRing({ color, frac }: { color: string; frac: number }) {
+  const C = 2 * Math.PI * 18;                       // circumference at r=18
+  const shown = Math.max(0.02, Math.min(1, frac));
+  return (
+    <svg viewBox="0 0 40 40" style={{ position: 'absolute', left: 11, top: 11, width: 40, height: 40, pointerEvents: 'none' }}>
+      <circle cx="20" cy="20" r="18" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="2.5" />
+      <circle cx="20" cy="20" r="18" fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round"
+        strokeDasharray={C} strokeDashoffset={C * (1 - shown)} transform="rotate(-90 20 20)" />
+    </svg>
+  );
+}
+
+/** Compact duration for the step list. */
+const fmtMs = (ms: number) => ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
+
 export function UserBar() {
   const [session, setSession] = useState(sess);
   const [open, setOpen] = useState(false);
   const [noticeOpen, setNoticeOpen] = useState(false);
   const syncStat = useLiveQuery(() => idb.db.das.get(-1));
+  /** Global sync activity: `greet()` is a singleton, so the ring is unambiguous. */
+  const greetAct = useSyncExternalStore(subscribeGreetStat, getGreetStat);
+  const slowest = [...greetAct.steps].sort((a, b) => b.ms - a.ms).slice(0, 3)
+  const slowestText = slowest.map(s => `${s.name} ${fmtMs(s.ms)}`).join(', ');
+  const greetTitle = greetAct.inflight > 0
+    ? `syncing ${greetAct.phase} · ${Math.round(greetAct.frac * 100)}%`
+    : greetAct.lastError ? `last sync failed: ${greetAct.lastError}`
+    : greetAct.lastOkAt ? `synced ${fc.fmtAgo(greetAct.lastOkAt)}`
+    : 'sync';
+  const greetDetail = greetAct.inflight > 0 ? greetTitle
+    : [greetTitle, greetAct.lastDirtyLeft ? `${greetAct.lastDirtyLeft} local edit(s) pending` : '', slowestText]
+      .filter(Boolean).join(' · ');
   const noticeRef = useRef<HTMLDivElement | null>(null); // 1. Create the ref
   const menuRef = useRef<HTMLDivElement | null>(null);
   const [pairedDevices, setPairedDevices] = useState<CredUnlock.PairedCredDevice[]>(() => CredUnlock.loadPairedDevices());
   const unlockWatchers = useRef<Map<string, () => void>>(new Map());
+  const [plusOpen, setPlusOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const plusRef = useRef<HTMLDivElement | null>(null);
+  const settingsRef = useRef<HTMLDivElement | null>(null);
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
+  /** Close every bar menu except the one whose container is `keep`; null closes all. */
+  const closeMenus = (keep: HTMLDivElement | null) => {
+    if (plusRef.current !== keep) setPlusOpen(false);
+    if (noticeRef.current !== keep) setNoticeOpen(false);
+    if (settingsRef.current !== keep) setSettingsOpen(false);
+    if (menuRef.current !== keep) setOpen(false);
+  };
+
+  /**
+   * Toggle one menu on pointerdown so a mouse press and a finger tap behave the
+   * same and never depend on a `click` surviving a re-render. The whole
+   * container is the hit area, and opening one menu closes the others.
+   */
+  const toggleMenu = (
+    e: React.PointerEvent<HTMLDivElement>,
+    self: HTMLDivElement | null,
+    isOpen: boolean,
+    setSelf: (open: boolean) => void,
+  ) => {
+    if (e.button > 0) return; // right/middle click
+    if ((e.target as Element).closest('.user-dropdown')) return; // menu content keeps its own clicks
+    closeMenus(self);
+    setSelf(!isOpen);
+  };
+
+  /* `+` menu: newest rows by local edit time, newest first. */
+  const recentDas = useLiveQuery(
+    async () => {
+      const rows = await idb.db.das.orderBy('modAt').reverse().limit(24).toArray();
+      return rows.filter((r) => idb.isUiTag(r) && !r.tags?.includes(idb.DEL_TAG)).slice(0, 8);
+    },
+    [],
+    [] as idb.Da[],
+  );
+
+  const readTabParam = (): string[] => {
+    const csv = searchParams.get('tabs');
+    return csv ? csv.split(',').map((s) => { try { return decodeURIComponent(s); } catch { return s; } }) : [];
+  };
+
+  /** Open `ref` in the editor pane, appending it to the open tabs. */
+  const openInEditor = (ref: string) => {
+    const tabs = readTabParam();
+    const next = tabs.includes(ref) ? tabs : [...tabs, ref];
+    const params = new URLSearchParams(searchParams);
+    params.set('e', ref);
+    params.set('tabs', next.map(encodeURIComponent).join(','));
+    setPlusOpen(false);
+    navigate(`/tabs?${params.toString()}`);
+  };
+
+  /* Draft tab: no row is written until the tab dropdown saves one. */
+  const handleNewDraft = () => openInEditor('untitled_' + fc.fmt_ymddHMS(new Date()));
 
   useEffect(() => {
     sbg.auth.getSession().then(({ data }) => {
@@ -156,22 +244,19 @@ export function UserBar() {
     // };
     // document.addEventListener(handleMessage);
 
-    const handleClickOutside = (event: MouseEvent) => {
+    const handleClickOutside = (event: PointerEvent) => {
       const target = event.target as Node | null;
-      if (noticeRef.current && !noticeRef.current.contains(target)) {
-        setNoticeOpen(false);
-      }
-      if (menuRef.current && !menuRef.current.contains(target)) {
-        setOpen(false);
-      }
+      const insideBar = [plusRef, noticeRef, settingsRef, menuRef]
+        .some((r) => r.current?.contains(target));
+      if (!insideBar) closeMenus(null);
     };
 
     // 2. Attach global listener
-    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("pointerdown", handleClickOutside);
     return () => {
       subscription.unsubscribe();
       // document.removeEventListener(handleMessage);
-      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("pointerdown", handleClickOutside);
     };
   }, []);
 
@@ -224,7 +309,7 @@ export function UserBar() {
     } catch (e: any) {
       toast.error(e.message || 'Pair failed');
     }
-    setOpen(false);
+    setSettingsOpen(false);
   };
 
   const handleUnlock = async () => {
@@ -237,7 +322,7 @@ export function UserBar() {
     } catch (e: any) {
       toast.error(e.message || 'Unlock failed');
     }
-    setOpen(false);
+    setSettingsOpen(false);
   };
 
   const handleUnpair = (deviceId: string) => {
@@ -247,36 +332,54 @@ export function UserBar() {
     refreshPaired();
   };
 
-  if (!session) {
-    return (
-      <div style={{ position: 'fixed', top: '11px', right: '20px', zIndex: 2, display: 'flex', justifyContent: 'flex-end', pointerEvents: 'none' }}>
-        <button className="signin-btn" onClick={handleSignin}>Signin</button>
-      </div>
-    );
-  }
-
   return (
     <div className="flex flex-col items-center">
-      <div style={{ position: 'fixed', top: '11px', right: '20px', zIndex: 2, display: 'flex', justifyContent: 'flex-end', pointerEvents: 'none' }}>
-        <div className="user-menu-container" ref={noticeRef}>
-          <div className="user-avatar" onClick={() => setNoticeOpen(!noticeOpen)}>
+      <div style={{ position: 'fixed', top: '36px', right: '20px', zIndex: 2, display: 'flex', justifyContent: 'flex-end', pointerEvents: 'none' }}>
+        <div
+          className="user-menu-container"
+          ref={plusRef}
+          onPointerDown={(e) => toggleMenu(e, plusRef.current, plusOpen, setPlusOpen)}
+        >
+          <div className="user-avatar">
+            <li.Plus size={20} />
+          </div>
+          {plusOpen && (
+            <div className="user-dropdown">
+              <button className="user-dropdown-item" onClick={handleNewDraft}>New</button>
+              {recentDas.map((r) => (
+                <button
+                  key={r.tid}
+                  className="user-dropdown-item"
+                  title={r.ref}
+                  onClick={() => openInEditor(r.ref)}
+                >
+                  {r.ref} · {fc.fmtAgo(r.modAt ? new Date(r.modAt).getTime() : 0)}
+                </button>
+              ))}
+              {recentDas.length === 0 && <div className="user-dropdown-item" style={{ opacity: .6 }}>no recent</div>}
+            </div>
+          )}
+        </div>
+        <div
+          className="user-menu-container"
+          ref={noticeRef}
+          onPointerDown={(e) => toggleMenu(e, noticeRef.current, noticeOpen, setNoticeOpen)}
+        >
+          <div className="user-avatar">
               <li.Bell size={20} />
           </div>
           {noticeOpen && <div className="user-dropdown"> <NotificationDropdown /> </div>}
         </div>
-        <div className="user-menu-container" ref={menuRef}>
-          <div className="user-avatar" onClick={() => setOpen(!open)}>
-            {session?.user?.identities?.[0]?.identity_data?.avatar_url ? (
-              <img src={session.user.identities[0].identity_data.avatar_url} 
-              className="avatar-img" alt="User" />
-            ) : ( <li.User size={20} /> )}
+        <div
+          className="user-menu-container"
+          ref={settingsRef}
+          onPointerDown={(e) => toggleMenu(e, settingsRef.current, settingsOpen, setSettingsOpen)}
+        >
+          <div className="user-avatar">
+            <li.Settings size={20} />
           </div>
-          {open && (
+          {settingsOpen && (
             <div className="user-dropdown">
-              <button className="user-dropdown-item" onClick={fc.handleDisable(handleSync)}>Sync</button>
-
-              <button className="user-dropdown-item" onClick={fc.handleDisable(handleSnap)}>Snap new </button>
-
               <button className="user-dropdown-item" onClick={fc.handleDisable(handlePair)}>Pair Device</button>
 
               <button className="user-dropdown-item" onClick={fc.handleDisable(handleUnlock)}>Unlock PC</button>
@@ -309,10 +412,10 @@ export function UserBar() {
                 )}
               </div> ))} </div>
 
-              <button className="user-dropdown-item" onClick={() => confirm('Sign out?') && handleSignout()}>Sign out</button>
               <div className="user-dropdown-item"><a href="service-terms.html" target="_blank">Service Terms</a> <a href="privacy-policy.html" target="_blank">Privacy Policy</a></div>
               <div>{greeter.snap.replace('.cbor.pako','')} {fc.BUILD_TIME}</div>
               <div id="stts-lastgreet"/>
+              <div style={{opacity:.8}}>{greetDetail}</div>
               {syncStat?.rec && Object.entries(syncStat.rec)
                 .sort(([, a], [, b]) => new Date(b.at).getTime() - new Date(a.at).getTime())
                 .map(([key, value]) => (
@@ -320,6 +423,34 @@ export function UserBar() {
             </div>
           )}
         </div>
+        {session ? (
+          <div
+            className="user-menu-container"
+            ref={menuRef}
+            onPointerDown={(e) => toggleMenu(e, menuRef.current, open, setOpen)}
+          >
+            <div className="user-avatar" title={greetDetail}>
+              {session?.user?.identities?.[0]?.identity_data?.avatar_url ? (
+                <img src={session.user.identities[0].identity_data.avatar_url} 
+                className="avatar-img" alt="User" />
+              ) : ( <li.User size={20} /> )}
+              {greetAct.inflight > 0
+                ? <SyncRing color="#3b82f6" frac={greetAct.frac} />
+                : greetAct.lastError ? <SyncRing color="#ef4444" frac={1} /> : null}
+            </div>
+            {open && (
+              <div className="user-dropdown">
+                <button className="user-dropdown-item" onClick={fc.handleDisable(handleSync)}>Sync</button>
+
+                <button className="user-dropdown-item" onClick={fc.handleDisable(handleSnap)}>Snap new </button>
+
+                <button className="user-dropdown-item" onClick={() => confirm('Sign out?') && handleSignout()}>Sign out</button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <button className="signin-btn" style={{ alignSelf: 'center', margin: 11 }} onClick={handleSignin}>Signin</button>
+        )}
       </div>
     </div>
   );
