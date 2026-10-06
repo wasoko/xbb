@@ -128,9 +128,24 @@
       @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
       /* --- cs1 card renderer --- */
-      .cs1-match { color: var(--bt-color); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; text-decoration: none; }
+      .cs1-match { color: var(--bt-color); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; text-decoration: none; display: inline-block; max-width: max(33.33%, 222px); overflow-x: auto; overflow-y: hidden; white-space: nowrap; vertical-align: bottom; }
       button.cs1-match { background: rgba(255,255,255,0.05); border: 1px solid var(--bt-color); }
       a.cs1-match:hover { text-decoration: underline; }
+      /* Hairline WebKit scrollbar under an overflowing match row. */
+      .cs1-match::-webkit-scrollbar { height: 1px; width: 1px; }
+      .cs1-match::-webkit-scrollbar-track { background: transparent; }
+      .cs1-match::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.35); border-radius: 1px; }
+      .cs1-match::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.5); }
+
+      /* --- hover preview (dark panel, same family as .tab-dropdown-content) --- */
+      .tip > * > :first-child { margin-top: 0; }
+      .tip > * > :last-child { margin-bottom: 0; }
+      .tip .cm-editor { background: transparent; }
+      .tip .cm-gutters { display: none; }
+      /* Math renders after the preview text: the TeX shows first, then MathML. */
+      .md-math[data-display="0"] { opacity: 0.75; font-style: italic; }
+      .md-math[data-display="1"] { display: block; margin: 6px 0; opacity: 0.75; }
+      .md-math[data-math-done] { opacity: 1; font-style: normal; }
 
       /* --- Scrollbars --- */
       ::-webkit-scrollbar { width: 8px; height: 8px; }

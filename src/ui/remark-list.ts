@@ -1,4 +1,4 @@
-import { fromMarkdown } from 'mdast-util-from-markdown'
+import { markdownTree, type MdNode } from '../mdTree'
 import { Da } from '../sdb'
 
 export const reconstruct = (rows: Da[]) =>
@@ -11,7 +11,7 @@ export const reconstruct = (rows: Da[]) =>
  */
 export function remark2tagged(mdText: string, sts2add: string[] = []
   , maxDepth = Infinity, pathRef=''): Da[] {
-  const tree = fromMarkdown(mdText)
+  const tree = markdownTree(mdText) as unknown as MdNode
   let serial = 0
 
   // 1. Assign metadata (uid, serial, parent pointer) recursively

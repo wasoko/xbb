@@ -1,6 +1,4 @@
-import { remark } from 'remark'
-import { visit } from 'unist-util-visit'
-import type { Node, Parent } from 'unist'
+import { markdownTree, visitTree, type MdNode } from './mdTree'
 import YAML from 'yaml'
 
 /** Convert YAML to markdown list format */
@@ -25,19 +23,18 @@ export function md2row(mdText: string) {
   //                mdText.split('\n').some(l => l.match(/^\s*-\s+/) || l.match(/^\s*[\w-]+:\s*/))
   const text = mdText // isYaml ? yaml2md(mdText) : mdText
   
-  const tree = remark().parse(text)
+  const tree = markdownTree(text)
   const leaves: any[] = []
   let serial = 0
   const uid = (type: string) => `${type}_${(++serial).toString(36)}`
 
   let prevEnd = 0
-  visit(tree, (node: any, _index, parent: any) => {
-    // console.debug(node)
+  visitTree(tree, (node: MdNode, _index: number, parent: MdNode) => {
     const inlineNode = node.type==='link'
-    if (prevEnd < node.position?.end.offset 
+    if (prevEnd < (node.position?.end.offset ?? 0)
       && (node.value || inlineNode) )
       leaves.push({ node, parent, start: prevEnd, end:(prevEnd = 
-        parent.position?.end.offset + inlineNode ?  0
+        (parent.position?.end.offset ?? 0) + (inlineNode ? 1 : 0) ?  0
         : (parent.type=='strong'? 2 :0))
         , ref: ['html','link','blockquote','inlineCode'].includes(node.type)? node.type
         : parent.type==='paragraph' && parent.parent ? parent.parent.type: parent.type

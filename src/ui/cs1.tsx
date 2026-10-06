@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { getColorChar11, sideLog } from '../fc';
 import {  iq,  type Da } from '../sdb';
+import { setTip, TIP_ATTR } from './Tip';
 
 type HeadingLevel = 1 | 2 | 3 | 4 | 5 | 6;
 
@@ -83,17 +84,24 @@ function MatchedDas({
   return (
     <>
       {das.map((d) => {
-        const preview = (d.txt || '').slice(0, 33) || d.ref;
+        // Full text stays in the DOM so browser find-in-page can reach it; CSS caps the row at 555px with a scroll.
+        const label = d.txt || d.ref;
         if (d.type === 'md') {
           return (
-            <button key={d.ref} className="cs1-match" onClick={() => onSelectTag(d.ref)}>
-              {preview}
+            <button
+              key={d.ref}
+              className="cs1-match"
+              onClick={() => onSelectTag(d.ref)}
+              {...{ [TIP_ATTR]: '' }}
+              ref={(el) => setTip(el, d)}
+            >
+              {label}
             </button>
           );
         }
         return (
           <Link key={d.ref} className="cs1-match" to={d.ref} onClick={() => onSelectTag(d.ref)}>
-            {preview}
+            {label}
           </Link>
         );
       })}
@@ -188,7 +196,7 @@ export function cardDoubleClick(ref: string, onEdit: (ref: string) => void) {
 /**
  * Refs rendered by pin cards: one `iq` lookup per heading, using the same
  * per-H1-group cumulative tag snapshot as `Cs1Line`/`MatchedDas`, so the
- * ungrouped list can omit rows a pin card already shows.
+ * rest list can omit rows a pin card already shows.
  *
  * @param pins - Pin card rows whose markdown headings are parsed.
  * @returns Refs matched by any pin card heading.

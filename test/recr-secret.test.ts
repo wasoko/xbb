@@ -4,7 +4,9 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, getSecret } from '../src/sdb';
-import { getStore, parseSecrets } from '../src/recr';
+import {
+  getStore, nextKeyAlias, parseSecrets, setSecretKeys, withSecretKeys,
+} from '../src/recr';
 
 /** The document shape the user writes into the `secret.md` row. */
 const DOC = `## Default
@@ -49,13 +51,16 @@ describe('parseSecrets', () => {
     expect(cfg.modelAlias).toBe('qw35');
   });
 
-  it('falls back to the provider first key when Keys is blank, and warns', async () => {
+  it('auto tracks a blank Keys line: records the first key in the document', async () => {
     await putSecret(DOC);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     const cfg = await parseSecrets(getStore());
     expect(cfg.apiKey).toBe('sk-first');
-    expect(warn).toHaveBeenCalledOnce();
-    expect(String(warn.mock.calls[0][0])).toContain('blank "Keys"');
+    expect(cfg.keyAlias).toBe('first');
+    expect(cfg.keyAliases).toEqual(['first', 'second']);
+    expect(warn).not.toHaveBeenCalled();
+    // Written back, so `greet` pushes the selection like any other row edit.
+    expect(await getStore().get('secret.md')).toContain('* Keys: first');
     warn.mockRestore();
   });
 
@@ -97,5 +102,33 @@ describe('parseSecrets', () => {
     await putSecret(DOC);
     await getStore().delete('secret.md');
     await expect(parseSecrets(getStore())).rejects.toThrow(/ref=secret\.md/);
+  });
+});
+
+describe('nextKeyAlias', () => {
+  it('steps through the listed keys and wraps', () => {
+    expect(nextKeyAlias(['a', 'b', 'c'], 'a')).toBe('b');
+    expect(nextKeyAlias(['a', 'b', 'c'], 'c')).toBe('a');
+    expect(nextKeyAlias(['a', 'b', 'c'])).toBe('a');
+    expect(nextKeyAlias(['a', 'b', 'c'], 'gone')).toBe('a');
+  });
+
+  it('has no next key when the provider lists fewer than two', () => {
+    expect(nextKeyAlias(['a'], 'a')).toBeUndefined();
+    expect(nextKeyAlias([], 'a')).toBeUndefined();
+  });
+});
+
+describe('withSecretKeys', () => {
+  it('replaces only the Default Keys line', () => {
+    const out = withSecretKeys(DOC, ['second']);
+    expect(out).toContain('* Keys: second');
+    expect(out.slice(out.indexOf('## Providers'))).toBe(DOC.slice(DOC.indexOf('## Providers')));
+  });
+
+  it('is what setSecretKeys writes to the row', async () => {
+    await putSecret(DOC);
+    await setSecretKeys(getStore(), ['second']);
+    expect(await getSecret()).toBe(withSecretKeys(DOC, ['second']));
   });
 });

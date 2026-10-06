@@ -1,10 +1,7 @@
 import * as cbor from 'cbor-x';
 import { keyBy } from 'es-toolkit';
 import { object } from 'framer-motion/client';
-// import { fromMarkdown } from 'mdast-util-from-markdown';
-// import { toString } from 'mdast-util-to-string';
-import {visit} from 'unist-util-visit';
-// import {remark} from 'remark'  // document not found, crash loading bg service worker
+import { markdownTree, visitTree, type MdNode } from './mdTree';
 import * as pako from 'pako';
 import { useEffect, useState } from 'react';
 import { noticeStore } from './ui/notice';
@@ -35,8 +32,7 @@ export const DEF_MODEL = HF_OR[0]
 
 const tag2md=(ts)=>  ts.map(t=> t.txt).join('')
 /**
- * Flattens mdast root children into the requested custom structure.
- * @param {import('mdast').Root} tree - The mdast tree from fromMarkdown.
+ * Flattens a parsed markdown tree into the requested custom structure.
  * 1l xi xp xt
  *     +-2l xi xp xt
  *           +-3i xp xt
@@ -46,12 +42,12 @@ const tag2md=(ts)=>  ts.map(t=> t.txt).join('')
  */
 export function md2tag(mdText:string) {
   mdText = mdText.replace(/[ \t]+$/ugm, "")
-  const tree = remark().parse(mdText);
-  const result = [];
+  const tree = markdownTree(mdText);
+  const result: { txt: string; ref: string; type: string }[] = [];
   let prevEnd = 0
-  visit(tree, (node, index, parent) => {
+  visitTree(tree, (node: MdNode, _index, parent: MdNode) => {
     const inlineNode = node.type==='link'
-    if (prevEnd < node.position?.end.offset 
+    if (prevEnd < (node.position?.end.offset ?? 0)
       && (node.value || node.type==='link') )
       result.push({ txt: mdText.slice(prevEnd, (prevEnd = 
         node.type==='link' ? parent.position?.end.offset 
@@ -75,7 +71,7 @@ if(isTEST) {let text = ` ## Heading __strong__ \`inlineCode\`
 > blockquote
 1. I3`
   const delog = (...arg:any[]) => { return sideLog(...arg)}
-  let tree = remark().parse(text) //, res = []; visit(tree, n => n.type !== 'root' && res.push({ txt: text.split('\n').slice(n.position.start.line - 1, n.position.end.line).join('\n'), ref: JSON.stringify(n) }))
+  let tree = markdownTree(text) //, res = []; visit(tree, n => n.type !== 'root' && res.push({ txt: text.split('\n').slice(n.position.start.line - 1, n.position.end.line).join('\n'), ref: JSON.stringify(n) }))
   console.log(`md2..`, tree, tag2md(delog('md2tag',md2tag(text))))
 }
 export function reAddCB(callback:
@@ -571,6 +567,16 @@ export function fmt2parts(dt) { return Object.fromEntries( new Intl.DateTimeForm
   hour12: false
   }).formatToParts(dt).map(({type,value})=> [type,value]))
 }; // { // new Intl.NumberFormat('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 }) // #,##0.##
+/**
+ * `dt` is a Date on locally written rows, but the sync writes `res.server_now`
+ * (`src/greet.ts:289`), so the durable value can also be an ISO string or an
+ * epoch number. `fmtAgo` ends in `new Date(ts)`, so convert before use.
+ *
+ * @param dt - Row timestamp in any of the durable forms.
+ * @returns Epoch milliseconds, or 0 when absent or unparseable.
+ */
+export const dtMs = (dt: unknown): number => (dt ? new Date(dt as string | number).getTime() : 0);
+
 export const fmtAgo = (ts: number | undefined, from=new Date()): string => {
   if (ts === undefined || ts===0) return '-';
   const date = new Date(ts);

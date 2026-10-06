@@ -2,10 +2,10 @@
  * @vitest-environment happy-dom
  */
 import 'fake-indexeddb/auto';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, iq } from '../src/sdb';
 import {
-  buildPromptFromNode, createBranchingSession, getStore, loadBranchingSession,
+  buildPromptFromNode, createBranchingSession, getStore, loadBranchingSession, rcr,
   saveTurnNode, validateToolMessages,
   type ChatMessage, type ToolMessage, type TurnNode,
 } from '../src/recr';
@@ -120,5 +120,85 @@ describe('validateToolMessages', () => {
     const kept = validateToolMessages(messages, { stripOrphanedToolCalls: true });
     expect(kept).toHaveLength(2);
     expect((kept[0] as { tool_calls?: unknown[] }).tool_calls).toHaveLength(1);
+  });
+});
+
+/** One SSE round with a text reply and no tool call, so a turn costs one request. */
+function stubLlm(reply = 'ok'): void {
+  const encoder = new TextEncoder();
+  const stream = [
+    `data: ${JSON.stringify({ choices: [{ delta: { content: reply }, finish_reason: null }] })}\n\n`,
+    `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`,
+    'data: [DONE]\n\n',
+  ].join('');
+  vi.stubGlobal('fetch', async () => {
+    let sent = false;
+    return {
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: async () => (sent ? { done: true, value: undefined }
+            : (sent = true, { done: false, value: encoder.encode(stream) })),
+        }),
+      },
+      text: async () => stream,
+    };
+  });
+}
+
+const CONFIG = { apiBaseUrl: 'https://llm.test', apiKey: 'test-key', model: 'test-model' };
+const SETTINGS = { maxIterations: 1, maxToolCalls: 4 };
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('parentNodeId', () => {
+  it('attaches the turn under the given node and moves the head to it', async () => {
+    await seed([node('n1', null)]);
+    stubLlm();
+
+    const result = await rcr({ prompt: 'ask again', sessionId: SID, parentNodeId: 'n1'
+      , config: CONFIG, settings: SETTINGS });
+
+    expect(result.finalNode.parentId).toBe('n1');
+    expect((await loadBranchingSession(getStore(), SID)).currentHeadId).toBe(result.finalNode.id);
+  });
+
+  it('starts a new root when parentNodeId is null', async () => {
+    await seed([node('n1', null)]);
+    stubLlm();
+
+    const result = await rcr({ prompt: 'new root', sessionId: SID, parentNodeId: null
+      , config: CONFIG, settings: SETTINGS });
+
+    expect(result.finalNode.parentId).toBeNull();
+  });
+
+  it('follows the session head when parentNodeId is omitted', async () => {
+    await seed([node('n1', null)]);
+    stubLlm();
+
+    const result = await rcr({ prompt: 'continue', sessionId: SID
+      , config: CONFIG, settings: SETTINGS });
+
+    expect(result.finalNode.parentId).toBe('n1');
+  });
+});
+
+describe('the reserved recr filter', () => {
+  it('returns recr rows only for that filter, and keeps the tag path for any other query', async () => {
+    await seed([node('n1', null)]);
+    await db.das.put({ ref: 'src/a.ts', type: 'src', txt: 'body', rec: {}, tags: ['ai'] });
+
+    expect((await iq([])).map(r => r.ref)).toEqual(['src/a.ts']);
+
+    const recr = await iq(['recr']);
+    expect(recr.every(r => r.type === 'recr')).toBe(true);
+    expect(recr.map(r => r.ref).sort())
+      .toEqual([`sess/${SID}/node/n1`, `sess/${SID}/meta`].sort());
+
+    // a second filter keeps the tag path, where `recr` is an ordinary tag name
+    expect(await iq(['recr', 'ai'])).toEqual([]);
   });
 });

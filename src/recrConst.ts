@@ -7,6 +7,8 @@
 
 /** Row type holding recr's own keys: sessions, settings, tool definitions. */
 export const RECR_TYPE = 'recr';
+/** Session source id the recr adapter registers under, and a session's default. */
+export const RECR_SOURCE_ID = 'recr';
 /** Row ref holding the secret document. */
 export const SECRET_REF = 'secret.md';
 /** Row ref holding the tool gate document. */

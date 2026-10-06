@@ -112,6 +112,28 @@ describe('rec.ver / rec.cr history', () => {
     expect(last.rec).toEqual({})
     expect(last.tags).toEqual(['a'])
   })
+
+  it('dropHistEntry trashes one ver entry, and the history with the last', () => {
+    const row = mk({ rec: { ver: { [DT0.toISOString()]: sdb.verSnap(mk({ txt: 'v0' }))
+      , [DT1.toISOString()]: sdb.verSnap(mk({ txt: 'v1' })) } } })
+    const keep = sdb.dropHistEntry(row, 'ver', DT0.toISOString())
+    expect(Object.keys(verOf({ rec: keep.rec } as sdb.Da))).toEqual([DT1.toISOString()])
+    expect(keep).not.toHaveProperty('modAt')     // ver is local bookkeeping, no push
+    const last = sdb.dropHistEntry({ ...row
+      , rec: { ver: { [DT0.toISOString()]: sdb.verSnap(mk()) } } }, 'ver', DT0.toISOString())
+    expect(last.rec).toEqual({})
+  })
+
+  it('dropHistEntry trashes a cr entry and dirties the row, so the reduced log is pushed', () => {
+    const key = sdb.crStamp(MOD)!
+    const row = mk({ tags: ['a', sdb.CHG_REJ_TAG]
+      , rec: { cr: { [key]: sdb.verSnap(mk({ txt: 'mine' })) } } })
+    const spec = sdb.dropHistEntry(row, 'cr', key) as {
+      rec: Record<string, unknown>; tags?: string[]; modAt?: Date }
+    expect(spec.modAt).toBeInstanceOf(Date)
+    expect(spec.rec).toEqual({})
+    expect(spec.tags).toEqual(['a'])             // the marker goes with the last entry
+  })
 })
 
 describe('deepMerge ver gate', () => {

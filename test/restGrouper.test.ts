@@ -1,0 +1,297 @@
+/**
+ * @vitest-environment happy-dom
+ */
+import 'fake-indexeddb/auto';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { db, type Da } from '../src/sdb';
+import {
+  groupByDt, groupByDtVisit, groupBySession, groupRest, isRestGrouperScript, restGroupsFor,
+  restTagMap, restTagStore, RECR_CONFIG_LABEL, RSSESS_GROUPER, RSTAG_GROUPER, RSTAG_LIMIT, UNDATED_LABEL,
+} from '../src/ui/restGrouper';
+import type { RowTagReport } from '../src/srctag';
+
+const T0 = Date.UTC(2026, 9, 5, 10, 0, 0);
+
+const row = (tid: number, dt: unknown): Da =>
+  ({ tid, ref: `r${tid}.md`, txt: `row ${tid}`, type: 'md', dt: dt as Date, rec: {} });
+
+/** Row carrying a Chrome visit time in `rec`. */
+const rowV = (tid: number, dt: unknown, visitTime?: number): Da =>
+  ({ ...row(tid, dt), rec: visitTime === undefined ? {} : { visitTime } });
+
+/** tids per block, in render order. */
+const tids = (rows: Da[]) => groupByDt(rows).map((g) => g.items.map((d) => d.tid));
+
+beforeEach(async () => {
+  await db.das.clear();
+});
+
+describe('groupByDt', () => {
+  it('splits rows into one block per distinct dt, newest first', () => {
+    expect(tids([row(1, new Date(T0)), row(2, new Date(T0)), row(3, new Date(T0 + 1000))]))
+      .toEqual([[3], [2, 1]]);
+  });
+
+  it('sorts rows by tid descending before grouping', () => {
+    expect(tids([row(1, new Date(T0)), row(3, new Date(T0)), row(2, new Date(T0))]))
+      .toEqual([[3, 2, 1]]);
+  });
+
+  it('buckets an ISO string and an epoch number of the same instant together', () => {
+    expect(tids([row(1, new Date(T0).toISOString()), row(2, T0)])).toEqual([[2, 1]]);
+  });
+
+  it('trails rows without a usable dt in one undated block', () => {
+    const groups = groupByDt([row(1, new Date(T0)), row(2, undefined), row(3, 'not a date')]);
+    expect(groups.map((g) => g.key)).toEqual([String(T0), UNDATED_LABEL]);
+    expect(groups[1].items.map((d) => d.tid)).toEqual([3, 2]);
+  });
+
+  it('labels a dated block', () => {
+    expect(groupByDt([row(1, new Date(T0))])[0].label).not.toBe('');
+  });
+
+  it('returns no block for an empty list', () => {
+    expect(groupByDt([])).toEqual([]);
+  });
+});
+
+describe('restGroupsFor', () => {
+  it('leaves the rows in one unlabelled block when the grouper is unset or none', () => {
+    for (const grouper of [undefined, '', 'none']) {
+      expect(restGroupsFor([row(1, new Date(T0))], grouper))
+        .toEqual([{ key: '', label: '', items: [row(1, new Date(T0))] }]);
+    }
+  });
+
+  it('returns no block for an empty flat list', () => {
+    expect(restGroupsFor([], 'none')).toEqual([]);
+  });
+
+  it('defers to the script path for a ref', () => {
+    expect(restGroupsFor([row(1, new Date(T0))], 'restGroupers/byRef.ts')).toBeNull();
+    expect(isRestGrouperScript('restGroupers/byRef.ts')).toBe(true);
+    expect(isRestGrouperScript('rsdt')).toBe(false);
+  });
+});
+
+describe('groupByDtVisit (rsid)', () => {
+  it('splits each date block into visit-time subgroups, newest first', () => {
+    const groups = groupByDtVisit([
+      rowV(1, new Date(T0), 300),
+      rowV(2, new Date(T0), 100),
+      rowV(3, new Date(T0), 300),
+    ]);
+    expect(groups.map((g) => g.key)).toEqual([String(T0)]);
+    expect(groups[0].subgroups?.map((s) => s.key)).toEqual(['300', '100']);
+    expect(groups[0].subgroups?.[0].items.map((d) => d.tid)).toEqual([3, 1]);
+    expect(groups[0].items).toEqual([]);
+  });
+
+  it('keeps rows without a visit time directly under the date heading', () => {
+    const groups = groupByDtVisit([rowV(1, new Date(T0), 200), rowV(2, new Date(T0))]);
+    expect(groups[0].subgroups?.map((s) => s.key)).toEqual(['200']);
+    expect(groups[0].items.map((d) => d.tid)).toEqual([2]);
+  });
+
+  it('renders a date block with no visit times exactly like rsdt', () => {
+    const rows = [rowV(1, new Date(T0)), rowV(2, new Date(T0))];
+    expect(groupByDtVisit(rows)).toEqual(groupByDt(rows));
+  });
+
+  it('keeps the date level ordered newest first', () => {
+    const groups = groupByDtVisit([rowV(1, new Date(T0), 5), rowV(2, new Date(T0 + 1000), 5)]);
+    expect(groups.map((g) => g.key)).toEqual([String(T0 + 1000), String(T0)]);
+  });
+
+  it('resolves as a built-in rather than a script ref', () => {
+    expect(isRestGrouperScript('rsid')).toBe(false);
+    expect(restGroupsFor([rowV(1, new Date(T0), 5)], 'rsid')?.[0].key).toBe(String(T0));
+  });
+});
+
+describe('groupBySession (rsess)', () => {
+  const recrRow = (tid: number, ref: string, txt = `row ${tid}`, stamp?: number): Da =>
+    ({ tid, ref, type: 'recr', txt, rec: {}, ...(stamp ? { modAt: new Date(stamp) } : {}) });
+
+  it('blocks recr rows by session, newest session first', () => {
+    const groups = groupBySession([
+      recrRow(1, 'sess/a/node/n1', 'a1', T0),
+      recrRow(2, 'sess/b/node/n1', 'b1', T0 + 1000),
+      recrRow(3, 'sess/a/meta'),
+    ]);
+    expect(groups.map((g) => g.key)).toEqual(['b', 'a']);
+    expect(groups[1].items.map((d) => d.tid)).toEqual([3, 1]);
+  });
+
+  it('names a session block with its meta title when that row holds one', () => {
+    const groups = groupBySession([
+      recrRow(1, 'sess/a/meta', JSON.stringify({ title: 'Fix the parser' })),
+      recrRow(2, 'sess/a/node/n1'),
+    ]);
+    expect(groups[0].label).toBe('sess/a · Fix the parser');
+  });
+
+  it('falls back to the session id for a placeholder or unreadable title', () => {
+    expect(groupBySession([
+      recrRow(1, 'sess/a/meta', '{"title":"New Session"}'),
+      recrRow(2, 'sess/a/node/n1'),
+    ])[0].label).toBe('sess/a');
+    expect(groupBySession([recrRow(1, 'sess/a/meta', 'not json')])[0].label).toBe('sess/a');
+  });
+
+  it('trails the non-session recr rows in one block', () => {
+    const groups = groupBySession([
+      recrRow(1, 'settings/main'),
+      recrRow(2, 'tools/read_file'),
+      recrRow(3, 'sess/a/node/n1'),
+    ]);
+    expect(groups.map((g) => g.key)).toEqual(['a', RECR_CONFIG_LABEL]);
+    expect(groups[1].items.map((d) => d.tid)).toEqual([2, 1]);
+  });
+
+  it('resolves as a built-in rather than a script ref', () => {
+    expect(isRestGrouperScript(RSSESS_GROUPER)).toBe(false);
+    expect(restGroupsFor([recrRow(1, 'settings/main')], RSSESS_GROUPER)?.[0].key)
+      .toBe(RECR_CONFIG_LABEL);
+  });
+});
+
+describe('groupRest scripts', () => {
+  const putSrc = (ref: string, txt: string) =>
+    db.das.put({ ref, type: 'src', txt, tags: [], rec: {} });
+
+  it('runs a type=src row with the rows as args and uses its blocks', async () => {
+    await putSrc('restGroupers/byRef.ts',
+      'return [{ key: "all", label: "By ref", items: ctx.args.das }]');
+    const groups = await groupRest([row(1, new Date(T0))], 'restGroupers/byRef.ts');
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({ key: 'all', label: 'By ref' });
+    expect(groups[0].items.map((d) => d.tid)).toEqual([1]);
+  });
+
+  it('accepts a module row that exports a default function', async () => {
+    await putSrc('restGroupers/mod.ts',
+      'export default (ctx) => [{ key: "m", label: "Mod", items: ctx.args.das }]');
+    const groups = await groupRest([row(2, new Date(T0))], 'restGroupers/mod.ts');
+    expect(groups.map((g) => g.key)).toEqual(['m']);
+  });
+
+  it('keeps a visit-time level a script returned', async () => {
+    await putSrc('restGroupers/nested.ts',
+      'return [{ key: "d", label: "Day", subgroups: [{ label: "Vis", items: ctx.args.das }] }]');
+    const groups = await groupRest([row(1, new Date(T0))], 'restGroupers/nested.ts');
+    expect(groups[0].items).toEqual([]);
+    expect(groups[0].subgroups?.[0].label).toBe('Vis');
+    expect(groups[0].subgroups?.[0].items.map((d) => d.tid)).toEqual([1]);
+  });
+
+  it('falls back to one flat block when the row is missing', async () => {
+    const groups = await groupRest([row(1, new Date(T0))], 'restGroupers/none.ts');
+    expect(groups).toEqual([{ key: '', label: '', items: [row(1, new Date(T0))] }]);
+  });
+
+  it('falls back to one flat block when the body throws', async () => {
+    await putSrc('restGroupers/boom.ts', 'throw new Error("boom")');
+    const groups = await groupRest([row(1, new Date(T0))], 'restGroupers/boom.ts');
+    expect(groups[0].key).toBe('');
+    expect(groups[0].items.map((d) => d.tid)).toEqual([1]);
+  });
+
+  it('falls back to one flat block when the result is not an array of blocks', async () => {
+    await putSrc('restGroupers/bad.ts', 'return "nope"');
+    const groups = await groupRest([row(1, new Date(T0))], 'restGroupers/bad.ts');
+    expect(groups[0].key).toBe('');
+  });
+});
+
+describe('rstag', () => {
+  const tagged = (tid: number, txt: string, tags: string[] = []): Da =>
+    ({ tid, ref: `r${tid}.md`, txt, type: 'md', dt: new Date(T0), tags, rec: {} });
+
+  it('resolves as a built-in whose blocks are exactly rsdt', () => {
+    const rows = [row(1, new Date(T0)), row(2, new Date(T0)), row(3, new Date(T0 + 1000))];
+    expect(isRestGrouperScript(RSTAG_GROUPER)).toBe(false);
+    expect(restGroupsFor(rows, RSTAG_GROUPER)).toEqual(groupByDt(rows));
+  });
+
+  it('keys srctag reports by tid and explains every suggested tag', async () => {
+    const map = await restTagMap([
+      tagged(1, 'react hooks tutorial'),
+      tagged(2, 'react hooks guide'),
+      tagged(3, 'react state'),
+    ]);
+    expect([...map.keys()].sort()).toEqual([1, 2, 3]);
+    const report = map.get(1)!;
+    expect(report.dim).toBe('tid');
+    expect(report.tags.map((t) => t.tag)).toContain('react');
+    const react = report.tags.find((t) => t.tag === 'react')!;
+    expect(react.channels.reduce((n, c) => n + c.contribution, 0)).toBeCloseTo(react.score, 6);
+  });
+
+  it('takes the rows\u2019 own tags as the trie priorities and drops the tags it already carries', async () => {
+    const map = await restTagMap([
+      tagged(1, 'react hooks tutorial', ['react']),
+      tagged(2, 'react hooks guide', ['react']),
+    ]);
+    const report = map.get(1)!;
+    expect(report.tags.map((t) => t.tag)).not.toContain('react');
+    expect(report.tags.map((t) => t.tag)).toContain('hooks');
+  });
+
+  it('scores only the newest rows within the cap', async () => {
+    const rows = Array.from({ length: RSTAG_LIMIT + 5 }, (_, i) => tagged(i + 1, `row ${i}`));
+    const map = await restTagMap(rows);
+    expect(map.size).toBe(RSTAG_LIMIT);
+    expect(map.has(RSTAG_LIMIT + 5)).toBe(true);
+    expect(map.has(5)).toBe(false);
+  });
+});
+
+describe('restTagStore', () => {
+  /** A report carrying just the tags the ranking reads. */
+  const report = (tid: number, tags: [string, number][]): RowTagReport => ({
+    tid, ref: `r${tid}.md`, dim: 'tid',
+    window: { lo: 0, hi: 0, radius: 0, indices: [] }, cluster: 0,
+    tags: tags.map(([tag, score]) => ({ tag, score, channels: [], text: '' })),
+  });
+
+  it('ranks by how many rows suggest a tag, then by best score', () => {
+    const rows = [row(1, T0), row(2, T0), row(3, T0)];
+    restTagStore.set(new Map([
+      [1, report(1, [['react', 0.4], ['vue', 0.9]])],
+      [2, report(2, [['react', 0.3]])],
+      [3, report(3, [])],
+    ]), rows);
+
+    const ranked = restTagStore.rank(3);
+    expect(ranked.map((h) => h.tag)).toEqual(['react', 'vue']);
+    expect(ranked[0].rows.map((r) => r.tid)).toEqual([1, 2]);
+    expect(ranked[0].score).toBe(0.4);
+    expect(ranked[1].rows.map((r) => r.tid)).toEqual([1]);
+  });
+
+  it('returns at most n hints and reports the pass size', () => {
+    restTagStore.set(new Map([
+      [1, report(1, [['a', 0.5], ['b', 0.4], ['c', 0.3]])],
+    ]), [row(1, T0)]);
+
+    expect(restTagStore.size).toBe(1);
+    expect(restTagStore.rank(2).map((h) => h.tag)).toEqual(['a', 'b']);
+  });
+
+  it('ignores a report whose row is absent from the published rows', () => {
+    restTagStore.set(new Map([[1, report(1, [['react', 0.5]])]]), []);
+    expect(restTagStore.rank(3)).toEqual([]);
+  });
+
+  it('notifies subscribers on every pass and stops after unsubscribe', () => {
+    let calls = 0;
+    const off = restTagStore.subscribe(() => { calls++; });
+    restTagStore.set(new Map(), []);
+    expect(calls).toBe(1);
+    off();
+    restTagStore.set(new Map(), []);
+    expect(calls).toBe(1);
+  });
+});

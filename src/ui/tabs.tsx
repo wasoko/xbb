@@ -5,9 +5,13 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import React from 'react';
 import { fmtAgo } from '../fc';
 import { iqWithCrumbs, treeCac, type Da } from '../sdb';
+import { recrRowLabel, recrTabRef, recrTargetOf, type RecrTarget } from '../sessionTree';
+import { RECR_TYPE } from '../recrConst';
 import { EditorSplitPane } from './editor';
 import { Cs1Renderer } from './cs1';
 import { CardTab, type CardTabProps } from './cardTab';
+import { setTip, TipHost, TIP_ATTR } from './Tip';
+import { useTreeCac } from './useTreeCac';
 
 /* ─────────────────────────────────────────────────────────────
  * Small shared utilities
@@ -38,7 +42,7 @@ const decodeTabs = (csv: string) =>
 const isPinCardRow = (da: Da) =>
   da.type === 'md' && typeof da.ref === 'string' && da.ref.startsWith('pin');
 
-export function BadCardTab({ filters, onSelectTag, tidLoc, renderer }: CardTabProps) {
+export function BadCardTab({ filters, onSelectTag, tidLoc, renderer, onJump }: CardTabProps) {
   const limit = 555;
 
   const filtersKey = filters.join(',');
@@ -63,32 +67,34 @@ export function BadCardTab({ filters, onSelectTag, tidLoc, renderer }: CardTabPr
   const pinHeightVh = pinRows.length > 0 ? 66 / pinRows.length : 0;
 
   return (
-    <div className="card-tab">
-      {pinRows.length > 0 && (
-        <div className="pin-cards" style={{ height: '66vh', overflow: 'hidden' }}>
-          {pinRows.map((p) => (
-            <div
-              key={p.ref + String(p.tid)}
-              className="pin-card-row"
-              style={{ height: `${pinHeightVh}vh`, overflow: 'auto' }}
-            >
-              {renderer === 'cs1'
-                ? <Cs1Renderer da={p} onSelectTag={onSelectTag} />
-                : <Cs2Renderer da={p} onSelectTag={onSelectTag} />}
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div className="ungrouped-das" style={{ overflowY: 'auto' }}>
-        {ungrouped.map((d) => (
-          <Cs2Renderer key={d.ref + String(d.tid)} da={d} onSelectTag={onSelectTag} />
-        ))}
-        {ungrouped.length === 0 && das.length === 0 && (
-          <div className="end-message">No data found</div>
+    <TipHost>
+      <div className="card-tab">
+        {pinRows.length > 0 && (
+          <div className="pin-cards" style={{ height: '66vh', overflow: 'hidden' }}>
+            {pinRows.map((p) => (
+              <div
+                key={p.ref + String(p.tid)}
+                className="pin-card-row"
+                style={{ height: `${pinHeightVh}vh`, overflow: 'auto' }}
+              >
+                {renderer === 'cs1'
+                  ? <Cs1Renderer da={p} onSelectTag={onSelectTag} />
+                  : <Cs2Renderer da={p} onSelectTag={onSelectTag} onJump={onJump} />}
+              </div>
+            ))}
+          </div>
         )}
+
+        <div className="ungrouped-das" style={{ overflowY: 'auto' }}>
+          {ungrouped.map((d) => (
+            <Cs2Renderer key={d.ref + String(d.tid)} da={d} onSelectTag={onSelectTag} onJump={onJump} tip />
+          ))}
+          {ungrouped.length === 0 && das.length === 0 && (
+            <div className="end-message">No data found</div>
+          )}
+        </div>
       </div>
-    </div>
+    </TipHost>
   );
 }
 
@@ -96,9 +102,15 @@ export function BadCardTab({ filters, onSelectTag, tidLoc, renderer }: CardTabPr
  * DaRow — 33-char preview; URL → link, md → editor button
  * ────────────────────────────────────────────────────────────*/
 
-function Cs2Renderer({ da, onSelectTag }: { da: Da; onSelectTag: (ref: string) => void }) {
+function Cs2Renderer({ da, onSelectTag, onJump, tip = false }: {
+  da: Da;
+  onSelectTag: (ref: string) => void;
+  onJump?: (target: RecrTarget) => void;
+  /** Whether a markdown row opens the hover preview instead of the native tooltip. */
+  tip?: boolean;
+}) {
   const [isHovered, setIsHovered] = useState(false);
-  const preview = (da.txt || '').slice(0, 33);
+  const preview = da.type === RECR_TYPE ? recrRowLabel(da) : (da.txt || '').slice(0, 33);
   const isUrl = /^https?:\/\//i.test(da.ref);
 
   const visitTime = (da.rec as any)?.visitTime;
@@ -111,6 +123,21 @@ function Cs2Renderer({ da, onSelectTag }: { da: Da; onSelectTag: (ref: string) =
     cursor: 'pointer',
   };
 
+  if (da.type === RECR_TYPE) {
+    /* A recr row jumps into the chat pane rather than opening as a file. */
+    return (
+      <button
+        className="da-row"
+        onClick={() => onJump?.(recrTargetOf(da.ref))}
+        style={rowStyle}
+        title={da.ref}
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
+      >
+        {preview}
+      </button>
+    );
+  }
   if (isUrl) {
     return (
       <a 
@@ -133,7 +160,8 @@ function Cs2Renderer({ da, onSelectTag }: { da: Da; onSelectTag: (ref: string) =
         className="da-row" 
         onClick={() => onSelectTag(da.ref)} 
         style={rowStyle}
-        title={tooltip}
+        title={tip ? undefined : tooltip}
+        {...(tip ? { [TIP_ATTR]: '', ref: (el: HTMLButtonElement | null) => setTip(el, da) } : {})}
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
       >
@@ -147,7 +175,8 @@ function Cs2Renderer({ da, onSelectTag }: { da: Da; onSelectTag: (ref: string) =
       to={da.ref} 
       onClick={() => onSelectTag(da.ref)} 
       style={rowStyle}
-      title={tooltip}
+      title={tip ? undefined : tooltip}
+      {...(tip ? { [TIP_ATTR]: '', ref: (el: HTMLAnchorElement | null) => setTip(el, da) } : {})}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
@@ -173,6 +202,8 @@ export function VbCard() {
   const activeEditor = searchParams.get('e') || '';
   const tabsCsv = searchParams.get('tabs') || '';
   const sessionId = searchParams.get('sid') || 'default';
+  /** Node the chat view focuses; empty means the session head. */
+  const nodeId = searchParams.get('node') || '';
   const tidLoc = searchParams.get('tid');
 
   /* decoded refs (issue 3 fix) */
@@ -180,7 +211,8 @@ export function VbCard() {
 
   /* live view-mode switches (no remount) */
   const tabSeerSett = treeCac['tabSeer'];
-  const cardSeerSett = treeCac['cardSeer'];
+  /* `treeCac` is a plain object, so only a live read repaints when the menu edits `cardSeer`. */
+  const cardSeerSett = useTreeCac<string>('cardSeer');
   console.log('Current tabSeerSett value:', tabSeerSett); // <--- Add this
 
   useEffect(() => {
@@ -207,6 +239,28 @@ export function VbCard() {
     updateUrl({ e: active, tabs: encodeTabs(tabs) });
   }, [updateUrl]);
 
+  /** A recr row's jump: a session or node row focuses the chat, a config row opens a tab. */
+  const handleJump = useCallback((target: RecrTarget) => {
+    if (target.kind === 'tab') {
+      handleSelectTag(recrTabRef(target.ref));
+      return;
+    }
+    updateUrl(target.kind === 'node'
+      ? { sid: target.sessionId, node: target.nodeId }
+      : { sid: target.sessionId, node: null });
+    if (isMobile) setIsDrawerOpen(true);
+  }, [updateUrl, handleSelectTag, isMobile]);
+
+  /** The chat follows this node; null clears the focus so it shows the session head. */
+  const handleNodeChange = useCallback((next: string | null) => {
+    updateUrl({ node: next });
+  }, [updateUrl]);
+
+  /** Picker selection: the session changes, so the node focus resets. */
+  const handleSwitchSession = useCallback((next: string) => {
+    updateUrl({ sid: next, node: null });
+  }, [updateUrl]);
+
   /* Desktop resize drag */
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!isDragging) return;
@@ -228,6 +282,7 @@ export function VbCard() {
   const listProps: Omit<CardTabProps, 'renderer'> = {
     filters,
     onSelectTag: handleSelectTag,
+    onJump: handleJump,
     selectedRef: activeEditor,
     tidLoc,
   };
@@ -247,6 +302,9 @@ export function VbCard() {
       openTabs={openTabs}
       activeTab={activeEditor}
       sessionId={sessionId}
+      nodeId={nodeId || undefined}
+      onNodeChange={handleNodeChange}
+      onSwitchSession={handleSwitchSession}
       onTabChange={handleEditorChange}
     />
   );

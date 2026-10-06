@@ -1,5 +1,5 @@
 // src/components/BottomIconBar.tsx
-import React, { useState, useEffect, useRef, useSyncExternalStore } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import * as li from 'lucide-react'
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
@@ -13,6 +13,10 @@ import { Drag } from './drag';
 import { useAvailableFilters } from './filterStore';
 import { remark2tagged } from './remark-list';
 import * as CredUnlock from '../credUnlock';
+import { REST_GROUPER_PREFIX } from './restGrouper';
+import { MAX_QUERY_TAGS, revertTagUpdates, tagRowsWithQuery, tagRowsWithTags } from './tagApply';
+import { tagRowsInteractive, tokenize } from '../srctag';
+import { restTagStore, type RestTagHint } from './restGrouper';
 
 export function TapBar() {
   const BTN_SIZE = 33;
@@ -141,6 +145,252 @@ function SyncRing({ color, frac }: { color: string; frac: number }) {
 /** Compact duration for the step list. */
 const fmtMs = (ms: number) => ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
 
+/** How many suggestions zone B shows. */
+const MAX_HINTS = 3;
+
+/**
+ * Omnibox-style live search: a transparent outlined box whose dropdown lists `iq` rows
+ * whose `ref` (the saved url/filename) or `txt` contains the query. Up/Down move the
+ * highlight, Enter opens the highlighted row in the editor, Escape closes the list.
+ *
+ * Focusing the empty box shows two zones: the tags `srctag` would add to the rows the rest
+ * list scored (click applies them), then the store's most used tags (click searches them).
+ * Typing replaces both with the live matches.
+ */
+function SearchOmnibox({ onOpen }: { onOpen: (ref: string) => void }) {
+  const [q, setQ] = useState('');
+  const [debounced, setDebounced] = useState('');
+  const [open, setOpen] = useState(false);
+  const [hi, setHi] = useState(0);
+  const [hints, setHints] = useState<RestTagHint[]>([]);
+  const [recentTags, setRecentTags] = useState<{ tag: string; count: number }[]>([]);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  /* One query per typing burst. */
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(q.trim()), 180);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  /** Live `iq` matches on `ref` or `txt`; dexie re-runs this on every `db.das` change. */
+  const rows = useLiveQuery(
+    async () => {
+      if (!debounced) return [] as idb.Da[];
+      const needle = debounced.toLocaleLowerCase();
+      const all = await idb.iq([]);
+      return all
+        .filter((r) => r.ref.toLocaleLowerCase().includes(needle)
+          || r.txt.toLocaleLowerCase().includes(needle))
+        .slice(0, 12);
+    },
+    [debounced],
+    [] as idb.Da[],
+  ) ?? [];
+  const hiIdx = rows.length === 0 ? -1 : Math.min(hi, rows.length - 1);
+
+  /** Query tokens become priority tags; a long query would drown each row's own terms. */
+  const queryTags = useMemo(
+    () => [...new Set(tokenize(debounced))].slice(0, MAX_QUERY_TAGS),
+    [debounced],
+  );
+
+  /** Tag the picked rows with the query's tokens, add-only, and offer the revert. */
+  const tagPicked = async (picked: idb.Da[]) => {
+    setOpen(false);
+    try {
+      const { rows: n, tags, undo } = await tagRowsWithQuery(picked, debounced);
+      if (n === 0) {
+        toast.info('nothing to tag', { description: 'no query term to tag with' });
+        return;
+      }
+      toast.success(`tagged ${n} row(s)`, {
+        description: tags.map((t) => `#${t}`).join(' '),
+        action: { label: 'Revert', onClick: () => { void revertTagUpdates(undo); } },
+      });
+    } catch (e) {
+      toast.error(`tag failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  /** Apply a suggested tag to the recent rows that support it, add-only, with a revert. */
+  const applyHint = async (hint: RestTagHint) => {
+    setOpen(false);
+    try {
+      const { rows: n, tags, undo } = await tagRowsWithTags(hint.rows, [hint.tag], { src: 'suggest' });
+      if (n === 0) {
+        toast.info('nothing to tag', { description: `no recent row fits #${hint.tag}` });
+        return;
+      }
+      toast.success(`tagged ${n} row(s)`, {
+        description: tags.map((t) => `#${t}`).join(' '),
+        action: { label: 'Revert', onClick: () => { void revertTagUpdates(undo); } },
+      });
+    } catch (e) {
+      toast.error(`tag failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  /**
+   * Zone B from the rest list's own `srctag` pass, which `CardTab` publishes into
+   * {@link restTagStore} whatever the grouper is; the newest-row scan below is only
+   * the fallback for the tick before that pass first resolves.
+   */
+  useEffect(() => {
+    const push = () => {
+      const ranked = restTagStore.rank(MAX_HINTS);
+      if (ranked.length > 0) setHints(ranked);
+    };
+    push();
+    return restTagStore.subscribe(push);
+  }, []);
+
+  /**
+   * Zone A from `availableDas`, and the fallback Zone B when no rest pass exists yet.
+   */
+  const refreshHints = async () => {
+    try {
+      const all = await idb.iq([]);
+      const crumbs = idb.availableDas(all).slice(0, 5);
+      setRecentTags(crumbs.map((c) => ({ tag: c.tag, count: c.count })));
+      if (restTagStore.size > 0) return;
+      const recent = all.slice(0, 8);
+      if (recent.length === 0) {
+        setHints([]);
+        return;
+      }
+      const known = crumbs.length > 0;
+      const res = await tagRowsInteractive(recent, recent.map((r) => r.tid as number), {
+        priorityTags: crumbs.map((c) => c.tag),
+        score: { topK: 3, minScore: 0.15 },
+      });
+      const byTag = new Map<string, RestTagHint>();
+      for (const r of res) {
+        // `srctag` sorts by its window dimension, so resolve the stored row by tid
+        const row = recent.find((x) => x.tid === r.row.tid);
+        if (!row) continue;
+        for (const s of r.suggestions) {
+          // without a known vocabulary, only a strong lexical hit is worth suggesting
+          if (known && s.parts.priority === 0) continue;
+          if (row.tags?.includes(s.tag)) continue;
+          const hit = byTag.get(s.tag);
+          if (hit) {
+            hit.rows.push(row);
+            hit.score = Math.max(hit.score, s.score);
+          } else {
+            byTag.set(s.tag, { tag: s.tag, rows: [row], score: s.score });
+          }
+        }
+      }
+      setHints([...byTag.values()]
+        .sort((a, b) => b.rows.length - a.rows.length || b.score - a.score)
+        .slice(0, MAX_HINTS));
+    } catch (e) {
+      console.error('srctag hints failed:', e);
+      setHints([]);
+    }
+  };
+
+  useEffect(() => { setHi(0); }, [debounced]);
+
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('pointerdown', onDown);
+    return () => document.removeEventListener('pointerdown', onDown);
+  }, []);
+
+  const handleOpen = (ref: string) => { onOpen(ref); setOpen(false); };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setHi((i) => Math.min(i + 1, rows.length - 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setHi((i) => Math.max(i - 1, 0)); }
+    else if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); const row = rows[hiIdx]; if (row) void tagPicked([row]); }
+    else if (e.key === 'Enter') { const row = rows[hiIdx]; if (row) handleOpen(row.ref); }
+    else if (e.key === 'Escape') { setOpen(false); inputRef.current?.blur(); }
+  };
+
+  return (
+    <div ref={rootRef} className="user-menu-container" style={{ alignSelf: 'center', marginLeft: 11, flex: '0 1 auto', minWidth: 0 }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 6, height: 40, padding: '0 12px',
+        width: 198, maxWidth: '100%', minWidth: 0, boxSizing: 'border-box',
+        borderRadius: 20, background: 'transparent', border: '1px solid rgba(255,255,255,0.2)',
+        backdropFilter: 'blur(10px)', transition: 'all 0.2s',
+      }}>
+        <li.Search size={16} color="rgba(255,255,255,0.7)" />
+        <input
+          ref={inputRef}
+          type="search"
+          value={q}
+          aria-label="Search"
+          placeholder="Search"
+          spellCheck={false}
+          onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+          onFocus={() => { setOpen(true); void refreshHints(); }}
+          onKeyDown={onKeyDown}
+          style={{ flex: '1 1 auto', minWidth: 0, margin: 0, padding: 0, background: 'transparent', border: 'none', outline: 'none', color: 'white', fontSize: 13 }}
+        />
+      </div>
+      {open && (debounced.length > 0 || hints.length > 0 || recentTags.length > 0) && (
+        <div className="user-dropdown" style={{ left: 0, right: 'auto', top: 48, minWidth: '100%', width: 'max(100%, 300px)', maxWidth: 'calc(100vw - 30px)' }}>
+          {debounced.length === 0 && hints.length > 0 && (
+            <div className="user-dropdown-item" style={{ opacity: 0.5, fontSize: 11 }}>suggested</div>
+          )}
+          {debounced.length === 0 && hints.map((h) => (
+            <button
+              key={`sug-${h.tag}`}
+              className="user-dropdown-item"
+              title={`tags the recent row(s) this fits`}
+              onClick={() => void applyHint(h)}
+            >
+              <span style={{ fontWeight: 600 }}>#{h.tag}</span>
+              <span style={{ fontSize: 11, opacity: 0.55 }}> {h.rows.length} row(s) · {h.score.toFixed(2)}</span>
+            </button>
+          ))}
+          {debounced.length === 0 && recentTags.length > 0 && (
+            <div className="user-dropdown-item" style={{ opacity: 0.5, fontSize: 11 }}>recent tags</div>
+          )}
+          {debounced.length === 0 && recentTags.map((t) => (
+            <button
+              key={`recent-${t.tag}`}
+              className="user-dropdown-item"
+              title="search this tag"
+              onClick={() => { setQ(t.tag); setOpen(true); inputRef.current?.focus(); }}
+            >
+              <span style={{ opacity: 0.8 }}>#{t.tag}</span>
+              <span style={{ fontSize: 11, opacity: 0.5 }}> x{t.count}</span>
+            </button>
+          ))}
+          {queryTags.length > 0 && rows.length > 0 && (
+            <button
+              className="user-dropdown-item"
+              title="Shift+Enter tags only the highlighted row"
+              onClick={() => void tagPicked(rows)}
+            >
+              #{queryTags.join(' #')} → tag {rows.length} result{rows.length === 1 ? '' : 's'}
+            </button>
+          )}
+          {rows.length === 0 && <div className="user-dropdown-item" style={{ opacity: 0.6 }}>no match</div>}
+          {rows.map((r, i) => (
+            <button
+              key={r.tid ?? `${r.ref}@${i}`}
+              className="user-dropdown-item"
+              onPointerEnter={() => setHi(i)}
+              onClick={() => handleOpen(r.ref)}
+              style={i === hiIdx ? { background: 'rgba(255,255,255,0.1)' } : undefined}
+            >
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.txt}</div>
+              <div style={{ fontSize: 11, opacity: 0.55, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.type} · {r.ref}</div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function UserBar() {
   const [session, setSession] = useState(sess);
   const [open, setOpen] = useState(false);
@@ -203,6 +453,26 @@ export function UserBar() {
     [],
     [] as idb.Da[],
   );
+
+  /* Grouper scripts come straight from `db.das`, so a new `restGroupers/…` row
+   * lands in the settings datalist without a code change. */
+  const grouperOpts = useLiveQuery(
+    async () => {
+      const rows = await idb.db.das.where('type').equals('src').toArray();
+      const refs = rows
+        .filter((r) => r.ref.startsWith(REST_GROUPER_PREFIX) && !r.tags?.includes(idb.DEL_TAG))
+        .map((r) => r.ref);
+      return [...new Set(refs)].sort();
+    },
+    [],
+    [] as string[],
+  );
+
+  /** Datalist options for one `treeCac` key; the grouper key adds the live script refs. */
+  const treeCacOptsFor = (key: string): string[] => {
+    const base = idb.treeCacOpts[key] ?? [];
+    return key === 'restGrouper' ? [...base, ...grouperOpts] : base;
+  };
 
   const readTabParam = (): string[] => {
     const csv = searchParams.get('tabs');
@@ -334,7 +604,8 @@ export function UserBar() {
 
   return (
     <div className="flex flex-col items-center">
-      <div style={{ position: 'fixed', top: '36px', right: '20px', zIndex: 2, display: 'flex', justifyContent: 'flex-end', pointerEvents: 'none' }}>
+      <div style={{ position: 'fixed', top: '36px', right: '20px', zIndex: 2, display: 'flex', justifyContent: 'flex-end', maxWidth: 'calc(100vw - 40px)', pointerEvents: 'none' }}>
+        <SearchOmnibox onOpen={openInEditor} />
         <div
           className="user-menu-container"
           ref={plusRef}
@@ -403,9 +674,9 @@ export function UserBar() {
                   defaultValue={value as string}
                   onBlur={(e) => { idb.db.tree.put({key, value: idb.treeCac[key] = e.target.value}); }}
                   style={{flexGrow:1, paddingLeft:2}} />
-                {idb.treeCacOpts[key] && (
+                {treeCacOptsFor(key).length > 0 && (
                   <datalist id={`opts-tree-${key}`}>
-                    {idb.treeCacOpts[key].map((opt) => (
+                    {treeCacOptsFor(key).map((opt) => (
                       <option key={opt} value={opt} />
                     ))}
                   </datalist>

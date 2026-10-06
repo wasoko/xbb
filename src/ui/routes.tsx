@@ -8,6 +8,7 @@ import {VbCard} from './tabs';
 import { ErrorBoundaryOutlet, LocalErrorBoundary } from './ErrorBoundaryOutlet';
 import { FilterBar } from './FilterBar';
 import { Toaster } from 'sonner';
+import { installSrctagGlobal } from '../srctag';
 
 const router = createHashRouter([
   {
@@ -56,6 +57,10 @@ const router = createHashRouter([
     // document.addEventListener('mouseup', handleSelection_showOpenLinks);
     // document.addEventListener('touchend', handleSelection_showOpenLinks);
 
+// A `type='src'` row cannot import this bundle: `runsrc` evaluates it from a `data:` URL,
+// which has no base for a relative specifier. The global is how a `run_src` row reaches it.
+installSrctagGlobal();
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <RouterProvider router={router} />
@@ -68,12 +73,15 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 // URL anatomy
 // ────────────────────────────────────────────────────────────────────────────
 //
-//  /tabs?f=filter&e=core%2Frender.ts&tabs=core%2Frender.ts%2Cutils%2Fmath.ts&sid=a1b2c3d4
-//  └──┬──┘└──┬──┘└──────────┬──────┘└─────────────────────┬─────────────────┘└────┬────┘
-//     │      │              │                              │                       │
-//   route  filter     active editor              open tab list (CSV)         session id
+//  /tabs?f=filter&e=core%2Frender.ts&tabs=core%2Frender.ts%2Cutils%2Fmath.ts&sid=a1b2c3d4&node=node-1
+//  └──┬──┘└──┬──┘└──────────┬──────┘└─────────────────────┬─────────────────┘└────┬────┘└───┬───┘
+//     │      │              │                              │                       │        │
+//   route  filter     active editor              open tab list (CSV)         session id   node focus
+//
+// `f=recr` is reserved: as the only filter it lists recr's own rows instead of tag rows,
+// and a click on one of them sets `sid`/`node` or opens a tab ref of the form `recr|<ref>`.
 //
 // How panes append to /tabs:
 //   tabs.tsx   → openInEditor(file)  appends  &e=file&tabs=existing,file
 //   artfact    → activateTab(file) sets      &e=file              (preserve tabs)
-//   chat-pane  → startSession()     appends   &sid=nanoid
+//   chat-pane  → the session picker sets      &sid=nanoid

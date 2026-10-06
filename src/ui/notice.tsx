@@ -62,7 +62,20 @@ export const logStoreSlice = (error: unknown): void => {
 // ─── Notification layer ───────────────────────────────────────────────────────
 // Tier 3 — sonner toast                 (always available, zero-permission)
 
-type ToastFn = (message: string, options?: { description?: string }) => void;
+/** One button on a toast, e.g. the next-key fallback a failed request offers. */
+export interface NoticeAction {
+  label: string;
+  onClick: () => void;
+}
+
+type ToastFn = (message: string, options?: {
+  description?: string;
+  action?: NoticeAction;
+  /** Milliseconds the toast lives; Infinity keeps it until it is dismissed. */
+  duration?: number;
+  onDismiss?: () => void;
+  onAutoClose?: () => void;
+}) => void;
 
 /** Injected at call-site so this module stays free of direct sonner imports. */
 export interface NoticeOptions {
@@ -72,16 +85,25 @@ export interface NoticeOptions {
   toast?: Partial<Record<NoticePayload['level'], ToastFn>> & { info: ToastFn };
   /** When true the notice is also broadcast to the Realtime channel. */
   broadcast?: boolean;
+  /** Button shown on the toast. Not stored in history: it is not serialisable. */
+  action?: NoticeAction;
+  /** Toast lifetime in milliseconds; omitted uses the toast library's default. */
+  duration?: number;
+  /** Called when the user closes the toast without taking its action. */
+  onDismiss?: () => void;
+  /** Called when the toast's own timer ends it without its action being taken. */
+  onAutoClose?: () => void;
 }
 
-function fireToast(payload: NoticePayload, toast: NoticeOptions['toast']): void {
+function fireToast(payload: NoticePayload, options: NoticeOptions): void {
   const { scope, message, level } = payload;
+  const { toast, action, duration, onDismiss, onAutoClose } = options;
   const fn = toast?.[level] ?? toast?.info;
   if (!fn) {
     console.warn('[handleNotice] No toast function available for level:', level);
     return;
   }
-  fn(scope, { description: message });
+  fn(scope, { description: message, action, duration, onDismiss, onAutoClose });
 }
 
 // ─── Supabase broadcast ───────────────────────────────────────────────────────
@@ -140,7 +162,7 @@ export async function noticeStore(
   }
 
   // 2. Notification
-  fireToast(payload, toast);
+  fireToast(payload, options);
 
   // 3. Supabase Realtime broadcast (fire-and-forget, opt-in)
   if (broadcast && channel) {

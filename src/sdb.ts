@@ -67,11 +67,14 @@ export const treeCac:{[key:string]: unknown} = {
   'snap_name': 'tabext-beta',
   'tabSeer': 'cardtab',
   'cardSeer': 'cs1',
+  'restGrouper': 'rsdt',
   // , "emb_model-HF":HF_OR[0]
 }
 export let treeCacOpts: Record<string, string[]> = {
   'tabSeer': ['cardtab', 'card'],
   'cardSeer': ['cs1', 'cs2'],
+  // `rsdt`/`rsid`/`rsess`/`rstag` are built in; `restGroupers/...` refs are appended from `db.das` at render.
+  'restGrouper': ['rsdt', 'rsid', 'rsess', 'rstag', 'none'],
   'provider-model': ['Default'],
 };
 
@@ -101,12 +104,17 @@ export async function iq(filters: string[], search?: string, tidNum?: number, li
     return rows.filter((t): t is Da => t !== undefined && isUiTag(t));
   }
   filters = filters.filter(f=> f.trim().length>0)
-  let col = filters.length > 0
-    ? db.das.where('tags').equals(filters[0])
-    : db.das.toCollection();
+  // `f=recr` is the one way recr's own rows reach the card list; every other query
+  // keeps them out of the tag UI (`isUiTag`), so a session node is never listed as a tag.
+  const recrMode = filters.length === 1 && filters[0] === RECR_FILTER;
+  let col = recrMode
+    ? db.das.where('type').equals(RECR_TYPE)
+    : filters.length > 0
+      ? db.das.where('tags').equals(filters[0])
+      : db.das.toCollection();
 
-  col = col.filter(isUiTag);
-  const extra = filters.slice(1);
+  if (!recrMode) col = col.filter(isUiTag);
+  const extra = recrMode ? [] : filters.slice(1);
   if (extra.length)
     col = col.filter(row => extra.every(f => row.tags?.includes(f)));
 
@@ -271,6 +279,13 @@ export const CHG_REJ_TAG = 'FIXMEchange_rejected'
 
 /** Rows the tag UI owns. recr keeps its session, settings, and tool rows in the same table. */
 export const isUiTag = (r: Da) => r.type !== RECR_TYPE
+
+/**
+ * Filter value that lists recr's own rows (`sess/*`, `settings/main`, `tools/*`) instead of
+ * the tag rows, so the card list can offer them as buttons. Reserved: while it is the only
+ * filter, a tag named `recr` is unreachable.
+ */
+export const RECR_FILTER = RECR_TYPE
 
 /** The `secret.md` document carrying the agent's provider, model, and key selection. */
 export async function getSecret(): Promise<string | undefined> {
@@ -567,6 +582,21 @@ export function dropCrEntry(row: Da, key: string) {
   const tags = remaining > 0 ? row.tags : withChgTag(row, false).tags
   const next = remaining > 0 ? { ...rec, cr: rest } : rec
   return tags === row.tags ? { rec: next } : { rec: next, tags }
+}
+
+/** Trash one `ver`/`cr` history entry from the row.
+ *  A `cr` discard marks the row dirty so the reduced log is pushed: the log travels in the
+ *  RPC payload, so a clean row would take the entry back from the server copy on the next
+ *  merge. A `ver` entry is local bookkeeping and needs no push.
+ *  @param row the row the entry belongs to
+ *  @param source which history the key names
+ *  @param key the entry to drop
+ *  @returns the Dexie update spec for the row */
+export function dropHistEntry(row: Da, source: 'ver' | 'cr', key: string) {
+  if (source === 'cr') return { ...dropCrEntry(row, key), modAt: new Date() }
+  const { [key]: _drop, ...rest } = (row.rec?.ver ?? {}) as VerHist
+  const { ver: _ver, ...rec } = row.rec ?? {}
+  return { rec: Object.keys(rest).length > 0 ? { ...rec, ver: rest } : rec }
 }
 
 /** One row as the CDN snapshot stores it: the client-held `ver` history is dropped, so the

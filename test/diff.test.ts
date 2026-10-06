@@ -2,7 +2,7 @@
  * @vitest-environment happy-dom
  */
 import { describe, expect, it } from 'vitest';
-import { applyHunk, diffHunks, parseAnsi } from '../src/ui/diff';
+import { applyHunk, diffHunks, diffStat, parseAnsi } from '../src/ui/diff';
 
 describe('diffHunks', () => {
   it('is empty for equal texts', () => {
@@ -26,6 +26,46 @@ describe('diffHunks', () => {
 
   it('keeps regions apart when the two texts differ twice', () => {
     expect(diffHunks('one TWO three FOUR', 'one two three four')).toHaveLength(2)
+  })
+
+  it('addresses every change inside its own text', () => {
+    const local = 'bbccaabcc'
+    const server = 'ccaaaccb'
+    for (const hunk of diffHunks(local, server))
+      for (const change of hunk.changes) {
+        expect(local.slice(change.atLocal, change.atLocal + change.local.length))
+          .toBe(change.local)
+        expect(server.slice(change.atServer, change.atServer + change.server.length))
+          .toBe(change.server)
+      }
+  })
+
+  it('splits a region into the changes a user can take one at a time', () => {
+    const [hunk] = diffHunks('bbccaabcc', 'ccaaaccb').slice(1, 2)
+    expect(hunk.changes.map(c => [c.local, c.server])).toEqual([['', 'a'], ['b', '']])
+  })
+
+  it('carries every change of a region into the region text', () => {
+    for (const hunk of diffHunks('the quick red fox', 'the quick brown fox'))
+      expect(hunk.changes).toHaveLength(1)
+  })
+})
+
+describe('diffStat', () => {
+  it('is zero for identical texts', () => {
+    expect(diffStat('a\nb', 'a\nb')).toEqual({ add: 0, del: 0 })
+  })
+
+  it('counts the lines only the version has as added', () => {
+    expect(diffStat('a\nb\nc', 'a\nc')).toEqual({ add: 1, del: 0 })
+  })
+
+  it('counts the lines only the row has as removed', () => {
+    expect(diffStat('a\nc', 'a\nb\nc')).toEqual({ add: 0, del: 1 })
+  })
+
+  it('counts a rewritten line on both sides', () => {
+    expect(diffStat('a\nB', 'a\nb')).toEqual({ add: 1, del: 1 })
   })
 })
 

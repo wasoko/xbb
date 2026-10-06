@@ -19,8 +19,9 @@ import { db, DEL_TAG, daDirty, daEdit, daLive, daType as fileType, daWin, treeCa
 import type { Da } from './sdb';
 import * as fc from './fc';
 import { bulletKv, bulletList, splitSections, subSections } from './recrMd';
-import { GATE_REF, RECR_TYPE, SECRET_REF, TASK_COMPLETE } from './recrConst';
+import { GATE_REF, RECR_SOURCE_ID, RECR_TYPE, SECRET_REF, TASK_COMPLETE } from './recrConst';
 import { filterTools, gateTools, loadGate, type GateConfig } from './recrGate';
+import { runBody, type RecrScriptContext } from './runsrc';
 import {
   recrHost, buildContext, buildRequestState, defaultToolMeta,
   initDefaultPlugins,
@@ -43,6 +44,9 @@ export type {
 };
 export { recrHost, initDefaultPlugins };
 export { GATE_REF, RECR_TYPE, SECRET_REF, TASK_COMPLETE };
+// the src-row evaluator lives in `runsrc.ts`; re-exported so consumers keep one import site
+export { isModuleSource, moduleSourceUrl, runBody } from './runsrc';
+export type { RecrScriptContext } from './runsrc';
 
 // ─── Pluggable Storage Interface ───────────────────────────────────────────
 
@@ -258,6 +262,10 @@ export interface SecretsConfig {
   providerName?: string;
   /** Key under that provider's `Models` list, for display. */
   modelAlias?: string;
+  /** `API Keys` alias `apiKey` was read from, for display and for the next-key fallback. */
+  keyAlias?: string;
+  /** Every alias listed under the provider's `API Keys`, in document order. */
+  keyAliases?: string[];
   /** Additional HTTP headers for the fetch call */
   headers?: Record<string, string>;
 }
@@ -340,6 +348,9 @@ export interface BranchingSession {
   rootNodeId: string | null;
   currentHeadId: string | null;
   title: string;
+  /** Writer that produced the session, so the browser can pick the reader. Absent reads as
+   *  `recr`. */
+  source?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -373,11 +384,14 @@ export interface FetchResult {
  *   * API Keys:
  *     - wasgsd: sk-...
  *
- * A provider heading may contain spaces. A blank or unmatched `* Keys:` line
- * falls back to the provider's first listed key, so an unfilled document still runs.
+ * A provider heading may contain spaces. A blank `* Keys:` line means *auto track*:
+ * the provider's first listed key is selected and its alias is written back into
+ * the document, so the selection replicates through `greet` like any other row
+ * edit. A non-blank `* Keys:` line that matches nothing warns and falls back to the
+ * first listed key, so an unfilled document still runs.
  *
  * @param store store whose `secret.md` key holds the document
- * @returns resolved endpoint, model, and credential
+ * @returns resolved endpoint, model, credential, and the provider's key aliases
  * @throws when the document, the named provider, the model alias, or every key is missing
  */
 export async function parseSecrets(store: IRecrStore): Promise<SecretsConfig> {
@@ -424,18 +438,78 @@ export async function parseSecrets(store: IRecrStore): Promise<SecretsConfig> {
   if (!model) throw new Error(`Model not found in provider "${provName}": "${modelAlias}"`);
 
   const keys = bulletList(body, 'API Keys');
+  const keyAliases = Object.keys(keys);
   const wanted = (defaults['keys'] ?? '').split(',').map(s => s.trim()).filter(Boolean);
   let keyName = wanted.find(k => keys[k]);
-  if (!keyName) {
-    keyName = Object.keys(keys)[0];
-    const asked = wanted.length > 0 ? wanted.join(', ') : 'blank "Keys"';
-    console.warn(`[recr] ${SECRET_REF}: no key matched ${asked} in "${provName}"`
+  if (!keyName && wanted.length === 0) {
+    // Auto track: take the first listed key and record that choice in the document,
+    // so which key is in use replicates to other clients through `greet`.
+    keyName = keyAliases[0];
+    if (keyName) {
+      await setSecretKeys(store, [keyName]).catch((e: unknown) =>
+        console.warn(`[recr] ${SECRET_REF}: could not record key "${keyName}":`, e));
+    }
+  } else if (!keyName) {
+    keyName = keyAliases[0];
+    console.warn(`[recr] ${SECRET_REF}: no key matched ${wanted.join(', ')} in "${provName}"`
       + `; using "${keyName ?? '(none listed)'}"`);
   }
   if (!keyName) throw new Error(`Provider "${provName}" lists no API key`);
 
   return { apiBaseUrl: baseUrl, apiKey: keys[keyName], model
-    , providerName: provName, modelAlias, headers: undefined };
+    , providerName: provName, modelAlias, keyAlias: keyName, keyAliases, headers: undefined };
+}
+
+/**
+ * The alias after `current` in provider order, wrapping to the first. `current`
+ * absent or not listed means the first alias, which is also what auto track picks.
+ *
+ * @param aliases every alias listed under `API Keys`, in document order
+ * @param current alias in use, if known
+ * @returns the next alias, or undefined when the provider lists fewer than two
+ */
+export function nextKeyAlias(aliases: string[], current?: string): string | undefined {
+  if (aliases.length < 2) return undefined;
+  const at = current ? aliases.indexOf(current) : -1;
+  return aliases[(at + 1) % aliases.length];
+}
+
+/**
+ * Rewrites the `* Keys:` line of `secret.md`'s `## Default` section, leaving the
+ * rest of the document byte-for-byte. A document without that section gets the
+ * line after its first heading.
+ *
+ * @param md the `secret.md` document
+ * @param aliases aliases the Default section should name, in order
+ * @returns the rewritten document
+ */
+export function withSecretKeys(md: string, aliases: string[]): string {
+  const lines = md.split('\n');
+  const line = `* Keys: ${aliases.join(', ')}`;
+  const head = lines.findIndex(l => /^##\s*default\s*$/i.test(l));
+  const start = head >= 0 ? head + 1 : 0;
+  let end = lines.length;
+  for (let i = start; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) { end = i; break; }
+  }
+  const at = lines.findIndex((l, i) => i >= start && i < end && /^\*\s*keys\s*:/i.test(l));
+  if (at >= 0) lines[at] = line;
+  else lines.splice(head >= 0 ? head + 1 : 0, 0, line);
+  return lines.join('\n');
+}
+
+/**
+ * Records the active key in `secret.md`, so the choice is a dirty `md` row that
+ * `greet` pushes rather than client-local state.
+ *
+ * @param store store whose `secret.md` key holds the document
+ * @param aliases aliases to write into the Default `* Keys:` line
+ * @throws when the document is missing from the store
+ */
+export async function setSecretKeys(store: IRecrStore, aliases: string[]): Promise<void> {
+  const md = await store.get(SECRET_REF);
+  if (!md) throw new Error(`Secret not found: ref=${SECRET_REF}`);
+  await store.put(SECRET_REF, withSecretKeys(md, aliases));
 }
 
 // ─── Tool Parser: Dexie tags (type='recr', ref='tools/...') -> ToolDef[] ────
@@ -546,6 +620,7 @@ export function createBranchingSession(id?: string, title: string = 'New Session
     rootNodeId: null,
     currentHeadId: null,
     title,
+    source: RECR_SOURCE_ID,
     createdAt: now,
     updatedAt: now,
   };
@@ -563,8 +638,11 @@ export async function loadSession(store: IRecrStore, id: string): Promise<AgentS
 export async function loadBranchingSession(store: IRecrStore, id: string): Promise<BranchingSession> {
   const raw = await store.get(`${SESSION_PREFIX}${id}/meta`);
   if (raw) {
-    try { return JSON.parse(raw) as BranchingSession; }
-    catch { /* fall through to create new */ }
+    try {
+      const parsed = JSON.parse(raw) as BranchingSession;
+      // a meta row written before the field, or by another writer, reads as recr's
+      return { ...parsed, source: parsed.source ?? RECR_SOURCE_ID };
+    } catch { /* fall through to create new */ }
   }
   return createBranchingSession(id);
 }
@@ -761,99 +839,6 @@ async function listDir(args: Record<string, unknown>, store: IRecrStore): Promis
 
   if (children.size === 0) return '(empty directory)';
   return [...children].sort().join('\n');
-}
-
-/** `AsyncFunction` so a script body may `await`; the body still runs in this page's realm. */
-const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor as
-  new (...args: string[]) => (...args: unknown[]) => Promise<unknown>;
-
-/** Value `run_src` hands a script: the row's ref, its arguments, and the page's Dexie tables. */
-export interface RecrScriptContext {
-  db: typeof db;
-  ref: string;
-  args: unknown;
-  console: Console;
-}
-
-/**
- * Dynamic `import()` of a specifier that is not a literal. `@vite-ignore` keeps
- * the bundler from trying to resolve a `data:` URL at build time.
- *
- * `new Function`/indirect `eval` cannot carry this: the test environment runs
- * them in a vm context whose `import()` needs a callback Node does not install.
- */
-const nativeImport = (u: string): Promise<{ default?: unknown }> =>
-  import(/* @vite-ignore */ u) as Promise<{ default?: unknown }>;
-
-/**
- * Whether a `type='src'` body is an ES module rather than a function body.
- *
- * The two are mutually exclusive: `export` is a syntax error inside
- * `AsyncFunction`, and a top-level `return` is a syntax error inside a module.
- * A line whose first token is a static `import` or an `export` names the module
- * form; `import(` and `exports.x` are expressions a function body may hold.
- *
- * @param body row text of a `type='src'` row
- * @returns true when the body opens a line with `import` or `export`
- */
-export function isModuleSource(body: string): boolean {
-  return /^[ \t]*(?:export(?![$\w])|import(?![$\w(]))/m.test(body);
-}
-
-/**
- * Module specifier for a `type='src'` body: a `data:` URL, which browsers and
- * Node both `import()`.
- *
- * The URL carries the whole body, so identical text yields one module instance
- * and module-level state survives a later `run_src` call that reads the same
- * text. A `data:` module has no base URL, so a relative specifier inside it
- * cannot resolve.
- *
- * @param body source text of the module row
- * @returns a `data:text/javascript` URL carrying `body`
- */
-export function moduleSourceUrl(body: string): string {
-  return 'data:text/javascript;charset=utf-8,' + encodeURIComponent(body);
-}
-
-/**
- * Imports a module row and calls its default export with `ctx`.
- *
- * @param body module source text
- * @param ctx value passed to the default export
- * @returns the default export's result
- * @throws when the module exports no default function
- */
-async function runModule(body: string, ctx: RecrScriptContext): Promise<unknown> {
-  const mod = await nativeImport(moduleSourceUrl(body));
-  const fn = mod.default;
-  if (typeof fn !== 'function') throw new Error('module row must export a default function(ctx)');
-  return await (fn as (ctx: RecrScriptContext) => unknown)(ctx);
-}
-
-/**
- * Runs `body` on the path its syntax allows.
- *
- * A one-line body such as `let n = 0; export default ...` puts the module
- * keyword off the line start, so the constructor's syntax error is the
- * tie-breaker: it names `export`/`import` only for module-only syntax.
- *
- * @param body row text of a `type='src'` row
- * @param ctx value passed to the script
- * @returns the script's result
- */
-async function runBody(body: string, ctx: RecrScriptContext): Promise<unknown> {
-  if (isModuleSource(body)) return runModule(body, ctx);
-  let run: (ctx: RecrScriptContext) => Promise<unknown>;
-  try {
-    run = new AsyncFunction('ctx', body) as (ctx: RecrScriptContext) => Promise<unknown>;
-  } catch (e) {
-    if (e instanceof SyntaxError && /\b(?:export|import)\b/.test(e.message)) {
-      return runModule(body, ctx);
-    }
-    throw e;
-  }
-  return await run(ctx);
 }
 
 /**
@@ -1077,6 +1062,29 @@ export interface FetchLLMOptions {
   abortSignal?: AbortSignal;
 }
 
+/**
+ * A provider answered a request with a non-OK status. Carries the key that was
+ * sent and the provider's key aliases, so a caller can offer the next one; a
+ * request that never reached the provider stays a plain `Error`, because a
+ * different key cannot fix an unreachable host.
+ */
+export class LlmHttpError extends Error {
+  constructor(
+    /** HTTP status the provider answered with. */
+    readonly status: number,
+    message: string,
+    /** Provider heading the request went to. */
+    readonly providerName?: string,
+    /** `API Keys` alias whose value was sent. */
+    readonly keyAlias?: string,
+    /** Every alias listed under that provider, in document order. */
+    readonly keyAliases?: string[],
+  ) {
+    super(message);
+    this.name = 'LlmHttpError';
+  }
+}
+
 /** Path of the deployed Supabase function that fronts `ollama.com` (slug `v1a`). */
 const OLLAMA_PROXY_PATH = '/functions/v1/v1a';
 
@@ -1199,7 +1207,8 @@ export async function fetchLLM(opts: FetchLLMOptions): Promise<FetchResult> {
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`LLM API error ${res.status}: ${errText.slice(0, 500)}`);
+    throw new LlmHttpError(res.status, `LLM API error ${res.status}: ${errText.slice(0, 500)}`
+      , config.providerName, config.keyAlias, config.keyAliases);
   }
 
   // Parse SSE stream
@@ -1290,6 +1299,9 @@ export async function fetchLLM(opts: FetchLLMOptions): Promise<FetchResult> {
 export interface RunLoopOptions {
   session: BranchingSession;
   nodeId: string;
+  /** Node this turn attaches under, for a fork; `null` starts a new root. Omitted follows
+   *  `session.currentHeadId`. */
+  parentNodeId?: string | null;
   /** The user turn this loop answers; recorded on the node before the first request. */
   prompt: string;
   systemPrompt: string;
@@ -1300,6 +1312,15 @@ export interface RunLoopOptions {
   store: IRecrStore;
   /** Optional per-iteration progress callback */
   onProgress?: (text: string) => void;
+  /**
+   * Asked when the provider answers a request with a non-OK status, so the caller
+   * can offer another listed key. Returning secrets retries the same iteration
+   * with them; returning undefined lets the error propagate.
+   *
+   * @param error the status the provider answered with, and the key it was sent
+   * @returns secrets to retry with, or undefined to rethrow
+   */
+  onHttpError?: (error: LlmHttpError) => Promise<SecretsConfig | undefined>;
   abortSignal?: AbortSignal;
   /** Plugin context for hook dispatch */
   pluginCtx: RecrContext;
@@ -1323,14 +1344,38 @@ export interface RunLoopResult {
  * the tool results it just asked for.
  */
 export async function runLoop(opts: RunLoopOptions): Promise<RunLoopResult> {
-  const { session, nodeId, prompt, systemPrompt, tools, config, settings, executor, store,
+  const { session, nodeId, parentNodeId, prompt, systemPrompt, tools, config, settings, executor, store,
     onProgress, abortSignal, pluginCtx, pluginReq } = opts;
   let iter = 0;
+  /** Config in use; a key fallback swaps in the secrets re-resolved after the swap. */
+  let cfg = config;
+
+  /**
+   * One request, retried with another listed key while the caller keeps offering
+   * one. A network failure never reaches `onHttpError`: it says nothing about the
+   * key, so it propagates as the plain error it already is.
+   */
+  const request = async (msgs: ChatMessage[], onChunk: FetchLLMOptions['onChunk']): Promise<FetchResult> => {
+    let swaps = 0;
+    for (;;) {
+      try {
+        return await fetchLLM({ messages: msgs, tools, config: cfg, settings, abortSignal, onChunk });
+      } catch (e) {
+        const aliases = e instanceof LlmHttpError ? e.keyAliases ?? [] : [];
+        if (!opts.onHttpError || !(e instanceof LlmHttpError) || swaps >= aliases.length - 1) throw e;
+        const next = await opts.onHttpError(e);
+        if (!next) throw e;
+        cfg = next;
+        swaps++;
+      }
+    }
+  };
 
   // Initialize the TurnNode for this specific turn
   const currentTurn: TurnNode = {
     id: nodeId,
-    parentId: session.currentHeadId,
+    // `null` is a deliberate new root; only an omitted value follows the head
+    parentId: parentNodeId !== undefined ? parentNodeId : session.currentHeadId,
     version: 1,
     timestamp: Date.now(),
     userMessage: { role: 'user', content: prompt },
@@ -1357,36 +1402,29 @@ export async function runLoop(opts: RunLoopOptions): Promise<RunLoopResult> {
     let accToolCalls: ToolCall[] = [];
     let firstProgressEmitted = false;
 
-    const result = await fetchLLM({
-      messages,
-      tools,
-      config,
-      settings,
-      abortSignal,
-      onChunk: (delta) => {
-        if (delta.text) {
-          if (!firstProgressEmitted) {
-            firstProgressEmitted = true;
-            pluginReq.timings.firstProgress = Date.now() - pluginReq.timings.startedAt;
-          }
-          onProgress?.(delta.text);
-          // ── Plugin hook: stream chunk ──
-          recrHost.streamChunk(pluginCtx, delta.text, iter);
-          // ── Plugin hook: progress ──
-          recrHost.progress(pluginCtx, delta.text, iter);
+    const result = await request(messages, (delta) => {
+      if (delta.text) {
+        if (!firstProgressEmitted) {
+          firstProgressEmitted = true;
+          pluginReq.timings.firstProgress = Date.now() - pluginReq.timings.startedAt;
         }
-        if (delta.toolCalls) {
-          accToolCalls = delta.toolCalls;
-          for (const tc of delta.toolCalls) {
-            recrBus.send({
-              kind: 'recr-tool-call',
-              sessionId: session.id,
-              toolName: tc.function.name,
-              args: tc.function.arguments,
-            });
-          }
+        onProgress?.(delta.text);
+        // ── Plugin hook: stream chunk ──
+        recrHost.streamChunk(pluginCtx, delta.text, iter);
+        // ── Plugin hook: progress ──
+        recrHost.progress(pluginCtx, delta.text, iter);
+      }
+      if (delta.toolCalls) {
+        accToolCalls = delta.toolCalls;
+        for (const tc of delta.toolCalls) {
+          recrBus.send({
+            kind: 'recr-tool-call',
+            sessionId: session.id,
+            toolName: tc.function.name,
+            args: tc.function.arguments,
+          });
         }
-      },
+      }
     });
 
     // Record assistant response
@@ -1482,6 +1520,9 @@ export interface RcrOptions {
   prompt: string;
   /** Optional session ID to resume; creates new if omitted */
   sessionId?: string;
+  /** Node this turn attaches under, for a fork; `null` starts a new root. Defaults to the
+   *  session head. */
+  parentNodeId?: string | null;
   /** Override store; uses default DexieTagStore if omitted */
   store?: IRecrStore;
   /** Override tool executor; uses default tools if omitted */
@@ -1493,6 +1534,14 @@ export interface RcrOptions {
   /** System prompt */
   systemPrompt?: string;
   onProgress?: (text: string) => void;
+  /**
+   * Asked when the provider answers with a non-OK status, to offer another listed
+   * key. The same turn continues with the returned secrets.
+   *
+   * @param error the status the provider answered with, and the key it was sent
+   * @returns secrets to retry with, or undefined to fail the turn
+   */
+  onHttpError?: (error: LlmHttpError) => Promise<SecretsConfig | undefined>;
   abortSignal?: AbortSignal;
 
   // ── Plugin metadata (populated by UI/caller) ──────────────────────
@@ -1625,6 +1674,7 @@ export async function rcr(opts: RcrOptions): Promise<RunLoopResult> {
     const result = await runLoop({
       session,
       nodeId,
+      parentNodeId: opts.parentNodeId,
       prompt: opts.prompt,
       systemPrompt,
       tools: effectiveTools,
@@ -1633,6 +1683,7 @@ export async function rcr(opts: RcrOptions): Promise<RunLoopResult> {
       executor,
       store,
       onProgress: opts.onProgress,
+      onHttpError: opts.onHttpError,
       abortSignal: opts.abortSignal,
       pluginCtx,
       pluginReq: req,

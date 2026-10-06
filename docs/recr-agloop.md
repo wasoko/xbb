@@ -14,7 +14,9 @@ pre-port `idb.db.tags` design, so this one is the authority for xbb. Grounded in
 - `src/recrGate.ts` — `GateLevel`, `loadGate`, `gateTools`, `filterTools`
 - `src/recrMd.ts` — the `## Section` / `* Key:` / `- item:` dialect
 - `src/recrConst.ts` — shared ids · `src/recrPlugin.ts` — hook host (unused, R2)
-- `src/sdb.ts` — `Da`, `db.das`, `isUiTag`, `getSecret`, `daRead`
+- `src/sessionTree.ts` — session/node model, `recr|` tab refs, row jump targets
+- `src/sessionSource.ts` — the session-source registry the browser lists through
+- `src/sdb.ts` — `Da`, `db.das`, `isUiTag`, `RECR_FILTER`, `getSecret`, `daRead`
 - `src/ui/editor.tsx` — `Chat` · `vite.config.ts` — `/llm` dev proxy
 
 Entity: `Da { tid, txt, ref, type, tags?, dt, modAt, rec }`, unique on
@@ -86,7 +88,13 @@ Reads pick the row that wins for a `type + ref`: a row carrying `modAt` is a loc
 edit that has not been pushed yet, otherwise the newest `dt` wins; `[del]`-tagged
 rows are skipped. Writes set `modAt`, which is exactly what `greet` pushes, so
 sessions and settings replicate across clients like any other row (`docs/greet.md`).
-Recr rows are hidden from the tag UI by `sdb.isUiTag` (`iq`, `stat_tags`).
+Recr rows are hidden from the tag UI by `sdb.isUiTag` (`iq`, `stat_tags`); the one
+exception is the reserved filter `f=recr` (§6).
+
+The meta row also carries `source`, the writer that produced the session. It reads
+as `recr` when absent, and it is what the source registry (`src/sessionSource.ts`)
+selects a reader by, so a session written by another adapter lists and opens through
+the same picker.
 
 File writes go through the editor's own recipe, `sdb.daEdit(row, txt)`: the text is
 replaced and `modAt` set, which is exactly what `greet` pushes. A version enters
@@ -177,6 +185,26 @@ its allowlist — `ALLOWED_ORIGIN`, comma-separated, defaulting to `localhost`,
 so no port is pinned and a rejected page reads a status instead of a missing
 header. A failed `fetch` is reported with the proxy hint, because the browser
 cannot distinguish a CORS refusal from an unreachable host.
+
+### Choosing a key
+
+`## Default` names the key through `* Keys:`. Its three states:
+
+| `Keys:` | Behaviour |
+|---|---|
+| blank | **auto track**: the provider's first listed key is used, and its alias is written back into the line, so which key is in use replicates through `greet` like any other row edit |
+| one or more aliases, at least one listed under the provider | that key is used, in the written order |
+| aliases that match nothing | warns and falls back to the provider's first listed key |
+
+A request the provider answers with a **non-OK status** raises `LlmHttpError`,
+which carries the alias that was sent and every alias the provider lists. The Chat
+turns that into a toast whose action writes the next alias into `secret.md`
+(`setSecretKeys`) and re-resolves the secrets; the loop then retries the same
+iteration with the new key, so the turn keeps one node. Declining, letting the
+toast time out, or a provider with a single key leaves the error on the normal
+path. A failed `fetch` never reaches this: no key choice changes an unreachable
+host, so the browser-visible error stands as it is.
+
 ---
 
 ## 6. Chat client (`ui/editor.tsx`)
@@ -188,7 +216,14 @@ cannot distinguish a CORS refusal from an unreachable host.
 | Tool rows | `recrBus` (`recr-tool-call` / `recr-tool-result`) appended as they happen |
 | Stop | `AbortController`; an abort renders as `stopped`, not as an error |
 | Errors | `rcr` rethrows, so the `catch` owns the error bubble — the bus error is not also rendered |
+| Key fallback | A non-OK status offers the next listed key through a toast action (`askNextKey`); accepting writes it into `secret.md` and the same turn continues |
 | Session key | URL `sid` param, else `default` |
+| Node focus | URL `node` param; unknown or absent falls back to `currentHeadId` |
+| Session picker | `listAllSessions` over every registered source, newest `updatedAt` first |
+| Tree drawer | `SessionTree` of the focused session: one row per node, indented by `parentId` depth |
+| Sibling browse | Arrows beside a node's icon step through the siblings sharing its `parentId` |
+| Fork | Editing a stored user turn sends a turn with `parentNodeId` = that node's parent |
+| recr rows in the list | `f=recr` in the card list, each row a button (`recrTargetOf`) into the chat or a `recr\|<ref>` tab |
 
 ---
 
@@ -207,7 +242,11 @@ cannot distinguish a CORS refusal from an unreachable host.
 - **R4 — the tag UI must keep filtering `type='recr'`.** Recr rows live in the
   same table as tags, so a query that forgets `isUiTag` shows session nodes as
   files. `iq` (both its tag-filtered and its `tid`-anchored path) and `stat_tags`
-  are covered; `availableDas` needs nothing because recr rows carry no `tags`.
+  are covered; `availableDas` needs nothing because recr rows carry no `tags`. The
+  one exception is deliberate and narrow: `f=recr` as the *only* filter makes `iq`
+  return the `type='recr'` rows, because that is the card list's entry point into
+  the sessions. Every other query still applies `isUiTag`, and a tag literally
+  named `recr` is unreachable while it is the only filter — the value is reserved.
 - **R5 — secrets are plaintext and replicate.** `secret.md` is an ordinary `md`
   row: editing it in the UI sets `modAt`, so the API key is pushed to the server
   and lands in the S3 snapshot. Nothing encrypts it, and because the row syncs,
@@ -220,9 +259,12 @@ cannot distinguish a CORS refusal from an unreachable host.
   `setupCorsBypass()` throws on install. `modifyHeaders` also requires host
   access for the request URL — `<all_urls>` is already granted, so adding
   `declarativeNetRequestWithHostAccess` (no install-time warning) is the fix.
-- **R7 — one session per URL, no fork UI.** `forkSession` exists and
-  `tabext/docs/recr.md` records the tree as deliberate, but nothing in the UI
-  branches: a session only ever grows a single chain.
+- **R7 — a fork is a turn, not a record.** Editing a stored user turn sends a new
+  turn under that node's parent (`rcr`'s `parentNodeId`), so the edit becomes a
+  sibling branch and the session keeps both. Lateral browsing reads sibling
+  position from `parentId` + `timestamp` rather than from `TurnNode.version`, which
+  every writer still stores as `1`; `forkSession` remains unused. A sibling branch
+  is a second root when the edited turn was the first one.
 - **Minor:** tool calls are sequential, so one slow tool blocks the turn;
   `usage` is only present when the provider honours
   `stream_options.include_usage`; `LLM_PROXY_TARGET` covers one provider at a
@@ -237,3 +279,4 @@ cannot distinguish a CORS refusal from an unreachable host.
 - `test/recr-secret.test.ts`, `test/recr-gate.test.ts`, `test/recr-tools.test.ts`,
   `test/recr-session.test.ts` — secret parsing, gate filtering and refusal,
   file/script tools, branch replay and `iq` filtering
+- `test/recr-key-fallback.test.ts` — auto track, the next-key retry, and its stops

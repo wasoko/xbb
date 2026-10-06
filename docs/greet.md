@@ -105,9 +105,10 @@ sequenceDiagram
 `toMerge` returns a `dt` newer than the base the local row carries, so the copy held is
 the one the edit was made from, not the one the server delivers. That is why case 2 is
 the norm in the live loop (§7 R1). The greet round that wrote the `cr` entry announces it
-(§6), and the diff tab offers each changed region of the entry against the text the row
-carries now, one Apply button per region. Applying writes the row through `daEdit`, drops
-that `cr` entry — with the last one, the `FIXMEchange_rejected` tag — and pushes.
+(§6), and the diff tab offers each change of the entry against the text the row
+carries now, one Apply button per change. Applying writes the row through `daEdit` and
+pushes; the entry stays until every change is taken or the tab trashes it
+(`docs/difftab.md` §4).
 
 **Case 3 — the gate hits.** The local delta is applied onto the server text, so both
 edits survive. It fires on re-delivery of a version this client already holds — chiefly
@@ -282,8 +283,9 @@ Only the active tab is marked.
 **Discarded edits.** A round that dropped a local edit announces it from the merge site
 (`sdb.drainCr`, drained into `getConflicts`/`subscribeConflicts`), and the editor opens the
 diff tab for a row it already has open, at most one per batch — a snap merge must not open a
-tab per row. The tab menu lists the row's `ver` and `cr` stamps; picking one opens the same
-diff tab. `docs/difftab.md` owns the diff tab's own rules.
+tab per row. The tab menu lists the row's `ver` and `cr` stamps, each with its line delta
+and a `del` button that trashes the entry; picking a stamp opens the same diff tab.
+`docs/difftab.md` owns the diff tab's own rules.
 
 **Flush.** The buffer is written through `daEdit` when focus leaves the editor, when a
 pointer goes down outside `.code-editor` (capture), when the page is hidden, on window
@@ -324,10 +326,12 @@ the row is skipped.
 - **`stale` covers the whole log, not the latest discard.** `daStale` is true while the row
   carries any `cr` entry, including one another client discarded, so the tab cannot tell a
   fresh discard from an old one; the announce list (§6) carries the reason instead.
-- **Retiring a `cr` entry is not durable.** The log travels in the RPC payload and merges
-  by key, but nothing deletes a key on the server: applying an entry (`diffTab`) drops it
-  locally, and the next round that meets that server row merges it back. The
-  `FIXMEchange_rejected` tag is derived from the same log, so it returns with it.
+- **Retiring a `cr` entry needs a push.** The log travels in the RPC payload and merges
+  by key, so dropping a key locally is not enough: the next round that meets that server row
+  merges it back. Discarding marks the row dirty (`sdb.dropHistEntry`), so the reduced log
+  is pushed like any other row; a round the server rejects (R1, R4), or a peer still pushing
+  its older copy of the row, leaves the entry to return. The `FIXMEchange_rejected` tag is
+  derived from the same log, so it follows it.
 - **`cr` growth.** Neither `ver` nor `cr` is pruned, and a `cr` entry holds a full row
   snapshot. `modrwCheck`'s `rec` size log is the only signal; a cap belongs in `treeCac`.
 - **Minor:** `toBackup` grows unbounded across `pullPush`; `merge()` calls `meta()`
@@ -341,5 +345,5 @@ the row is skipped.
 - `tabext/src/ups_same_base.sql` — server RPC + T1–T5 assertions
 - `docs/difftab.md` — the diff tab, its `diff|…` tab ref, and the apply rules
 - `test/ver.test.ts` — `ver`/`cr` helpers, `deepMerge` gate, `patchMod` (no server)
-- `test/diff.test.ts` — hunk splitting, ANSI runs, per-hunk apply
+- `test/diff.test.ts` — hunk and change splitting, ANSI runs, line deltas, apply
 - `test/greet.test.ts` — live two-client edit, stale-push conflict, rename
