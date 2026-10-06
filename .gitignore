@@ -3,6 +3,10 @@ secret*.env
 secret*.yaml
 secret*.json
 
+# Windows Mark-of-the-Web alternate data streams
+# (WSL drvfs exposes them as "file:Zone.Identifier" paths that git can commit but not check out)
+*:Zone.Identifier
+
 # Logs
 logs
 *.log
