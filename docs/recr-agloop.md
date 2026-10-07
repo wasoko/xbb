@@ -80,7 +80,8 @@ safety net.
 | `gate.md` | `md` | `## Selected` → `* Level:`, `## Endpoints` |
 | `tools/{name}` | `recr` | tool override: heading + description + JSON schema fence |
 | `settings/main` | `recr` | `* temperature: 0.7` style lines |
-| `sess/{id}/meta` | `recr` | `BranchingSession` JSON (`currentHeadId`, `title`) |
+| `settings/keys` | `recr` | `## <provider>` → `* Key:` — which `API Keys` alias that provider's rotation settled on |
+| `sess/{id}/meta` | `recr` | `BranchingSession` JSON (`currentHeadId`, `title`, and the `provider`/`model` a pinned chat resolves through) |
 | `sess/{id}/node/{nodeId}` | `recr` | `TurnNode` JSON: user, assistant, tool results, `parentId` |
 | `src/*.ts`, `*.md` | `src`/`md` | file bodies; agent creates with tag `ai` |
 
@@ -192,17 +193,23 @@ cannot distinguish a CORS refusal from an unreachable host.
 
 | `Keys:` | Behaviour |
 |---|---|
-| blank | **auto track**: the provider's first listed key is used, and its alias is written back into the line, so which key is in use replicates through `greet` like any other row edit |
-| one or more aliases, at least one listed under the provider | that key is used, in the written order |
+| blank | **auto track**: the alias `settings/keys` records for that provider is used, else its first listed key; the choice is written to `settings/keys`, not into the document |
+| one or more aliases, at least one listed under the provider | that key is used, in the written order — a manual pin, and it wins over the recorded rotation |
 | aliases that match nothing | warns and falls back to the provider's first listed key |
 
+The rotation lives apart from `secret.md` because it changes whenever a key starts
+failing, while `secret.md` is the shared document every client syncs. `readKeyPrefs`
+and `setKeyPref` own that row; `setSecretKeys` remains for the explicit pin a human
+writes.
+
 A request the provider answers with a **non-OK status** raises `LlmHttpError`,
-which carries the alias that was sent and every alias the provider lists. The Chat
-turns that into a toast whose action writes the next alias into `secret.md`
-(`setSecretKeys`) and re-resolves the secrets; the loop then retries the same
-iteration with the new key, so the turn keeps one node. Declining, letting the
-toast time out, or a provider with a single key leaves the error on the normal
-path. A failed `fetch` never reaches this: no key choice changes an unreachable
+which carries the alias that was sent, the provider, and every alias the provider
+lists. The Chat turns that into a toast whose action records the next alias in
+`settings/keys` (`setKeyPref`) and re-resolves the secrets through the chat's own
+pin; the loop then retries the same iteration with the new key, so the turn keeps
+one node. Declining, letting the toast time out, or a provider with a single key
+leaves the error on the normal path. A failed `fetch` never reaches this: no key
+choice changes an unreachable
 host, so the browser-visible error stands as it is.
 
 ---
@@ -216,8 +223,9 @@ host, so the browser-visible error stands as it is.
 | Tool rows | `recrBus` (`recr-tool-call` / `recr-tool-result`) appended as they happen |
 | Stop | `AbortController`; an abort renders as `stopped`, not as an error |
 | Errors | `rcr` rethrows, so the `catch` owns the error bubble — the bus error is not also rendered |
-| Key fallback | A non-OK status offers the next listed key through a toast action (`askNextKey`); accepting writes it into `secret.md` and the same turn continues |
+| Key fallback | A non-OK status offers the next listed key through a toast action (`askNextKey`); accepting records it in `settings/keys` and the same turn continues |
 | Session key | URL `sid` param, else `default` |
+| Pinned chat | A meta carrying `provider`/`model` fixes that chat's model: `rcr` resolves it with `parseSecrets(store, sessionModelOverride(session))`, and `src/sessionSourceG4.ts` registers `recr-g4` so the picker lists those sessions under their own label |
 | Node focus | URL `node` param; unknown or absent falls back to `currentHeadId` |
 | Session picker | `listAllSessions` over every registered source, newest `updatedAt` first |
 | Tree drawer | `SessionTree` of the focused session: one row per node, indented by `parentId` depth |

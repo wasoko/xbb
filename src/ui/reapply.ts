@@ -33,3 +33,27 @@ export function reapplyBuffer(buffer: string, baseline: string, fetched: string)
   const failed = flags.filter(ok => !ok).length;
   return { txt, failed, changed: txt !== buffer };
 }
+
+/** What a persist does with the buffer it holds.
+ *  `skip` the row already carries it, `adopt` the buffer follows the fetched text,
+ *  `merged` the keystrokes were placed on it, `conflict` a hunk was not placed and the edit
+ *  is filed as `cr` instead of written. */
+export type PersistPlan =
+  | { action: 'skip'; txt: string }
+  | { action: 'adopt'; txt: string }
+  | { action: 'merged'; txt: string }
+  | { action: 'conflict'; txt: string; failed: number }
+
+/**
+ * Decide how the buffer is written against the text its row carries now.
+ * @param buffer text the editor holds, including keystrokes typed since `baseline`
+ * @param baseline text the buffer was last based on
+ * @param fetched text the row carries now
+ * @returns the action and the text to write, or to display when nothing is written
+ */
+export function planPersist(buffer: string, baseline: string, fetched: string): PersistPlan {
+  if (buffer === fetched) return { action: 'skip', txt: fetched };
+  if (buffer === baseline) return { action: 'adopt', txt: fetched };
+  const { txt, failed } = reapplyBuffer(buffer, baseline, fetched);
+  return failed > 0 ? { action: 'conflict', txt, failed } : { action: 'merged', txt };
+}

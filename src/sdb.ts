@@ -23,8 +23,12 @@ export async function clean() {
   
   return 0
 }
+/** Archive one value under `key` in `db.bins`, gzipped+cbor.
+ * @param key archive name
+ * @param bin value to store
+ * @returns the Dexie put, so a caller that must not lose the archive can await it */
 export async function binPut(key:string, bin: any) {
-  db.bins.put({ key, rec: { date: new Date().toLocaleString('zh-cn',{hour12:false}) }
+  return db.bins.put({ key, rec: { date: new Date().toLocaleString('zh-cn',{hour12:false}) }
       , bin: fc.encZip(bin) });
 }
 export class DDB extends Dexie {
@@ -65,6 +69,8 @@ export const treeCac:{[key:string]: unknown} = {
   // "server": 'https://dwimmnjiowmzvoswyxgm.supabase.co',
   // "pub_key": 'sb_publishable__LynaQz69kH--YZOG3k2ug_ovBOgZhu',
   'snap_name': 'tabext-beta',
+  // '' follows the newest CDN snapshot; a filename pins the working set to that snapshot.
+  'snap_pin': '',
   'tabSeer': 'cardtab',
   'cardSeer': 'cs1',
   'restGrouper': 'rsdt',
@@ -73,6 +79,8 @@ export const treeCac:{[key:string]: unknown} = {
 export let treeCacOpts: Record<string, string[]> = {
   'tabSeer': ['cardtab', 'card'],
   'cardSeer': ['cs1', 'cs2'],
+  // `snap_pin` options are the recent CDN snapshots, cached here by the settings menu.
+  'snap_pin': [],
   // `rsdt`/`rsid`/`rsess`/`rstag` are built in; `restGroupers/...` refs are appended from `db.das` at render.
   'restGrouper': ['rsdt', 'rsid', 'rsess', 'rstag', 'none'],
   'provider-model': ['Default'],
@@ -632,7 +640,8 @@ export function patchMod(base: Da, ancestor: DaVer|undefined, mod: Da): Da {
 const crAdded: { ref: string; stamp: string; reason: string }[] = []
 /** Take the conflicts added since the last call.
  * @returns one entry per discarded local edit, in merge order, each naming why the patch
- *  gate had no ancestor (`no-base-dt`, `server-no-dt`, `server-ahead`, `server-behind`) */
+ *  gate had no ancestor (`no-base-dt`, `server-no-dt`, `server-ahead`, `server-behind`),
+ *  or `patch-unplaced` for a buffer write the editor could not merge (`fileDiscardedCr`) */
 export function drainCr(): { ref: string; stamp: string; reason: string }[] {
   return crAdded.splice(0)
 }
@@ -672,6 +681,21 @@ export function deepMerge(rl: Da, rin: Da): Da {
   const out = { ...rin, rec: putVer(kept, rin.dt, rin), modAt: undefined
     , tid: rl.tid === -1 ? rl.tid : rin.tid } as Da
   return withChgTag(out, tagged || Boolean(key))
+}
+
+/** Keep the server copy and file the local edit under `rec.cr`, for a writer that already
+ *  knows the edit cannot be placed on it: the editor's buffer merge failed a hunk
+ *  (`ui/reapply.planPersist`). Same recipe as the server-wins branch of `deepMerge`: the
+ *  version is adopted into `rec.ver`, so applying the entry back from the diff tab pushes
+ *  over the base the row now carries, and the row is left clean and tagged.
+ *  @param row the server copy to keep
+ *  @param local the local edit to file; its `modAt` names the `cr` key
+ *  @returns the row to write */
+export function fileDiscardedCr(row: Da, local: Da): Da {
+  const key = crStamp(local.modAt)
+  if (key) crAdded.push({ ref: local.ref, stamp: key, reason: 'patch-unplaced' })
+  const rec = putVer(putCr({ ...(row.rec ?? {}) }, local.modAt, local), row.dt, row)
+  return withChgTag({ ...row, rec, modAt: undefined }, true)
 }
 /** bulk resolving clash of uniq ref+type and PK */
 export async function bulkMerge(clash: Da[]) {

@@ -3,9 +3,11 @@ import React, { useState, useEffect, useMemo, useRef, useSyncExternalStore } fro
 import * as li from 'lucide-react'
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { sess, signinGoogle, sbg, greet,greeter, fmtSyncCnt, getGreetStat, subscribeGreetStat } from '../greet';
+import { sess, signinGoogle, sbg, greet, greeter, fmtSyncCnt, getGreetStat, subscribeGreetStat
+  , applySnapPin, dirtyLabel, listSnaps, outstandingDirty } from '../greet';
 import * as idb from '../sdb';
 import * as fc from '../fc';
+import { useTreeCac } from './useTreeCac';
 import { toast } from 'sonner';
 import { NotificationDropdown } from './notice';
 import { upSnap } from '../greet';
@@ -17,10 +19,18 @@ import { REST_GROUPER_PREFIX } from './restGrouper';
 import { MAX_QUERY_TAGS, revertTagUpdates, tagRowsWithQuery, tagRowsWithTags } from './tagApply';
 import { tagRowsInteractive, tokenize } from '../srctag';
 import { restTagStore, type RestTagHint } from './restGrouper';
+import { removeAdapterRows, smokeAdapters } from './srctagSmoke';
+import { emitNav } from './navStore';
 
-export function TapBar() {
-  const BTN_SIZE = 33;
+/** Icon size the NavBar buttons share, as `TapBar` had it. */
+const NAV_BTN_SIZE = 33;
 
+/**
+ * Floating navigation bar in `CreateBar`'s slot: StarGazer returns to the sea view,
+ * Tables opens the tab list, Agent brings the agent chat forward. It floats above every
+ * pane, including the mobile editor drawer, so no pane reserves space for it.
+ */
+export function NavBar() {
   const navigate = useNavigate();
   const location = useLocation();
   
@@ -28,13 +38,17 @@ export function TapBar() {
   const isTabs = location.pathname === '/tabs';
   
   return (
-    <aside style={{ display: 'flex', flexDirection: 'column', gap: '10px', position: 'fixed', left: '20px', top: '50%', transform: 'translateY(-50%)', zIndex: 10 }}>
-      <button title='Tabs' className={isTabs ? 'selected' : ''} onClick={() => navigate(isTabs ? '/' : '/tabs')}>
-        <li.Sheet size={BTN_SIZE} />
+    <aside style={{ display: 'flex', flexDirection: 'row', gap: '10px', position: 'fixed', right: '20px', bottom: '55px', zIndex: 50 }}>
+      <button title='StarGazer' className={isSea ? 'selected' : ''} onClick={() => navigate('/')}>
+        <li.Star size={NAV_BTN_SIZE} />
       </button>
-      {/* <button title="Set" className={location.pathname === '/setup' ? 'selected' : ''} onClick={() => navigate('/setup')}>
-        ⚙️
-      </button> */}
+      <button title='Tables' className={isTabs ? 'selected' : ''}
+        onClick={() => { emitNav('tables'); if (!isTabs) navigate('/tabs'); }}>
+        <li.Sheet size={NAV_BTN_SIZE} />
+      </button>
+      <button title='Agent' onClick={() => emitNav('agent')}>
+        <li.Bot size={NAV_BTN_SIZE} />
+      </button>
     </aside>
   );
 }
@@ -92,39 +106,6 @@ export function FilterBar() {
         {/* <li.Plus size={18} /> */}
       </Drag>
     </div>
-  );
-}
-
-export function CreateBar() {
-  const handle_paste_md = async () => {
-    const code = 'paste_md';
-    try {
-      await greet(idb.db.das);
-      const text = await navigator.clipboard.readText();
-      if (!text.trim()) {
-        toast.error('clipboard empty', { description: code });
-        return;
-      }
-      const tags = remark2tagged(text, [code], 0);
-      const ref = code + fc.fmt_ymddHMS(new Date());
-      tags.forEach(t => t.ref = ref);
-      await idb.db.das.bulkPut(tags);
-      toast.success(`${code} ${tags.length} md block(s)`, { description: code });
-      await greet(idb.db.das);
-    } catch (err) {
-      console.error(code + ':', err);
-      toast.error(`err ${code}: ${err}`, { description: code });
-    }
-  };
-
-  return (
-    <div style={{ position: 'fixed', bottom: '55px', right: '20px', zIndex: 22, display: 'flex', justifyContent: 'flex-end', pointerEvents: 'none' }}>
-        <div className="user-menu-container">
-          <div className="user-avatar" onClick={handle_paste_md}>
-            <li.Clipboard size={20} />
-          </div>
-        </div>
-      </div>
   );
 }
 
@@ -398,6 +379,10 @@ export function UserBar() {
   const syncStat = useLiveQuery(() => idb.db.das.get(-1));
   /** Global sync activity: `greet()` is a singleton, so the ring is unambiguous. */
   const greetAct = useSyncExternalStore(subscribeGreetStat, getGreetStat);
+  /** Pinned snapshot, `''` while the client follows the newest one. */
+  const snapPin = useTreeCac<string>('snap_pin');
+  /** Recent snapshots behind the `snap_pin` datalist, refilled on every menu open. */
+  const [snapOpts, setSnapOpts] = useState<string[]>([]);
   const slowest = [...greetAct.steps].sort((a, b) => b.ms - a.ms).slice(0, 3)
   const slowestText = slowest.map(s => `${s.name} ${fmtMs(s.ms)}`).join(', ');
   const greetTitle = greetAct.inflight > 0
@@ -405,8 +390,9 @@ export function UserBar() {
     : greetAct.lastError ? `last sync failed: ${greetAct.lastError}`
     : greetAct.lastOkAt ? `synced ${fc.fmtAgo(greetAct.lastOkAt)}`
     : 'sync';
+  const pinText = snapPin ? `pinned: ${snapPin} (not auto-latest)` : '';
   const greetDetail = greetAct.inflight > 0 ? greetTitle
-    : [greetTitle, greetAct.lastDirtyLeft ? `${greetAct.lastDirtyLeft} local edit(s) pending` : '', slowestText]
+    : [pinText, greetTitle, greetAct.lastDirtyLeft ? `${greetAct.lastDirtyLeft} local edit(s) pending` : '', slowestText]
       .filter(Boolean).join(' · ');
   const noticeRef = useRef<HTMLDivElement | null>(null); // 1. Create the ref
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -470,6 +456,7 @@ export function UserBar() {
 
   /** Datalist options for one `treeCac` key; the grouper key adds the live script refs. */
   const treeCacOptsFor = (key: string): string[] => {
+    if (key === 'snap_pin') return snapOpts;
     const base = idb.treeCacOpts[key] ?? [];
     return key === 'restGrouper' ? [...base, ...grouperOpts] : base;
   };
@@ -492,6 +479,29 @@ export function UserBar() {
 
   /* Draft tab: no row is written until the tab dropdown saves one. */
   const handleNewDraft = () => openInEditor('untitled_' + fc.fmt_ymddHMS(new Date()));
+
+  /** `CreateBar`'s clipboard→markdown action, kept reachable from the `+` menu. */
+  const handlePasteMd = async () => {
+    setPlusOpen(false);
+    const code = 'paste_md';
+    try {
+      await greet(idb.db.das);
+      const text = await navigator.clipboard.readText();
+      if (!text.trim()) {
+        toast.error('clipboard empty', { description: code });
+        return;
+      }
+      const tags = remark2tagged(text, [code], 0);
+      const ref = code + fc.fmt_ymddHMS(new Date());
+      tags.forEach((t) => { t.ref = ref; });
+      await idb.db.das.bulkPut(tags);
+      toast.success(`${code} ${tags.length} md block(s)`, { description: code });
+      await greet(idb.db.das);
+    } catch (err) {
+      console.error(`${code}:`, err);
+      toast.error(`err ${code}: ${err}`, { description: code });
+    }
+  };
 
   useEffect(() => {
     sbg.auth.getSession().then(({ data }) => {
@@ -566,6 +576,28 @@ export function UserBar() {
     setOpen(false)
   };
 
+  /** Seed `srctag/*`, load both adapters, and run one live call each. */
+  const handleTagAdapters = async () => {
+    setSettingsOpen(false);
+    const id = toast.loading('tag adapters: seeding…');
+    try {
+      const report = await smokeAdapters();
+      toast.success(report.title, {
+        id,
+        description: report.lines.join('\n'),
+        duration: 15000,
+        action: {
+          label: 'Remove rows',
+          onClick: () => {
+            void removeAdapterRows().then((n) => toast.success(`tag rows removed (${n})`));
+          },
+        },
+      });
+    } catch (e) {
+      toast.error(`tag adapters failed: ${e instanceof Error ? e.message : String(e)}`, { id });
+    }
+  };
+
   const refreshPaired = () => setPairedDevices(CredUnlock.loadPairedDevices());
 
   const handlePair = async () => {
@@ -602,6 +634,49 @@ export function UserBar() {
     refreshPaired();
   };
 
+  /** Cache the recent snapshots and refresh the `snap_name` line while the menu is open:
+   *  `stts` writes into `#stts-snapname`, which only exists inside the open menu. */
+  useEffect(() => {
+    if (!settingsOpen || !session) return;
+    let alive = true;
+    void listSnaps().then(({ data, error }) => {
+      if (!alive) return;
+      if (error) { toast.error(`snap list: ${error.message}`); return; }
+      const names = (data ?? []).map((r) => r.name);
+      idb.treeCacOpts['snap_pin'] = names;
+      setSnapOpts(names);
+    });
+    void idb.db.tree.get('snap_name').then((kv) => {
+      if (alive) fc.stts((greeter.snap || (kv?.value as string) || 'none').replace('.cbor.pako', ''), '-snapname');
+    });
+    return () => { alive = false; };
+  }, [settingsOpen, session]);
+
+  /** Apply a pin change. One greet round pushes what this client still owes the current
+   *  partition; rows it could not settle are put to the user, because the switch archives and
+   *  empties `db.das`. The input reverts to the live pin whenever the switch does not run. */
+  const commitSnapPin = async (el: HTMLInputElement, raw: string) => {
+    const next = raw.trim();
+    const cur = (idb.treeCac['snap_pin'] as string) ?? '';
+    if (next === cur) { el.value = cur; return; }
+    await greet(idb.db.das).catch(() => {});
+    const dirty = await outstandingDirty();
+    if (dirty.length > 0) {
+      const lines = dirtyLabel(dirty);
+      const more = dirty.length > lines.length ? `\n… ${dirty.length - lines.length} more` : '';
+      const ok = confirm(`${dirty.length} local change(s) are not synced yet:\n`
+        + `${lines.join('\n')}${more}\n\n`
+        + `Back them up (db.bins) and switch to ${next || 'the newest snapshot'}?\n`
+        + `Cancel keeps ${cur || 'auto'}.`);
+      if (!ok) { el.value = cur; return; }
+    }
+    const id = toast.loading(`switching snap to ${next || 'auto'}…`);
+    const res = await applySnapPin(next);
+    if (!res.ok) { el.value = cur; toast.error(`snap switch failed: ${res.error}`, { id }); return; }
+    if (res.error) { toast.warning(`snap switched, greet: ${res.error}`, { id }); return; }
+    toast.success(`snap ${next || 'auto loaded'}`, { id });
+  };
+
   return (
     <div className="flex flex-col items-center">
       <div style={{ position: 'fixed', top: '36px', right: '20px', zIndex: 2, display: 'flex', justifyContent: 'flex-end', maxWidth: 'calc(100vw - 40px)', pointerEvents: 'none' }}>
@@ -617,6 +692,7 @@ export function UserBar() {
           {plusOpen && (
             <div className="user-dropdown">
               <button className="user-dropdown-item" onClick={handleNewDraft}>New</button>
+              <button className="user-dropdown-item" onClick={handlePasteMd}>Paste markdown</button>
               {recentDas.map((r) => (
                 <button
                   key={r.tid}
@@ -655,6 +731,8 @@ export function UserBar() {
 
               <button className="user-dropdown-item" onClick={fc.handleDisable(handleUnlock)}>Unlock PC</button>
 
+              <button className="user-dropdown-item" onClick={fc.handleDisable(handleTagAdapters)}>Tag adapters (smoke)</button>
+
               <div>Paired PCs</div>
               <div style={{paddingLeft:22}}>
                 {pairedDevices.length === 0 && <div style={{opacity:.6}}>none yet</div>}
@@ -668,11 +746,19 @@ export function UserBar() {
 
               <div>Settings</div>
               <div style={{paddingLeft:22}}> {Object.entries(idb.treeCac).map(([key, value]) => (
+              key === 'snap_name' ? (
+              <div key={key} style={{flexDirection:'row',display:'flex'}}>
+                <span>snap_name: </span><div id="stts-snapname" style={{paddingLeft:2}}/>
+              </div> ) : (
               <div key={key} style={{flexDirection:'row',display:'flex'}}>
                 <label htmlFor={`input-tree-${key}`}> {key}: </label>
                 <input id={`input-tree-${key}`}type="search" list={`opts-tree-${key}`}
                   defaultValue={value as string}
-                  onBlur={(e) => { idb.db.tree.put({key, value: idb.treeCac[key] = e.target.value}); }}
+                  disabled={key === 'snap_pin' && !session}
+                  title={key === 'snap_pin' ? 'work against this snapshot; empty follows the newest' : undefined}
+                  onBlur={(e) => {
+                    if (key === 'snap_pin') { void commitSnapPin(e.target, e.target.value); return; }
+                    idb.db.tree.put({key, value: idb.treeCac[key] = e.target.value}); }}
                   style={{flexGrow:1, paddingLeft:2}} />
                 {treeCacOptsFor(key).length > 0 && (
                   <datalist id={`opts-tree-${key}`}>
@@ -681,10 +767,10 @@ export function UserBar() {
                     ))}
                   </datalist>
                 )}
-              </div> ))} </div>
+              </div> )))} </div>
 
               <div className="user-dropdown-item"><a href="service-terms.html" target="_blank">Service Terms</a> <a href="privacy-policy.html" target="_blank">Privacy Policy</a></div>
-              <div>{greeter.snap.replace('.cbor.pako','')} {fc.BUILD_TIME}</div>
+              <div>{snapPin ? `pinned ${snapPin.replace('.cbor.pako','')}` : 'auto: newest snap'} · {fc.BUILD_TIME}</div>
               <div id="stts-lastgreet"/>
               <div style={{opacity:.8}}>{greetDetail}</div>
               {syncStat?.rec && Object.entries(syncStat.rec)
@@ -707,7 +793,8 @@ export function UserBar() {
               ) : ( <li.User size={20} /> )}
               {greetAct.inflight > 0
                 ? <SyncRing color="#3b82f6" frac={greetAct.frac} />
-                : greetAct.lastError ? <SyncRing color="#ef4444" frac={1} /> : null}
+                : greetAct.lastError ? <SyncRing color="#ef4444" frac={1} />
+                : snapPin ? <SyncRing color="#f59e0b" frac={1} /> : null}
             </div>
             {open && (
               <div className="user-dropdown">

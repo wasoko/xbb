@@ -3,7 +3,7 @@
  */
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
-import { reapplyBuffer } from '../src/ui/reapply';
+import { planPersist, reapplyBuffer } from '../src/ui/reapply';
 
 const BASE = 'one\ntwo\n'
 
@@ -37,5 +37,31 @@ describe('reapplyBuffer', () => {
     const r = reapplyBuffer('one\nMINE\n', BASE, 'other\nlines\nhere\n');
     expect(r.failed).toBeGreaterThanOrEqual(1);
     expect(r.txt).toContain('other');
+  })
+})
+
+describe('planPersist', () => {
+  it('skips a buffer the row already carries', () => {
+    expect(planPersist(BASE, 'older\n', BASE)).toEqual({ action: 'skip', txt: BASE });
+  })
+
+  it('adopts the fetched text when nothing was typed', () => {
+    expect(planPersist(BASE, BASE, 'one\nSERVER\n'))
+      .toEqual({ action: 'adopt', txt: 'one\nSERVER\n' });
+  })
+
+  it('merges keystrokes placed on the fetched text', () => {
+    const plan = planPersist('one\ntwo\nthree\n', BASE, 'one\ntwo\nSERVER\n');
+    expect(plan.action).toBe('merged');
+    expect(plan.txt).toContain('three');
+    expect(plan.txt).toContain('SERVER');
+  })
+
+  it('reports a conflict for a hunk the fetched text cannot take', () => {
+    const plan = planPersist('alpha BRAVO charlie delta echo foxtrot'
+      , 'alpha bravo charlie delta echo foxtrot'
+      , 'zulu yankee xray whiskey victor uniform');
+    expect(plan.action).toBe('conflict');
+    expect(plan.txt).toBe('zulu yankee xray whiskey victor uniform');
   })
 })

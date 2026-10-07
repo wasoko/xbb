@@ -351,8 +351,20 @@ export interface BranchingSession {
   /** Writer that produced the session, so the browser can pick the reader. Absent reads as
    *  `recr`. */
   source?: string;
+  /** Provider heading this chat is pinned to; absent follows the UI's selection. */
+  provider?: string;
+  /** `Models` alias this chat is pinned to; absent follows the UI's selection. */
+  model?: string;
   createdAt: number;
   updatedAt: number;
+}
+
+/** Provider and model a chat is pinned to, and the source that owns it. */
+export interface ChatPin {
+  provider: string;
+  model: string;
+  /** Session source id the chat belongs to; absent keeps recr's own. */
+  source?: string;
 }
 
 /** Returned by fetchLLM after a single API call */
@@ -384,17 +396,20 @@ export interface FetchResult {
  *   * API Keys:
  *     - wasgsd: sk-...
  *
- * A provider heading may contain spaces. A blank `* Keys:` line means *auto track*:
- * the provider's first listed key is selected and its alias is written back into
- * the document, so the selection replicates through `greet` like any other row
- * edit. A non-blank `* Keys:` line that matches nothing warns and falls back to the
- * first listed key, so an unfilled document still runs.
+ * A provider heading may contain spaces. A non-blank `* Keys:` line naming a listed
+ * alias is a manual pin and wins. An empty one, or one matching nothing, falls back
+ * to *auto track*: the alias this provider's rotation last settled on in
+ * {@link KEYS_REF}, else the provider's first listed key. The choice is recorded in
+ * `settings/keys` rather than edited into the document, so a rotation stays client
+ * state and the shared `secret.md` keeps whatever a human wrote there.
  *
  * @param store store whose `secret.md` key holds the document
+ * @param override `'<provider>:<model>'` a chat is pinned to; `'Default'`, absent, or
+ *   the UI's own selection when the caller pins nothing
  * @returns resolved endpoint, model, credential, and the provider's key aliases
  * @throws when the document, the named provider, the model alias, or every key is missing
  */
-export async function parseSecrets(store: IRecrStore): Promise<SecretsConfig> {
+export async function parseSecrets(store: IRecrStore, override?: string): Promise<SecretsConfig> {
   const md = await store.get(SECRET_REF);
   if (!md) throw new Error(`Secret not found: ref=${SECRET_REF}`);
 
@@ -413,13 +428,13 @@ export async function parseSecrets(store: IRecrStore): Promise<SecretsConfig> {
   }
   treeCacOpts['provider-model'] = choices;
 
-  // Resolve active provider/model: Override > Default
-  const override = treeCacCurrent['provider-model'];
+  // Resolve active provider/model: the caller's pin > the UI's selection > Default
+  const pinned = override ?? treeCacCurrent['provider-model'];
   let provName: string;
   let modelAlias: string;
 
-  if (override && override !== 'Default') {
-    const [p, m] = override.split(':');
+  if (pinned && pinned !== 'Default') {
+    const [p, m] = pinned.split(':');
     provName = p;
     modelAlias = m;
   } else {
@@ -440,14 +455,17 @@ export async function parseSecrets(store: IRecrStore): Promise<SecretsConfig> {
   const keys = bulletList(body, 'API Keys');
   const keyAliases = Object.keys(keys);
   const wanted = (defaults['keys'] ?? '').split(',').map(s => s.trim()).filter(Boolean);
+  // A non-blank `* Keys:` line is the document's own manual pin, ahead of any rotation.
   let keyName = wanted.find(k => keys[k]);
   if (!keyName && wanted.length === 0) {
-    // Auto track: take the first listed key and record that choice in the document,
-    // so which key is in use replicates to other clients through `greet`.
-    keyName = keyAliases[0];
-    if (keyName) {
-      await setSecretKeys(store, [keyName]).catch((e: unknown) =>
-        console.warn(`[recr] ${SECRET_REF}: could not record key "${keyName}":`, e));
+    // Auto track: the alias this provider's rotation settled on, else the first listed
+    // key. The choice lands in `settings/keys`, so `secret.md` keeps its own text and a
+    // key that starts failing can be rotated without editing the shared document.
+    const tracked = (await readKeyPrefs(store))[provName];
+    keyName = tracked && keys[tracked] ? tracked : keyAliases[0];
+    if (keyName && keyName !== tracked) {
+      await setKeyPref(store, provName, keyName).catch((e: unknown) =>
+        console.warn(`[recr] ${KEYS_REF}: could not record key "${keyName}":`, e));
     }
   } else if (!keyName) {
     keyName = keyAliases[0];
@@ -499,8 +517,9 @@ export function withSecretKeys(md: string, aliases: string[]): string {
 }
 
 /**
- * Records the active key in `secret.md`, so the choice is a dirty `md` row that
- * `greet` pushes rather than client-local state.
+ * Writes an explicit choice into `secret.md`'s Default `* Keys:` line. A manual pin
+ * belongs in the shared document, which is why this edits it; an automatic rotation
+ * goes to {@link KEYS_REF} instead.
  *
  * @param store store whose `secret.md` key holds the document
  * @param aliases aliases to write into the Default `* Keys:` line
@@ -510,6 +529,80 @@ export async function setSecretKeys(store: IRecrStore, aliases: string[]): Promi
   const md = await store.get(SECRET_REF);
   if (!md) throw new Error(`Secret not found: ref=${SECRET_REF}`);
   await store.put(SECRET_REF, withSecretKeys(md, aliases));
+}
+
+// ─── Key rotation state: settings/keys ─────────────────────────────────────
+
+/**
+ * Row recording which `API Keys` alias each provider's automatic rotation last
+ * used, one `## <provider>` section per provider that has rotated:
+ *
+ *   ## fb g4
+ *   * Key: v13
+ *
+ * This is deliberately not `secret.md`: a rotation is client state that changes
+ * whenever a key starts failing, while `secret.md` is the document a human edits
+ * and every client syncs.
+ */
+export const KEYS_REF = 'settings/keys';
+
+/**
+ * Reads the rotation state.
+ *
+ * @param store store whose `settings/keys` key holds the document
+ * @returns provider heading -> alias; `{}` when the row is absent or names none
+ */
+export async function readKeyPrefs(store: IRecrStore): Promise<Record<string, string>> {
+  const md = await store.get(KEYS_REF);
+  if (!md) return {};
+  const out: Record<string, string> = {};
+  for (const [provider, body] of splitSections(md)) {
+    const alias = bulletKv(body)['key'];
+    if (provider && alias) out[provider] = alias;
+  }
+  return out;
+}
+
+/** `text` with every regular-expression metacharacter escaped, for a literal heading match. */
+const escapeRx = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Rewrites one provider's `* Key:` line, leaving every other byte alone. A provider
+ * without a section gets one appended, so the file keeps the order it was written in.
+ *
+ * @param md the `settings/keys` document, empty when the row does not exist yet
+ * @param provider provider heading to write
+ * @param alias alias that provider's rotation settled on
+ * @returns the rewritten document
+ */
+export function withKeyPref(md: string, provider: string, alias: string): string {
+  const lines = md.split('\n');
+  const line = `* Key: ${alias}`;
+  const head = lines.findIndex(l => new RegExp(`^##\\s+${escapeRx(provider)}\\s*$`, 'i').test(l));
+  if (head < 0) {
+    const sep = md === '' || md.endsWith('\n') ? '' : '\n';
+    return `${md}${sep}\n## ${provider}\n${line}\n`;
+  }
+  let end = lines.length;
+  for (let i = head + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) { end = i; break; }
+  }
+  const at = lines.findIndex((l, i) => i > head && i < end && /^\*\s*key\s*:/i.test(l));
+  if (at >= 0) lines[at] = line;
+  else lines.splice(head + 1, 0, line);
+  return lines.join('\n');
+}
+
+/**
+ * Records one provider's rotated key.
+ *
+ * @param store store whose `settings/keys` key holds the document
+ * @param provider provider heading the alias belongs to
+ * @param alias alias the rotation settled on
+ */
+export async function setKeyPref(store: IRecrStore, provider: string, alias: string): Promise<void> {
+  const md = (await store.get(KEYS_REF)) ?? '';
+  await store.put(KEYS_REF, withKeyPref(md, provider, alias));
 }
 
 // ─── Tool Parser: Dexie tags (type='recr', ref='tools/...') -> ToolDef[] ────
@@ -613,17 +706,33 @@ export function createSession(id?: string): AgentSession {
   };
 }
 
-export function createBranchingSession(id?: string, title: string = 'New Session'): BranchingSession {
+export function createBranchingSession(
+  id?: string, title: string = 'New Session', pin?: ChatPin,
+): BranchingSession {
   const now = Date.now();
   return {
     id: id ?? `sess-${now}-${Math.random().toString(36).slice(2, 8)}`,
     rootNodeId: null,
     currentHeadId: null,
     title,
-    source: RECR_SOURCE_ID,
+    source: pin?.source ?? RECR_SOURCE_ID,
+    provider: pin?.provider,
+    model: pin?.model,
     createdAt: now,
     updatedAt: now,
   };
+}
+
+/**
+ * The selection a session pins, in the form {@link parseSecrets} takes as its override.
+ * A session naming only one of provider or model pins nothing, so a half-written meta
+ * row falls back to the UI's selection instead of failing the next turn.
+ *
+ * @param session session whose meta may carry a pin
+ * @returns `'<provider>:<model>'`, or undefined when the session follows the UI
+ */
+export function sessionModelOverride(session: BranchingSession): string | undefined {
+  return session.provider && session.model ? `${session.provider}:${session.model}` : undefined;
 }
 
 export async function loadSession(store: IRecrStore, id: string): Promise<AgentSession> {
@@ -1520,6 +1629,8 @@ export interface RcrOptions {
   prompt: string;
   /** Optional session ID to resume; creates new if omitted */
   sessionId?: string;
+  /** Provider and model this chat is pinned to; recorded on the session meta. */
+  pin?: ChatPin;
   /** Node this turn attaches under, for a fork; `null` starts a new root. Defaults to the
    *  session head. */
   parentNodeId?: string | null;
@@ -1575,8 +1686,20 @@ export interface RcrOptions {
 export async function rcr(opts: RcrOptions): Promise<RunLoopResult> {
   const store = opts.store ?? getStore();
 
+  // Load or create the session before resolving the model: a pinned chat names its own
+  // provider and model, and a caller may pin a chat it is about to start.
+  const isNew = !opts.sessionId;
+  const session = opts.sessionId
+    ? await loadBranchingSession(store, opts.sessionId)
+    : createBranchingSession(undefined, 'New Session', opts.pin);
+  if (opts.pin) {
+    session.provider = opts.pin.provider;
+    session.model = opts.pin.model;
+    session.source = opts.pin.source ?? session.source;
+  }
+
   // Parse configs from store if not provided
-  const config = opts.config ?? await parseSecrets(store);
+  const config = opts.config ?? await parseSecrets(store, sessionModelOverride(session));
   const settings = opts.settings ?? await parseSettings(store);
 
   // The gate decides which tools reach the model and which the executor refuses
@@ -1587,12 +1710,6 @@ export async function rcr(opts: RcrOptions): Promise<RunLoopResult> {
 
   // Override with built-in tools if none defined
   const effectiveTools = filterTools(toolDefs.length > 0 ? toolDefs : getDefaultToolDefs(), gate.level);
-
-  // Load or create session
-  const isNew = !opts.sessionId;
-  const session = opts.sessionId
-    ? await loadBranchingSession(store, opts.sessionId)
-    : createBranchingSession();
 
   // Generate request identity
   const nodeId = `node-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

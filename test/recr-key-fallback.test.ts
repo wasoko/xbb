@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, getSecret } from '../src/sdb';
 import {
   LlmHttpError, createBranchingSession, getStore, loadBranchingSession, parseSecrets, rcr,
-  setSecretKeys, type IRecrStore,
+  readKeyPrefs, saveBranchingSession, setSecretKeys, type IRecrStore,
 } from '../src/recr';
 
 /** A document whose Default section leans on the provider's listed keys. */
@@ -24,6 +24,14 @@ const DOC = `## Default
 * API Keys:
   - first: sk-first
   - second: sk-second
+
+### q
+* API: openai-completions
+* Base URL: https://q.test
+* Models:
+  - mq: other-model
+* API Keys:
+  - only: sk-q
 `;
 
 const SETTINGS = { maxIterations: 1, maxToolCalls: 4 };
@@ -139,17 +147,43 @@ describe('key fallback after a non-OK status', () => {
 });
 
 describe('auto track', () => {
-  it('records the first listed key on the first send, and reuses it after', async () => {
+  it('records the first listed key in settings/keys, and reuses it after', async () => {
     const auths = stubLlm([]);
 
     const first = await rcr({ prompt: 'hi', settings: SETTINGS });
     expect(auths).toEqual(['Bearer sk-first']);
-    expect(await getSecret()).toContain('* Keys: first');
+    expect(await readKeyPrefs(getStore())).toEqual({ p: 'first' });
+    // a rotation is client state, so the shared document keeps its own text
+    expect(await getSecret()).toBe(DOC);
 
     const session = createBranchingSession('sess-reuse');
     await rcr({ prompt: 'again', sessionId: session.id, config: await parseSecrets(getStore())
       , settings: SETTINGS });
     expect(auths[1]).toBe('Bearer sk-first');
     expect(first.finalNode.assistantResponse?.content).toBe('answered');
+  });
+});
+
+describe('pinned chat', () => {
+  it('sends the provider and model the session meta names, not the Default pair', async () => {
+    const auths = stubLlm([]);
+    const session = createBranchingSession('sess-pin', 'pinned', { provider: 'q', model: 'mq' });
+    await saveBranchingSession(getStore(), session);
+
+    await rcr({ prompt: 'hi', sessionId: session.id, settings: SETTINGS });
+
+    expect(auths).toEqual(['Bearer sk-q']);
+  });
+
+  it('records a pin the caller passes on the session it starts', async () => {
+    stubLlm([]);
+
+    const result = await rcr({
+      prompt: 'hi', settings: SETTINGS, pin: { provider: 'q', model: 'mq' },
+    });
+
+    const meta = await loadBranchingSession(getStore(), result.session.id);
+    expect(meta.provider).toBe('q');
+    expect(meta.model).toBe('mq');
   });
 });

@@ -65,6 +65,10 @@ export interface SessionSummary {
   title: string;
   /** Adapter that owns the session, for the source seam. */
   source: string;
+  /** Provider heading the meta pins this chat to, absent when it follows the UI's selection. */
+  provider?: string;
+  /** `Models` alias the meta pins this chat to, absent when it follows the UI's selection. */
+  model?: string;
   /** Newest of the meta `updatedAt` and the node timestamps. */
   updatedAt: number;
   nodeCount: number;
@@ -116,7 +120,9 @@ export const oneLine = (txt: string, max = 60): string => {
  * @param txt - Raw `sess/{id}/meta` row text.
  * @returns The fields, with absent ones left undefined, or undefined when the row is not JSON.
  */
-function readMeta(txt: string): { title?: string; source?: string; updatedAt?: number } | undefined {
+function readMeta(
+  txt: string,
+): { title?: string; source?: string; provider?: string; model?: string; updatedAt?: number } | undefined {
   let o: unknown;
   try {
     o = JSON.parse(txt);
@@ -128,6 +134,8 @@ function readMeta(txt: string): { title?: string; source?: string; updatedAt?: n
   return {
     title: typeof m.title === 'string' ? m.title : undefined,
     source: typeof m.source === 'string' ? m.source : undefined,
+    provider: typeof m.provider === 'string' ? m.provider : undefined,
+    model: typeof m.model === 'string' ? m.model : undefined,
     updatedAt: typeof m.updatedAt === 'number' ? m.updatedAt : undefined,
   };
 }
@@ -313,6 +321,8 @@ export async function listSessions(store: IRecrStore): Promise<SessionSummary[]>
   interface Acc {
     title?: string;
     source?: string;
+    provider?: string;
+    model?: string;
     metaAt?: number;
     nodeCount: number;
     nodeAt: number;
@@ -336,6 +346,8 @@ export async function listSessions(store: IRecrStore): Promise<SessionSummary[]>
       if (!meta) continue;
       entry.title = meta.title;
       entry.source = meta.source;
+      entry.provider = meta.provider;
+      entry.model = meta.model;
       entry.metaAt = meta.updatedAt;
       continue;
     }
@@ -354,6 +366,8 @@ export async function listSessions(store: IRecrStore): Promise<SessionSummary[]>
       id,
       title,
       source: e.source || RECR_SOURCE_ID,
+      provider: e.provider,
+      model: e.model,
       updatedAt: Math.max(e.nodeAt, e.metaAt ?? 0),
       nodeCount: e.nodeCount,
       preview,

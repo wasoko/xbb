@@ -199,25 +199,51 @@ function upgrade_rows(rows: any[], snapName: string) {
     if (r2 !== row) ren_cnt++
     return r2
   })
-  return { rows: up, cnt: ren_cnt, snapName:'up-'+snapName }
+  return { rows: up, ren_cnt, snapName:'up-'+snapName }
 }
-export async function dl_merge (tab: Table, curSnap='', testOld=false, onStep?: (step: string, frac: number) => void){
+
+/** The name a snapshot's rows are cached and pushed under. A filename an upgrade stage applies
+ *  to is prefixed (`up-`), and that prefixed name also names the server partition the RPC
+ *  locks on.
+ * @param raw snapshot filename from the CDN listing
+ * @returns the effective name, or `''` when there is no snapshot */
+export function effSnapName(raw: string) {
+  return raw ? upgrade_rows([], raw).snapName : ''
+}
+
+/** The newest snapshots in this user's CDN folder.
+ * @param limit how many entries to list, newest first
+ * @returns the listing, or an empty list plus an error when signed out */
+export async function listSnaps(limit = 22) {
+  if (!sess?.user) return { data: [] as { name: string }[], error: { message: 'no user' } };
+  return sbg.storage.from('bb').list(`${sess.user.id}`
+    , { limit, sortBy: { column: 'created_at', order: 'desc' } });
+}
+
+/** Load a snapshot into `tab`.
+ * @param tab table to fill
+ * @param curSnap effective name of the snapshot already loaded, `''` when none is
+ * @param testOld also merge the oldest listed snapshot, to exercise old-format snaps
+ * @param onStep checkpoint callback, `(step, frac)`
+ * @param pin snapshot filename to load instead of the newest, `''` to follow the newest
+ * @returns the effective name now loaded and the rows to put, or why nothing loaded */
+export async function dl_merge (tab: Table, curSnap='', testOld=false
+  , onStep?: (step: string, frac: number) => void, pin = ''){
     let st = performance.now()
     if (!sess?.user) 
       return {error: 'dl merge no user', sess};
     const path = `${sess.user.id}`
-    const res = await sbg.storage.from('bb').list(path, { 
-      limit: 22, sortBy: { column: 'created_at', order: 'desc' } });    
-    if (res.error) return res
-    if (!res.data || res.data.length==0 ) 
-      return {error: 'dl merge lack cdn snap: ', result:res}
+    const list = await listSnaps()
+    if (list.error) return {error: `dl merge list: ${list.error.message}`, result:list}
+    if (!list.data || list.data.length==0 ) 
+      return {error: 'dl merge lack cdn snap: ', result:list}
     onStep?.('list', 0.1)
     await tab.update(-1, { modAt: null }).catch(() => {});  // cleanup meta dirty bug
 
     const modrw = await tab.filter(row => row.modAt != null).toArray()
     let stale  = modrw.slice(0,0)
-    if (testOld && res.data.length >1){
-      const oldName = res.data[res.data.length - 1].name;
+    if (testOld && list.data.length >1){
+      const oldName = list.data[list.data.length - 1].name;
       const oldUp = upgrade_rows(await fc.dl(sbg.storage.from('bb'), path + `/` + oldName), oldName);
       const testOld = oldUp.rows;
       const toMerge = bulk2put([], [], testOld, (t:sdb.Da)=>t.tid
@@ -230,15 +256,21 @@ export async function dl_merge (tab: Table, curSnap='', testOld=false, onStep?: 
       stale = testOld
     } else stale = await tab.toArray()
 
-    let snapName = res.data[0].name
-    let upSnapName = upgrade_rows([], snapName).snapName  // empty rows to check snapname
+    // A pin names its file outright, so a newly listed snapshot cannot move the working set.
+    let snapName = pin || list.data[0].name
+    let upSnapName = effSnapName(snapName)  // empty rows to check snapname
     if (curSnap===upSnapName) { // if no new snap
       onStep?.('snap cached', 0.5)
       return{upSnapName,toPut: { newPK: [], upsPK: [], noPK: [],}}
     }
     const lastSnapPath = path + `/` + snapName; // TODO 36k rows 4s
     onStep?.('dl snap', 0.25)
-    const snapUp = upgrade_rows(await fc.dl(sbg.storage.from('bb'), lastSnapPath), snapName);
+    let snapRows: any[]
+    try { snapRows = await fc.dl(sbg.storage.from('bb'), lastSnapPath) }
+    catch (e) {
+      return {error: `dl snap ${snapName}: ${e instanceof Error ? e.message : String(e)}`}
+    }
+    const snapUp = upgrade_rows(snapRows, snapName);
     stts(`ren ${snapUp.ren_cnt} sts ->tags`,'greet')
     st = fc.nowWarn(st, `dl snap`, upSnapName)
     const toPut = bulk2put(stale, modrw, snapUp.rows, (t:sdb.Da)=>t.tid
@@ -256,12 +288,12 @@ export async function upSnap() {
   let st = performance.now()
   // const { data: { user } } = await sbg.auth.getUser() 
   // if (!user) return stts("err Not logged in")
-  let oName = `tags${fc.fmt_ym(new Date())}.${await sdb.db.das.count()}.cbor.pako`;
+  let oName = `da.${await sdb.db.das.count()}.cbor.pako`;
   const res = await sbg.storage.from('bb').list(`${sess?.user.id}`
     , { limit: 11, sortBy: { column: 'created_at', order: 'desc' } });
   if (res.error) 
     return fc.sideLog(stts('err:'+res.error.message, 'greet'),res) 
-  const matched = res.data.filter((o: { name: string; })=> o.name.startsWith('tags'));
+  const matched = res.data.filter((o: { name: string; })=> o.name.startsWith('da'));
   console.log('stale check: ',matched)
   if(matched.length?? 0 >0)
     if (oName== (matched[0].name as string))
@@ -270,7 +302,7 @@ export async function upSnap() {
   const ta = (await sdb.db.das.toArray()).map(sdb.withoutVer)
   // const es = await sdb.db.vecs.toArray();
   const fileApi = sbg.storage.from('bb')
-  const msg = await fc.ul(ta, fileApi, `${sess?.user.id}/tags`,ta.length)
+  const msg = await fc.ul(ta, fileApi, `${sess?.user.id}/da`,ta.length)
   stts((msg.startsWith('err')? '': `✔Done upload `) +msg)
 }
 export async function sanitize_md() {
@@ -566,6 +598,7 @@ function beginRun() {
 function endRun() {
   stopTicker()
   stepStart = 0
+  lastRunAt = Date.now()
   setStat({ inflight: Math.max(0, stat.inflight - 1), phase: 'idle', frac: 0 })
 }
 
@@ -580,8 +613,12 @@ export const greeter = new Greeter(
     sdb.daNoPk,
     metaStat
   )
-sdb.db.tree.get('snap_name').then(kv=> 
-  stts((greeter.snap = kv?.value as string).replace('.cbor.pako',''), '-snapname'))
+sdb.db.tree.get('snap_name').then(async kv=> {
+  const pin = (await sdb.db.tree.get('snap_pin'))?.value as string | undefined
+  const raw = pin || (kv?.value as string) || ''
+  greeter.snap = effSnapName(raw)
+  stts((pin ? 'pinned ' : '') + (greeter.snap || 'none').replace('.cbor.pako',''), '-snapname')
+})
 greeter.onError = message => setStat({ lastError: message })
 greeter.onStep = (step, frac) => markStep(step, frac)
 /** One local edit a server-wins merge discarded, still held in the row's `rec.cr`.
@@ -590,7 +627,8 @@ greeter.onStep = (step, frac) => markStep(step, frac)
 export interface Conflict {
   ref: string
   stamp: string
-  /** Why the patch gate had no ancestor, from `sdb.drainCr`. */
+  /** Why the edit was discarded, from `sdb.drainCr`: the patch gate's miss reason, or
+   *  `patch-unplaced` for a buffer write the editor could not merge. */
   reason: string
 }
 let conflicts: Conflict[] = []
@@ -620,6 +658,12 @@ function announceConflicts(fresh: Conflict[]) {
 
 let greetTill = 0;
 const MS_TIMEOUT_GREET = 4321
+/** The round now running, so a writer can wait for the server's version instead of racing it.
+ *  `greet`'s throttle answers a concurrent call with `{}`, which is not a join. */
+let rounding: Promise<unknown> | null = null
+/** When the last round finished, whether it landed or failed: a writer only restarts a round
+ *  the throttle swallowed, and never spins on a server that keeps failing. */
+let lastRunAt = 0
   /** dl latest snap if new, then greet pull any new TODO init 15s
  * @param tab dexie table
  * @returns 
@@ -627,8 +671,10 @@ const MS_TIMEOUT_GREET = 4321
 const greetOnce = async (tab: Table)=> {
     let st = performance.now()
     console.log('greet with: ', sess?.user.email)
-    const curSnap = await sdb.db.tree.get('snap_name') 
-    const res = await dl_merge(tab, curSnap?.value as string, false, markStep)
+    const [curSnap, pinKv] = await Promise.all([
+      sdb.db.tree.get('snap_name'), sdb.db.tree.get('snap_pin')])
+    const pin = String(pinKv?.value ?? sdb.treeCac['snap_pin'] ?? '')
+    const res = await dl_merge(tab, curSnap?.value as string, false, markStep, pin)
     if (res.error || !res.toPut ){
       console.error(`greet ${res.error}`, res)
       stts(`err greet: ${res.error}`,'greet')
@@ -636,12 +682,13 @@ const greetOnce = async (tab: Table)=> {
       setStat({ lastError: String(res.error) })
       return res
     }
+    // the RPC partition and the loaded snapshot must agree, cached or freshly downloaded
+    greeter.snap = res.upSnapName
     if(res.upSnapName!==curSnap?.value) {
       const putlen = Object.values(res.toPut).reduce((acc,a)=> acc +a.length,0)
       const putstr = Object.entries(res.toPut).map(([k,v])=> k+`[${v.length}] `).join()
       stts(putstr+` new snap ${res.upSnapName.replace('.cbor.pako','')} `, 'greet')
-      sdb.db.tree.put(({key:'snap_name', value: 
-        stts(greeter.snap = res.upSnapName, '-snapname')}))
+      sdb.db.tree.put({key:'snap_name', value: stts(greeter.snap, '-snapname')})
       const chunk = 0x1000; // TODO tune bulkPut 36k rows 6s
       for(const [_,toSplice] of Object.entries(res.toPut))
         while(toSplice.length >0) tab.bulkPut(toSplice.splice(0, chunk))
@@ -670,12 +717,15 @@ export const greet = async (tab: Table) => {
   if (Date.now() < greetTill) return {}
   greetTill = Date.now() + MS_TIMEOUT_GREET
   beginRun()
+  const run = greetOnce(tab)
+  rounding = run
   try {
-    return await greetOnce(tab)
+    return await run
   } catch (e) {
     setStat({ lastError: e instanceof Error ? e.message : String(e) })
     throw e
   } finally {
+    if (rounding === run) rounding = null
     endRun()
   }
 }
@@ -684,4 +734,72 @@ export const greet = async (tab: Table) => {
  *  @param tab table to sync; defaults to the app's row table */
 export function softGreet(tab: Table = sdb.db.das) {
   void greet(tab).catch(() => {})
+}
+
+/** Wait for the server's version of the rows before writing against it: join the round in
+ *  flight, or start one when the throttle would swallow it and no round has finished since
+ *  `idleSince` (the start of the current keystroke burst). A writer that skips this writes
+ *  an older-based text over the version the row names, which the server admits as an `upd`.
+ *  Resolves without error and without waiting past `maxWaitMs`, so a flush of a page that is
+ *  going away is never held on the network.
+ *  @param opts.idleSince epoch ms of the burst start; omit to only join a running round
+ *  @param opts.maxWaitMs bound on the wait
+ *  @returns when the round landed, failed, or the bound expired */
+export async function greetSettled(opts: { idleSince?: number; maxWaitMs?: number } = {}) {
+  const { idleSince, maxWaitMs = 2000 } = opts
+  const bounded = (p: Promise<unknown>) => new Promise<void>(resolve => {
+    const timer = setTimeout(resolve, maxWaitMs)
+    void p.catch(() => {}).then(() => { clearTimeout(timer); resolve() })
+  })
+  if (rounding) return bounded(rounding)
+  if (idleSince === undefined || lastRunAt >= idleSince) return
+  greetTill = 0                        // the burst's own round was throttled away
+  return bounded(greet(sdb.db.das))
+}
+
+/** Local rows whose `modAt` still marks them unsynced. The `tid -1` bookkeeping row
+ *  (`greet stat-cnt`) is excluded: every round pushes it, the user does not edit it.
+ *  @returns the dirty rows */
+export async function outstandingDirty(): Promise<sdb.Da[]> {
+  return sdb.db.das.where('modAt').above(new Date(0))
+    .filter(r => r.tid !== -1).toArray()
+}
+
+/** The outstanding rows as confirmation lines.
+ *  @param rows dirty rows from `outstandingDirty`
+ *  @param max most lines to produce
+ *  @returns one `ref (type)` line per row */
+export function dirtyLabel(rows: sdb.Da[], max = 8): string[] {
+  return rows.slice(0, max).map(r => `${r.ref} (${r.type})`)
+}
+
+/** Move the working set onto one snapshot: the CDN file `pin` names and, through
+ *  `greeter.snap`, the `upsBase` partition the RPC locks on. The rows in hand are archived
+ *  into `db.bins` and the table emptied first, so nothing dirty can leak into the pinned
+ *  partition, then the pinned file is loaded by one greet round.
+ *
+ *  The pin is checked against a fresh listing before anything is deleted.
+ *  @param pin snapshot filename to pin, or `''` to follow the newest snapshot
+ *  @returns whether the switch was applied, plus the loading round's error when it had one */
+export async function applySnapPin(pin: string): Promise<{ ok: boolean; error?: string }> {
+  const next = pin.trim()
+  if (next) {
+    const list = await listSnaps()
+    if (list.error) return { ok: false, error: `list: ${list.error.message}` }
+    if (!list.data?.some(r => r.name === next))
+      return { ok: false, error: `no such snap: ${next}` }
+  }
+  const rows = await sdb.db.das.toArray()
+  await sdb.binPut(`das-${greeter.snap || 'auto'}-${new Date().toISOString()}`, rows)
+  stts(`backed up ${rows.length} row(s) to db.bins`, 'greet')
+  await sdb.db.das.clear()
+  await sdb.db.tree.bulkPut([
+    { key: 'snap_pin', value: next },
+    { key: 'snap_name', value: '' },   // nothing loaded, so the pin is fetched
+  ])
+  sdb.treeCac['snap_pin'] = next
+  greeter.snap = effSnapName(next)
+  greetTill = 0                        // the switch must not be swallowed by the throttle
+  const res = await greet(sdb.db.das)
+  return { ok: true, error: 'error' in res && res.error ? String(res.error) : undefined }
 }

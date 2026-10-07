@@ -28,7 +28,10 @@ export interface SessionSourceAdapter {
 export const recrSource: SessionSourceAdapter = {
   id: RECR_SOURCE_ID,
   label: 'recr',
-  listSessions,
+  // A session whose meta names another source is that source's to list, so a pinned
+  // chat appears once in the merged picker instead of under both readers.
+  listSessions: async (store: IRecrStore): Promise<SessionSummary[]> =>
+    (await listSessions(store)).filter((s) => s.source === RECR_SOURCE_ID),
   loadTree: loadSessionTree,
 };
 

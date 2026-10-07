@@ -4,18 +4,20 @@
 import { useState, useEffect, useRef, useSyncExternalStore } from 'react';
 import * as li from 'lucide-react';
 import { toast } from 'sonner';
-import { db, DEL_TAG, daEdit, daRead, dropHistEntry, stampTime, type Da, type VerHist, treeCacOpts, treeCacCurrent } from '../sdb';
+import { db, DEL_TAG, daEdit, daRead, dropHistEntry, fileDiscardedCr, stampTime, type Da, type VerHist, treeCacOpts, treeCacCurrent } from '../sdb';
 import { diffStat, type DiffStat } from './diff';
-import { consumeConflict, getConflicts, greet, softGreet, subscribeConflicts } from '../greet';
+import { consumeConflict, getConflicts, greet, greetSettled, softGreet, subscribeConflicts } from '../greet';
 import * as fc from '../fc';
 import {
-  buildPromptFromNode, getStore, loadBranchingSession, parseSecrets, rcr, recrBus, SECRET_REF,
-  LlmHttpError, nextKeyAlias, setSecretKeys,
+  buildPromptFromNode, createBranchingSession, getStore, loadBranchingSession, parseSecrets, rcr, recrBus,
+  saveBranchingSession, SECRET_REF, sessionModelOverride,
+  LlmHttpError, nextKeyAlias, setKeyPref,
   type ChatMessage, type SecretsConfig,
 } from '../recr';
 import { noticeStore } from './notice';
 import { RECR_TYPE } from '../recrConst';
-import { listAllSessions, loadTreeFor } from '../sessionSource';
+import { getSessionSource, listAllSessions, loadTreeFor } from '../sessionSource';
+import { G4_MODEL, G4_PIN, G4_PROVIDER } from '../sessionSourceG4';
 import {
   oneLine, openNodeId, parseRecrTabRef, pathToNode, siblingLabel, siblingsOf,
   type SessionNode, type SessionSummary,
@@ -32,8 +34,9 @@ import { oneDark } from '@codemirror/theme-one-dark';
 import { LocalErrorBoundary } from './ErrorBoundaryOutlet';
 import { useTabSyncState } from './tabSync';
 import { tabVisual, type TabSyncState } from './tabState';
-import { reapplyBuffer } from './reapply';
+import { planPersist, reapplyBuffer } from './reapply';
 import { DiffTab } from './diffTab';
+import { subscribeNav } from './navStore';
 
 interface ArtfactProps {
   openTabs: string[];
@@ -212,6 +215,12 @@ function ProviderSelector() {
 
 export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
   const [contents, setContents] = useState<Record<string, string>>({});
+  /** Text each buffer is based on: the ancestor a reapply diffs keystrokes against, and the
+   *  version `daEdit` can shelf for the row it writes. */
+  const baselines = useRef<Record<string, string>>({});
+  /** When the current keystroke burst started, so a save can tell whether a round landed
+   *  while the user typed. Zero between bursts. */
+  const burstAt = useRef(0);
   /** Tabs with no durable row yet: the label reads "untitled" until the tab dropdown saves one. */
   const [drafts, setDrafts] = useState<Record<string, boolean>>({});
   const [dropdownTab, setDropdownTab] = useState<string | null>(null);
@@ -253,6 +262,9 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
       let changed = false;
 
       const draftNext: Record<string, boolean> = {};
+      // buffers whose text is read from a row now: only those get a fresh baseline. A buffer
+      // that already existed may hold keystrokes, so its own baseline stays.
+      const fresh: Record<string, string> = {};
       for (const tab of openTabs) {
         if (parseDiffRef(tab)) continue; // a diff tab has no row of its own
         const recrRow = parseRecrTabRef(tab);
@@ -261,6 +273,7 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
           if (!newContents[tab]) {
             const row = await daRead(recrRow, RECR_TYPE);
             newContents[tab] = row?.txt ?? '';
+            fresh[tab] = newContents[tab];
             changed = true;
           }
           continue;
@@ -268,6 +281,7 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
         if (!newContents[tab]) {
           const row = await daRead(tab);
           newContents[tab] = row?.txt ?? `// ${tab}\n// New content`;
+          fresh[tab] = newContents[tab];
           draftNext[tab] = !row;
           changed = true;
         }
@@ -276,9 +290,7 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
         setContents(newContents);
         setDrafts(prev => ({ ...prev, ...draftNext }));
       }
-
-      // text each buffer was loaded from: the ancestor a reapply diffs the local text against
-      const baselines = { ...newContents };
+      baselines.current = { ...baselines.current, ...fresh };
 
       // an early round, so a conflict meets a shelved ancestor instead of a stale copy
       await greet(db.das);
@@ -294,8 +306,10 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
         for (const [ref, txt] of Object.entries(fetched)) {
           const live = prev[ref];
           if (live === undefined) continue;
-          // keystrokes typed while the round ran are reapplied onto the fetched text
-          next[ref] = reapplyBuffer(live, baselines[ref] ?? txt, txt).txt;
+          // keystrokes typed while the round ran are reapplied onto the fetched text, which
+          // becomes the text this buffer is based on
+          next[ref] = reapplyBuffer(live, baselines.current[ref] ?? txt, txt).txt;
+          baselines.current[ref] = txt;
         }
         return next;
       });
@@ -305,6 +319,7 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
 
   const softGreetAt = useRef(0);
   const handleContentChange = (value: string) => {
+    if (burstAt.current === 0) burstAt.current = Date.now();
     // an early round while the user types: cheap, throttled, and it keeps an ancestor shelved
     if (Date.now() - softGreetAt.current > 5000) {
       softGreetAt.current = Date.now();
@@ -415,7 +430,7 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
     if (oldRef !== editVal.ref) {
       // Rename: mark old ref row with [del], insert new row with new ref
       const delTags = [...(tag.tags || []).filter(t => t !== DEL_TAG), DEL_TAG];
-      await db.das.update(tag.tid, { ...daEdit(tag, tag.txt), tags: delTags });
+      await db.das.update(tag.tid, { tags: delTags, modAt: new Date() });
 
       // Insert new row with new ref, carrying over content
       const { tid, dt, rec, ...rest } = tag;
@@ -439,52 +454,87 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
       url.searchParams.set('e', editVal.ref);
       window.history.pushState({}, '', url);
     } else {
-      // Same ref — just update metadata
-      await db.das.update(tag.tid, { ...daEdit(tag, tag.txt)
-        , type: editVal.type, tags: editVal.tags });
+      // Same ref — just update metadata. The text is not written: a write carries whatever text
+      // the writer holds, and this one never changed it.
+      await db.das.update(tag.tid, { type: editVal.type, tags: editVal.tags
+        , modAt: new Date() });
       await greet(db.das);
     }
     setDropdownTab(null);
   };
 
-  const saveToDb = async () => {
+  /** Persist the buffer against the version the row carries now.
+   *  A round lands first (join the one in flight, or start one the throttle swallowed), so the
+   *  keystrokes merge onto the fetched text and the push is an accepted `upd`. Writing the raw
+   *  buffer would push text typed against an older version over the row's current `dt`, which
+   *  the server admits as an `upd`: the version it replaces is gone with no `cr`, no warning.
+   *  A hunk that cannot be placed keeps the server text and files the edit for the diff tab.
+   *  `urgent` skips the wait for a page that is going away, where a lost keystroke cannot be
+   *  recovered but a conflict can. */
+  const saveToDb = async (urgent = false) => {
     // a diff tab has no buffer, and a recr tab is read-only
     if (!activeTab || parseDiffRef(activeTab) || parseRecrTabRef(activeTab)) return;
     const content = contents[activeTab];
     if (content === undefined) return;
 
+    if (!urgent) await greetSettled({ idleSince: burstAt.current || undefined });
+
     // the row the app resolves, not the newest dt: writing onto a different row of the same ref
     // is what splits one key into two
     const row = await daRead(activeTab);
     if (!row?.tid) return;             // a draft is created by the tab dropdown save
-    if (row.txt === content) return;   // nothing typed since the last write
 
-    // replace the text and mark the row dirty; the sync side records the versions
-    await db.das.update(row.tid, daEdit(row, content));
-    softGreet();                       // push in the background; the edit stays usable
+    const plan = planPersist(content, baselines.current[activeTab] ?? row.txt, row.txt);
+    burstAt.current = 0;
+    if (plan.action === 'skip') return;   // nothing typed since the row was last written
+    const show = (txt: string) => setContents(prev =>
+      prev[activeTab] === txt ? prev : { ...prev, [activeTab]: txt });
+
+    // nothing typed: the buffer follows the fetched text, and the row already carries it
+    if (plan.action === 'adopt') {
+      baselines.current[activeTab] = plan.txt;
+      show(plan.txt);
+      return;
+    }
+    // replace the text and mark the row dirty; daEdit shelves the version it was based on
+    if (plan.action === 'merged') {
+      await db.das.update(row.tid, daEdit(row, plan.txt));
+      baselines.current[activeTab] = plan.txt;
+      show(plan.txt);
+      softGreet();                     // push in the background; the edit stays usable
+      return;
+    }
+    // a hunk did not apply: keep the server text and file the edit for the diff tab. The
+    // helper returns the whole row, the same shape a server-wins merge writes.
+    await db.das.put(fileDiscardedCr(row, { ...row, txt: content, modAt: new Date() }));
+    baselines.current[activeTab] = row.txt;
+    show(row.txt);
+    softGreet();
   };
   const saveRef = useRef(saveToDb);
   saveRef.current = saveToDb;
 
-  /** Persist the buffer when focus leaves the editor, the pointer goes elsewhere, the page is
-   *  hidden or unloaded, or typing pauses: the row write is what makes the edit durable. */
+  /** Persist the buffer when focus leaves the editor, when a pointer goes elsewhere, when
+   *  typing pauses, and when the page is hidden or unloaded: the row write is what makes the
+   *  edit durable. The unload paths write without waiting for a round. */
   useEffect(() => {
-    const flush = () => { void saveRef.current(); };
+    const flush = () => { void saveRef.current(true); };
+    const save = () => { void saveRef.current(); };
     const onPointerDown = (e: PointerEvent) => {
-      if (!(e.target as Element | null)?.closest?.('.code-editor')) flush();
+      if (!(e.target as Element | null)?.closest?.('.code-editor')) save();
     };
     const onVisibility = () => { if (document.visibilityState === 'hidden') flush(); };
     // Page Lifecycle 'freeze' is absent from the DOM typings; EventTarget takes the name as a string
     const lifecycle: EventTarget = document;
     document.addEventListener('pointerdown', onPointerDown, true);
     document.addEventListener('visibilitychange', onVisibility);
-    window.addEventListener('blur', flush);
+    window.addEventListener('blur', save);
     window.addEventListener('pagehide', flush);
     lifecycle.addEventListener('freeze', flush);
     return () => {
       document.removeEventListener('pointerdown', onPointerDown, true);
       document.removeEventListener('visibilitychange', onVisibility);
-      window.removeEventListener('blur', flush);
+      window.removeEventListener('blur', save);
       window.removeEventListener('pagehide', flush);
       lifecycle.removeEventListener('freeze', flush);
     };
@@ -644,11 +694,13 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
           refName={diffTarget.ref}
           source={diffTarget.source}
           stamp={diffTarget.stamp}
-          onApplied={(ref, txt) => setContents(prev => ({ ...prev, [ref]: txt }))}
+          onApplied={(ref, txt) => { baselines.current[ref] = txt
+            ; setContents(prev => ({ ...prev, [ref]: txt })); }}
           onDiscarded={() => handleCloseTab(activeTab)}
         />
       ) : (
-        <div className="code-editor" onBlur={saveToDb} onFocus={() => softGreet()}>
+        <div className="code-editor" onBlur={() => { void saveToDb(); }}
+          onFocus={() => softGreet()}>
           <CodeMirror
             value={contents[activeTab] || ''}
             onChange={recrTab ? undefined : handleContentChange}
@@ -689,6 +741,12 @@ interface ChatProps {
   /** Focus one node, or null to follow the session head again. */
   onNodeChange: (nodeId: string | null) => void;
   onSwitchSession: (sessionId: string) => void;
+  /** Whether the editor pane is beside the chat, so maximize has space to take. */
+  canMaximize: boolean;
+  /** Whether the chat already fills the pane. */
+  chatMax: boolean;
+  /** Maximize the chat, or restore the editor split. */
+  onChatMax: (max: boolean) => void;
 }
 
 /** One rendered line of the transcript. */
@@ -759,7 +817,20 @@ const MENU_ITEM: React.CSSProperties = {
 const newSessionId = (): string =>
   `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession }: ChatProps) {
+/**
+ * Creates the pinned chat's meta row before its first turn, so the picker can list it
+ * under its own source and `rcr` resolves that turn through the pin.
+ *
+ * @returns the new session id
+ */
+async function newPinnedSession(): Promise<string> {
+  const session = createBranchingSession(newSessionId(), `${G4_PROVIDER} chat`, G4_PIN);
+  await saveBranchingSession(getStore(), session);
+  return session.id;
+}
+
+export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession
+  , canMaximize, chatMax, onChatMax }: ChatProps) {
   const [bubbles, setBubbles] = useState<Bubble[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState('');
@@ -771,12 +842,15 @@ export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession }: ChatP
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   /** Node the transcript shows: the URL's pick when it exists, else the session head. */
   const [focus, setFocus] = useState<string | null>(null);
+  /** `'<provider>:<model>'` this chat's meta pins it to, absent when it follows the UI. */
+  const [pin, setPin] = useState<string | undefined>(undefined);
   const [drawerOpen, setDrawerOpen] = useState(false);
   /** Turn being edited; saving it forks a sibling branch. */
   const [editing, setEditing] = useState<{ nodeId: string; text: string } | null>(null);
   /** Bumped when a turn ends, so the tree and the transcript are read again. */
   const [reloadAt, setReloadAt] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const seq = useRef(0);
   /** Bubble keys must stay unique: a tool round can land in the same millisecond. */
@@ -785,13 +859,13 @@ export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession }: ChatP
   // Model identity for the header; a missing secret.md is what stops a send
   useEffect(() => {
     let live = true;
-    parseSecrets(getStore())
+    parseSecrets(getStore(), pin)
       .then(c => { if (live) setStatus(`${c.providerName ?? 'provider'} · ${c.model}`); })
       .catch((e: unknown) => {
         if (live) setStatus(`no ${SECRET_REF}: ${e instanceof Error ? e.message : String(e)}`);
       });
     return () => { live = false; };
-  }, [sessionId]);
+  }, [sessionId, pin]);
 
   // Session list, tree, and transcript, from the store: `sess/{id}/node/*` rows, not
   // localStorage. A `node` param the session does not hold falls back to the head, so a
@@ -811,6 +885,7 @@ export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession }: ChatP
         const messages = target ? await buildPromptFromNode(target, session, store, '', []) : [];
         if (!live) return;
         setSessions(list);
+        setPin(sessionModelOverride(session));
         setTree(nodes);
         setFocus(target ?? null);
         setBubbles(toBubbles(messages, target ? pathToNode(nodes, target) : []));
@@ -833,6 +908,13 @@ export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession }: ChatP
       id: nextId('tool'), role: 'tool', content: msg.result, timestamp: Date.now(),
     }]);
   }), [sessionId]);
+
+  // NavBar's Agent button: the chat is already on screen, so bring it forward
+  useEffect(() => subscribeNav((kind) => {
+    if (kind !== 'agent') return;
+    inputRef.current?.focus();
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }), []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -859,18 +941,19 @@ export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession }: ChatP
   });
 
   /**
-   * A non-OK provider status offers the next listed key. Accepting records the
-   * choice in `secret.md`, so it syncs through `greet`, and the same turn
-   * continues with the new key instead of starting a second node.
+   * A non-OK provider status offers the next listed key. Accepting records the choice in
+   * `settings/keys`, so a rotation stays this client's state and `secret.md` keeps the
+   * text a human wrote, and the same turn continues with the new key instead of starting
+   * a second node.
    */
   const onHttpError = async (e: LlmHttpError): Promise<SecretsConfig | undefined> => {
     const next = nextKeyAlias(e.keyAliases ?? [], e.keyAlias);
     if (!next) return undefined;
     setStatus(`key "${e.keyAlias ?? '?'}" failed — next: ${next}`);
     if (!await askNextKey(e, next)) return undefined;
-    await setSecretKeys(getStore(), [next]);
+    if (e.providerName) await setKeyPref(getStore(), e.providerName, next);
     setStatus(`using key ${next}`);
-    return parseSecrets(getStore());
+    return parseSecrets(getStore(), pin);
   };
 
   /**
@@ -946,13 +1029,23 @@ export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession }: ChatP
 
   return (
     <div className="chat-container">
-      <div className="chat-header">
-        <h3>Agent {sessionId}</h3>
-        <div className="message-time">{status}</div>
+      <div className="chat-header" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <h3 style={{ flex: '1 1 auto', minWidth: 0 }}>Agent {sessionId}</h3>
+        <div className="message-time" style={{ margin: 0 }}>{status}</div>
         <SessionPicker sessions={sessions} currentId={sessionId} onPick={onSwitchSession} />
         <button onClick={() => setDrawerOpen(o => !o)} style={CHIP_BTN}
           title="session tree: the nodes of this session">
           <li.GitBranch size={12} /> {tree.length}
+        </button>
+        <button onClick={() => onChatMax(true)} disabled={!canMaximize || chatMax}
+          style={{ ...CHIP_BTN, opacity: canMaximize ? (chatMax ? 0.4 : 0.9) : 0.3 }}
+          title="maximize the chat: the editor pane gives way">
+          <li.Maximize2 size={13} />
+        </button>
+        <button onClick={() => onChatMax(false)} disabled={!canMaximize || !chatMax}
+          style={{ ...CHIP_BTN, opacity: canMaximize ? (chatMax ? 0.9 : 0.4) : 0.3 }}
+          title="split the chat with the editor pane">
+          <li.Rows2 size={13} />
         </button>
       </div>
 
@@ -1034,6 +1127,7 @@ export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession }: ChatP
 
       <div className="chat-input-area">
         <input
+          ref={inputRef}
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -1077,12 +1171,16 @@ function SessionPicker({ sessions, currentId, onPick }: {
               style={MENU_ITEM} title={s.id}>
               <span style={{ display: 'block' }}>{oneLine(s.title, 36)}</span>
               <span style={{ opacity: 0.6, fontSize: 10 }}>
-                {s.source} · {s.nodeCount} · {s.updatedAt ? fc.fmtAgo(s.updatedAt) : 'never'}
+                {getSessionSource(s.source)?.label ?? s.source} · {s.nodeCount} · {s.updatedAt ? fc.fmtAgo(s.updatedAt) : 'never'}
               </span>
             </button>
           ))}
           <button onClick={() => { setOpen(false); onPick(newSessionId()); }} style={MENU_ITEM}>
             + New session
+          </button>
+          <button onClick={() => { setOpen(false); void newPinnedSession().then(onPick); }}
+            style={MENU_ITEM} title={`${G4_PROVIDER} · ${G4_MODEL}`}>
+            + New {G4_PROVIDER} chat
           </button>
         </div>
       )}
@@ -1136,12 +1234,14 @@ interface EditorSplitPaneProps {
 }
 
 /**
- * Editor pane over the chat pane, with a draggable divider and the editor
- * dropped entirely (chat at full height) while no tab is open.
+ * Editor pane over the chat pane, with a draggable divider. The editor is dropped
+ * entirely (chat at full height) while no tab is open or while the chat is maximized.
  */
 export function EditorSplitPane({ openTabs, activeTab, sessionId, nodeId
   , onNodeChange, onSwitchSession, onTabChange }: EditorSplitPaneProps) {
   const [editorPct, setEditorPct] = useState(66);
+  /** The chat has taken the whole pane until the normal button brings the editor back. */
+  const [chatMax, setChatMax] = useState(false);
   const [dragging, setDragging] = useState(false);
   const paneRef = useRef<HTMLDivElement | null>(null);
 
@@ -1163,10 +1263,12 @@ export function EditorSplitPane({ openTabs, activeTab, sessionId, nodeId
   }, [dragging]);
 
   const hasTabs = openTabs.length > 0;
+  /** Without tabs the chat already fills the pane; maximize is only meaningful beside one. */
+  const showEditor = hasTabs && !chatMax;
 
   return (
     <div className="editor-split-pane" ref={paneRef}>
-      {hasTabs && (
+      {showEditor && (
         <>
           <div className="editor-container" style={{ flex: `0 0 ${editorPct}%` }}>
             <LocalErrorBoundary>
@@ -1187,7 +1289,8 @@ export function EditorSplitPane({ openTabs, activeTab, sessionId, nodeId
         <LocalErrorBoundary>
         <Chat sessionId={sessionId} nodeId={nodeId}
           onNodeChange={onNodeChange}
-          onSwitchSession={onSwitchSession} /></LocalErrorBoundary>
+          onSwitchSession={onSwitchSession}
+          canMaximize={hasTabs} chatMax={chatMax} onChatMax={setChatMax} /></LocalErrorBoundary>
       </div>
     </div>
   );

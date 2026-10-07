@@ -23,6 +23,7 @@ Entity: `Da { tid, txt, ref, type, tags?, dt, modAt, rec }`
 flowchart TD
     subgraph Client["Client (Dexie tagDB_0)"]
         A["greet(tab)"]
+        P["saveToDb: greetSettled → planPersist<br/>→ daEdit (shelf) | fileDiscardedCr"]
         B["dl_merge: fetch CDN snap<br/>+ bulk2put (diff vs local)"]
         C["greeter.pullPush loop<br/>- read modAt!=null rows<br/>- last_dt = max(dt) locally"]
         D["rpc ups_same_base<br/>{snap, payload, last_dt}"]
@@ -36,7 +37,7 @@ flowchart TD
         I["toMerge / newer → return in dl"]
     end
     subgraph CDN["S3 bb/{user}"]
-        J["tagsYYYYMM.N.cbor.pako snap"]
+        J["da.N.cbor.pako snap"]
     end
     A --> B --> J
     B --> C --> D --> G
@@ -44,7 +45,36 @@ flowchart TD
     G --> I --> E --> F
     E --> K
     E --> C
+    P --> A
 ```
+
+### 1.1 Which snapshot a client works against
+
+Two `db.tree` values decide it:
+
+| key | writer | meaning |
+|:--|:--|:--|
+| `snap_name` | `greetOnce` | effective name of the snapshot whose rows are in `db.das`, `up-`-prefixed when an upgrade stage applied; also the `dl_merge` cache key and the RPC partition |
+| `snap_pin` | the settings menu | user pin: a CDN filename to keep working against, or `''` to follow the newest listing entry |
+
+`greeter.snap` is always the effective name and `pullPush` sends it as the RPC `snap_name`,
+which the server partitions on (`pg_advisory_xact_lock(hashtext(snap_name))`). A pin
+therefore selects a working namespace, not just a download.
+
+A pin never moves on its own: `dl_merge` takes the pinned filename instead of
+`list[0].name`, so a newer snapshot is listed but not loaded, and `upSnap` does not move
+the pin either. Recent filenames are cached in `treeCacOpts['snap_pin']` while the
+settings menu is open; that cache only feeds the `snap_pin` datalist and is not persisted.
+
+Switching pins goes through `applySnapPin`, which the settings `snap_pin` field commits:
+one greet round first pushes what this client still owes the current partition, then the
+rows it could not settle are shown to the user (`outstandingDirty` + `dirtyLabel`) and
+the switch waits on that confirmation. `applySnapPin` refuses a filename the listing does
+not have, archives `db.das` into `db.bins` under `das-<snap>-<ISO>`, empties `db.das` so
+no dirty row can be pushed into the pinned partition, writes `snap_pin`/`snap_name`, and
+runs one greet round that loads the pinned file into the emptied table. Cancelling leaves
+the pin and both tables untouched. The avatar carries an amber ring while a pin is set and
+no round is running.
 
 ---
 
@@ -133,6 +163,50 @@ sequenceDiagram
 A region the patch cannot place keeps the server text for that region and is counted in
 `rec.patchFail`; the tab shows ⚠ instead of losing it silently. See Risk R1.
 
+**Persist — the buffer is written after the round.** The cases above describe rows. The
+editor's buffer is not a row, so its keystrokes reach the table only through `saveToDb`, and
+the moment of that write decides the outcome. A write that lands before the round does
+pushes keystrokes typed against the older base over the row's current `dt`, which the
+server admits as an `upd`: the version it replaces is gone with no `cr` and no warning. The
+same write after a round it cannot patch files a `cr` for an edit the user was about to
+persist anyway. `saveToDb` therefore waits for the round (`greetSettled`: join the round in
+flight, or start one the throttle swallowed when none has finished since the burst began),
+reads the row, and merges the keystrokes onto the text the row carries now
+(`ui/reapply.planPersist`) before writing.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as CodeMirror buffer
+    participant E as saveToDb
+    participant G as greet round
+    participant D as Dexie row
+    U->>E: pause/blur, base A + keystrokes
+    E->>G: greetSettled: join or start the round
+    G-->>D: row = server version B, clean
+    E->>D: daRead
+    E->>E: planPersist(buffer, baseline A, B)
+    alt hunks placed
+        E->>D: daEdit(B, merged) → shelves ver[B]
+        D->>G: push dt=B → upd accepted
+    else hunk unplaceable
+        E->>D: fileDiscardedCr: B stays, the edit is filed as cr
+    else nothing typed
+        E->>U: buffer follows B, no write
+    end
+```
+
+| buffer vs the row now | action | write |
+|:--|:--|:--|
+| equal | skip | none |
+| equal to its baseline: nothing typed | adopt | none; the buffer follows the fetched text |
+| keystrokes placed on the fetched text | merged | `daEdit(row, merged)` shelves `ver[row.dt]`, so the push is an `upd` |
+| a hunk could not be placed | conflict | `fileDiscardedCr`: the server text stays, the edit is filed as `cr` and announced like any discard |
+
+The unload paths (`pagehide`, `freeze`, `visibilitychange`) still write what the buffer
+holds: a page that is going away cannot wait for a round, and a conflict is recoverable
+while a lost keystroke is not.
+
 ---
 
 ## 3. `deepMerge`/`patchMod` — version-gated patch
@@ -164,20 +238,21 @@ is pruned.
 **Writers.** `pullPush` records each version the server accepts (`ver[server_now]`),
 and `deepMerge` records the adopted server version plus any discarded local edit.
 `sdb.daEdit(row, txt)` shelves the base: the first edit of a clean row stores the row
-under its own `dt`, so the ancestor exists without the writer knowing about it. The editor
-(`saveToDb`, the tab-dropdown metadata and rename writes) and the agent store
-(`IRecrStore.put`/`writeFile`) behave alike. `cr` travels: the RPC payload carries it,
+under its own `dt`, so the ancestor exists without the writer knowing about it. The editor's
+buffer write (`saveToDb`) and the agent store (`IRecrStore.put`/`writeFile`) behave alike;
+the tab-dropdown metadata and rename writes leave `txt` alone, so a text read earlier cannot
+be pushed over a version the row has since taken. `cr` travels: the RPC payload carries it,
 `deepMerge` unions both sides, and a snap merge or a PK relocation carries the log onto
 the row that replaces it (`withCr`). `upSnap` drops `rec.ver` from the snapshot
 (`withoutVer`) — the CDN carries row state, not history.
 
-**Early round.** `saveToDb` no longer waits for the network: it reads the winning row
-(`daRead`), writes `daEdit`, and calls `softGreet()` to push in the background. The
-editor also starts a round on focus, on the first keystroke of a burst, and when a tab
-opens, so the local copy is usually at the server's `dt` before the edit lands.
-Keystrokes typed while a round runs are reapplied onto the fetched text by
-`ui/reapply.ts` (the same diff-match-patch recipe as `patchMod`, over the live buffer
-with the loaded text as ancestor).
+**Early round.** The editor starts a round on focus, on the first keystroke of a burst, and
+when a tab opens, so the local copy is usually at the server's `dt` before an edit lands.
+Keystrokes typed while a round runs are reapplied onto the fetched text by `ui/reapply.ts`
+(the same diff-match-patch recipe as `patchMod`, over the live buffer with the text it was
+based on as ancestor), at tab open and again at every write (§2 *Persist*). The write itself
+goes through `daEdit`, which shelves the base it was made from, and `softGreet()` pushes it
+in the background.
 
 ---
 
@@ -287,10 +362,12 @@ tab per row. The tab menu lists the row's `ver` and `cr` stamps, each with its l
 and a `del` button that trashes the entry; picking a stamp opens the same diff tab.
 `docs/difftab.md` owns the diff tab's own rules.
 
-**Flush.** The buffer is written through `daEdit` when focus leaves the editor, when a
-pointer goes down outside `.code-editor` (capture), when the page is hidden, on window
-`blur`/`pagehide`/`freeze`, and after ~2 s of typing pause. A write that would not change
-the row is skipped.
+**Flush.** The buffer is written when focus leaves the editor, when a pointer goes down
+outside `.code-editor` (capture), when the page is hidden, on window
+`blur`/`pagehide`/`freeze`, and after ~2 s of typing pause. Each of those writes waits for
+the round and merges the buffer with the fetched text (§2 *Persist*), except `pagehide`,
+`freeze`, and `visibilitychange`, which write what the buffer holds. A write that would not
+change the row is skipped.
 
 ---
 
@@ -308,7 +385,9 @@ the row is skipped.
   base with nothing held for it. Each miss is logged once per edit (`sdb.drainCr` carries
   the reason). The server copy wins and the local edit moves to `cr`, where the diff tab
   offers it back. Overlapping edits inside a patched row keep the server text for the
-  hunks that do not apply (`rec.patchFail`).
+  hunks that do not apply (`rec.patchFail`). The log has two producers: `deepMerge` when
+  this gate misses, and `fileDiscardedCr`, the editor's write when its buffer merge could
+  not place a hunk on the text the row carries (`patch-unplaced`, §2 *Persist*).
 - **R2 – `ins` gate is snap-global, not per-uniq.** A client behind the snap max
   is blocked from all new inserts until catchup; CDN-snap-seeded clients whose
   server has newer live rows loop to cap with dirty rows left (matches sync.md
@@ -345,5 +424,6 @@ the row is skipped.
 - `tabext/src/ups_same_base.sql` — server RPC + T1–T5 assertions
 - `docs/difftab.md` — the diff tab, its `diff|…` tab ref, and the apply rules
 - `test/ver.test.ts` — `ver`/`cr` helpers, `deepMerge` gate, `patchMod` (no server)
+- `test/persist-merge.test.ts` — the buffer write: the shelf it leaves, and the filed `cr` (no server)
 - `test/diff.test.ts` — hunk and change splitting, ANSI runs, line deltas, apply
 - `test/greet.test.ts` — live two-client edit, stale-push conflict, rename

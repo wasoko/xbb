@@ -12,6 +12,7 @@ import { Cs1Renderer } from './cs1';
 import { CardTab, type CardTabProps } from './cardTab';
 import { setTip, TipHost, TIP_ATTR } from './Tip';
 import { useTreeCac } from './useTreeCac';
+import { subscribeNav } from './navStore';
 
 /* ─────────────────────────────────────────────────────────────
  * Small shared utilities
@@ -197,6 +198,11 @@ export function VbCard() {
 
   const isMobile = useIsMobile();
 
+  /* The NavBar floats outside this route: `tables` closes the drawer, `agent` opens it. */
+  useEffect(() => subscribeNav((kind) => {
+    if (isMobile) setIsDrawerOpen(kind === 'agent');
+  }), [isMobile]);
+
   const f = searchParams.get('f') || '';
   const filters = useMemo(() => (f ? f.split(',') : []), [f]);
   const activeEditor = searchParams.get('e') || '';
@@ -331,9 +337,6 @@ export function VbCard() {
             pointerEvents: isDrawerOpen ? 'auto' : 'none',
           }}
         >
-          <div className="editor-drawer-bar" style={{ padding: 6 }}>
-            <button onClick={() => setIsDrawerOpen(false)}>← Back</button>
-          </div>
           {isDrawerOpen && editorPane /* lazily mounted (issue 2 / spec §5) */}
         </div>
       </div>

@@ -3,12 +3,13 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import * as li from 'lucide-react'
 import { createHashRouter, RouterProvider, Outlet, useNavigate, useSearchParams, useLocation } from 'react-router-dom';
-import {  TapBar, UserBar, CreateBar} from './tap';
+import { NavBar, UserBar } from './tap';
 import {VbCard} from './tabs';
 import { ErrorBoundaryOutlet, LocalErrorBoundary } from './ErrorBoundaryOutlet';
 import { FilterBar } from './FilterBar';
 import { Toaster } from 'sonner';
 import { installSrctagGlobal } from '../srctag';
+import { registerG4Source } from '../sessionSourceG4';
 
 const router = createHashRouter([
   {
@@ -18,11 +19,10 @@ const router = createHashRouter([
         <div className="content">
         <Outlet />
         </div> <LocalErrorBoundary>
-        <CreateBar /> <UserBar />  </LocalErrorBoundary> <LocalErrorBoundary>
+        <NavBar /> <UserBar />  </LocalErrorBoundary> <LocalErrorBoundary>
         <FilterBar 
           tidLoc={null}
-        /> </LocalErrorBoundary> <LocalErrorBoundary>
-        <TapBar />  </LocalErrorBoundary>        
+        /> </LocalErrorBoundary>        
       </div>,
     children: [
       { index: true, element: null, },
@@ -60,6 +60,9 @@ const router = createHashRouter([
 // A `type='src'` row cannot import this bundle: `runsrc` evaluates it from a `data:` URL,
 // which has no base for a relative specifier. The global is how a `run_src` row reaches it.
 installSrctagGlobal();
+
+// A source that is never registered is invisible to the session picker.
+registerG4Source();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

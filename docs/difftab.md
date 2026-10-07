@@ -10,7 +10,7 @@ how that text is offered back.
 | source | key | written by |
 |:--|:--|:--|
 | `ver` | server `dt` (ISO) | `pullPush` on accept, `deepMerge` on adoption or union, `daEdit` on the base an edit is made from |
-| `cr` | `devAgent` + local `modAt` (ISO) | `deepMerge` when the server copy wins |
+| `cr` | `devAgent` + local `modAt` (ISO) | `deepMerge` when the server copy wins, `fileDiscardedCr` when the editor's buffer merge cannot place a hunk (`docs/greet.md` §2 *Persist*) |
 
 Both hold `row` minus `rec`, so a version cannot nest history (`sdb.putVer` /
 `putCr`). The `cr` key names the client that discarded the edit, so the log merges by key

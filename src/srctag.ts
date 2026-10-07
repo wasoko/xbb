@@ -1238,19 +1238,28 @@ export function createCloudflareEmbed(cfg: Omit<CloudflareEmbedConfig, 'baseUrl'
 }
 
 /**
- * A zero-shot classifier reached over plain HTTP (classifier.dev / Jev shape).
+ * A zero-shot classifier over classifier.dev's `POST {base}/v1/classify`.
  *
- * The response may be `{ label, score }`, `{ labels: [{ label, score }] }`, or
- * an array of those entries; all three normalize to scored tags.
+ * The body is `{ inputs, labels, instructions }`. The response may be
+ * `{ label, score }`, `{ labels: [{ label, score }] }`, `{ results: [...] }`, or
+ * an array of those entries; all normalize to scored tags.
  *
- * @param cfg endpoint and optional credential
+ * @param cfg endpoint, optional credential, and the instruction text
  * @returns a {@link ClassifyFn}
  */
-export function createClassifierDevClassify(cfg: Partial<TagApiConfig> & { baseUrl?: string } = {}): ClassifyFn {
-  const baseUrl = (cfg.baseUrl ?? 'https://classifier.dev').replace(/\/+$/, '');
+export function createClassifierDevClassify(
+  cfg: Partial<TagApiConfig> & { baseUrl?: string; instructions?: string } = {},
+): ClassifyFn {
+  const base = (cfg.baseUrl ?? 'https://classifier.dev').replace(/\/+$/, '');
+  const url = /\/v1\/classify$/.test(base) ? base : `${base}/v1/classify`;
   return async (text: string, labels: string[]) => {
-    const json = await fetchJson(`${baseUrl}/classify`, { text, labels }, cfg);
-    return normalizeClassify(json?.labels ?? json?.results ?? json);
+    const json = await fetchJson(url, {
+      inputs: [text],
+      labels,
+      instructions: cfg.instructions
+        ?? 'Pick the single best-fitting label and give a 0-1 confidence.',
+    }, cfg);
+    return normalizeClassify(json?.labels ?? json?.results ?? json?.outputs ?? json);
   };
 }
 
@@ -1325,6 +1334,10 @@ export const SRCTAG_EMBED_REF = 'srctag/embed.js';
 export const SRCTAG_CLASSIFY_REF = 'srctag/classify.js';
 /** Ref convention of the md row listing extra keywords, in the {@link parseKeywordDoc} dialect. */
 export const SRCTAG_KEYWORDS_REF = 'srctag/keywords.md';
+/** Ref convention of the src row that compares neighbourhood rules over one row set. */
+export const SRCTAG_SUGGEST_REF = 'srctag/suggest.js';
+/** Ref convention of the same comparison, its API channels defaulted to the `ds` provider. */
+export const SRCTAG_SUGGEST_DS_REF = 'srctag/suggest-ds.js';
 
 /** Which adapter a src row provides. */
 export type TagAdapterKind = 'embed' | 'classify';

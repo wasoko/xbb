@@ -5,7 +5,8 @@ import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, getSecret } from '../src/sdb';
 import {
-  getStore, nextKeyAlias, parseSecrets, setSecretKeys, withSecretKeys,
+  createBranchingSession, KEYS_REF, getStore, nextKeyAlias, parseSecrets, readKeyPrefs,
+  sessionModelOverride, setKeyPref, setSecretKeys, withKeyPref, withSecretKeys,
 } from '../src/recr';
 
 /** The document shape the user writes into the `secret.md` row. */
@@ -51,7 +52,7 @@ describe('parseSecrets', () => {
     expect(cfg.modelAlias).toBe('qw35');
   });
 
-  it('auto tracks a blank Keys line: records the first key in the document', async () => {
+  it('auto tracks a blank Keys line: records the first key in settings/keys', async () => {
     await putSecret(DOC);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     const cfg = await parseSecrets(getStore());
@@ -59,9 +60,59 @@ describe('parseSecrets', () => {
     expect(cfg.keyAlias).toBe('first');
     expect(cfg.keyAliases).toEqual(['first', 'second']);
     expect(warn).not.toHaveBeenCalled();
-    // Written back, so `greet` pushes the selection like any other row edit.
-    expect(await getStore().get('secret.md')).toContain('* Keys: first');
+    // The rotation lands beside the session rows, so secret.md keeps the text a human wrote.
+    expect(await readKeyPrefs(getStore())).toEqual({ 'fb g4': 'first' });
+    expect(await getStore().get('secret.md')).toBe(DOC);
     warn.mockRestore();
+  });
+
+  it('uses the alias the rotation settled on, ahead of the first listed key', async () => {
+    await putSecret(DOC);
+    await setKeyPref(getStore(), 'fb g4', 'second');
+
+    const cfg = await parseSecrets(getStore());
+
+    expect(cfg.apiKey).toBe('sk-second');
+    expect(cfg.keyAlias).toBe('second');
+    expect(await getStore().get('secret.md')).toBe(DOC);
+  });
+
+  it('ignores a tracked alias the provider no longer lists', async () => {
+    await putSecret(DOC);
+    await setKeyPref(getStore(), 'fb g4', 'retired');
+
+    const cfg = await parseSecrets(getStore());
+
+    expect(cfg.keyAlias).toBe('first');
+    expect(await readKeyPrefs(getStore())).toEqual({ 'fb g4': 'first' });
+  });
+
+  it('lets a manual Keys line win over the tracked rotation', async () => {
+    await putSecret(DOC.replace('* Keys:', '* Keys: second'));
+    await setKeyPref(getStore(), 'fb g4', 'first');
+
+    const cfg = await parseSecrets(getStore());
+
+    expect(cfg.keyAlias).toBe('second');
+    expect(await readKeyPrefs(getStore())).toEqual({ 'fb g4': 'first' });
+  });
+
+  it('resolves the provider and model a chat is pinned to', async () => {
+    await putSecret(DOC);
+
+    const cfg = await parseSecrets(getStore(), 'ds:dsv4pro');
+
+    expect(cfg.providerName).toBe('ds');
+    expect(cfg.model).toBe('deepseek-v4-pro');
+  });
+
+  it('pins a chat through its meta and reads the pin back as an override', () => {
+    const session = createBranchingSession('s1', 'chat', { provider: 'fb g4', model: 'qw35' });
+    expect(session.provider).toBe('fb g4');
+    expect(session.model).toBe('qw35');
+    expect(sessionModelOverride(session)).toBe('fb g4:qw35');
+    expect(sessionModelOverride(createBranchingSession('s2'))).toBeUndefined();
+    expect(sessionModelOverride({ ...session, model: undefined })).toBeUndefined();
   });
 
   it('uses the named key when it exists', async () => {
@@ -130,5 +181,36 @@ describe('withSecretKeys', () => {
     await putSecret(DOC);
     await setSecretKeys(getStore(), ['second']);
     expect(await getSecret()).toBe(withSecretKeys(DOC, ['second']));
+  });
+});
+
+describe('key rotation state', () => {
+  beforeEach(async () => {
+    await db.das.clear();
+  });
+
+  it('is empty until a provider rotates', async () => {
+    expect(await readKeyPrefs(getStore())).toEqual({});
+  });
+
+  it('appends a provider section and keeps every other byte', async () => {
+    await setKeyPref(getStore(), 'fb g4', 'first');
+    await setKeyPref(getStore(), 'ds', 'wasgsd');
+
+    expect(await getStore().get(KEYS_REF)).toBe('\n## fb g4\n* Key: first\n\n## ds\n* Key: wasgsd\n');
+    expect(await readKeyPrefs(getStore())).toEqual({ 'fb g4': 'first', ds: 'wasgsd' });
+  });
+
+  it('rewrites only the one provider line', () => {
+    const md = '\n## fb g4\n* Key: first\n\n## ds\n* Key: wasgsd\n';
+    const out = withKeyPref(md, 'fb g4', 'second');
+    expect(out).toContain('## fb g4\n* Key: second');
+    expect(out.slice(out.indexOf('## ds'))).toBe('## ds\n* Key: wasgsd\n');
+  });
+
+  it('matches a provider heading whose name holds regex characters', () => {
+    const out = withKeyPref('\n## a.b (test)\n* Key: one\n', 'a.b (test)', 'two');
+    expect(out).toContain('* Key: two');
+    expect(out.match(/\* Key:/g)).toHaveLength(1);
   });
 });
