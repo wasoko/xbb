@@ -107,7 +107,7 @@ function Cs2Renderer({ da, onSelectTag, onJump, tip = false }: {
   da: Da;
   onSelectTag: (ref: string) => void;
   onJump?: (target: RecrTarget) => void;
-  /** Whether a markdown row opens the hover preview instead of the native tooltip. */
+  /** Whether the row opens the hover preview instead of the native tooltip. */
   tip?: boolean;
 }) {
   const [isHovered, setIsHovered] = useState(false);
@@ -131,7 +131,8 @@ function Cs2Renderer({ da, onSelectTag, onJump, tip = false }: {
         className="da-row"
         onClick={() => onJump?.(recrTargetOf(da.ref))}
         style={rowStyle}
-        title={da.ref}
+        title={tip ? undefined : da.ref}
+        {...(tip ? { [TIP_ATTR]: '', ref: (el: HTMLButtonElement | null) => setTip(el, da) } : {})}
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
       >
@@ -147,7 +148,8 @@ function Cs2Renderer({ da, onSelectTag, onJump, tip = false }: {
         target="_blank" 
         rel="noreferrer" 
         style={rowStyle}
-        title={tooltip}
+        title={tip ? undefined : tooltip}
+        {...(tip ? { [TIP_ATTR]: '', ref: (el: HTMLAnchorElement | null) => setTip(el, da) } : {})}
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
       >

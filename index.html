@@ -142,6 +142,31 @@
       .tip > * > :last-child { margin-bottom: 0; }
       .tip .cm-editor { background: transparent; }
       .tip .cm-gutters { display: none; }
+      /* Tailwind's preflight gives headings and lists the body size and no markers,
+         so the preview restores the block rhythm a markdown row is read with. */
+      .tip-md { word-break: break-word; }
+      .tip-md > :first-child { margin-top: 0; }
+      .tip-md > :last-child { margin-bottom: 0; }
+      .tip-md h1, .tip-md h2, .tip-md h3, .tip-md h4, .tip-md h5, .tip-md h6 { font-weight: 700; line-height: 1.3; margin: 10px 0 5px; }
+      .tip-md h1 { font-size: 1.45em; }
+      .tip-md h2 { font-size: 1.25em; }
+      .tip-md h3 { font-size: 1.12em; }
+      .tip-md h4, .tip-md h5, .tip-md h6 { font-size: 1em; opacity: 0.85; }
+      .tip-md p { margin: 6px 0; }
+      .tip-md ul, .tip-md ol { margin: 6px 0; padding-left: 1.6em; }
+      .tip-md ul { list-style: disc; }
+      .tip-md ol { list-style: decimal; }
+      .tip-md ul ul { list-style: circle; }
+      .tip-md ul ul ul { list-style: square; }
+      .tip-md li { margin: 2px 0; }
+      .tip-md li > p { margin: 0; }
+      .tip-md code { background: rgba(255, 255, 255, 0.14); border-radius: 3px; padding: 0 3px; font-size: 0.9em; }
+      .tip-md pre { background: rgba(255, 255, 255, 0.08); border-radius: 6px; margin: 6px 0; padding: 6px 8px; overflow-x: auto; }
+      .tip-md pre code { background: none; padding: 0; }
+      .tip-md blockquote { border-left: 3px solid rgba(255, 255, 255, 0.25); margin: 6px 0; padding-left: 8px; opacity: 0.85; }
+      .tip-md a { color: #7ab8ff; text-decoration: underline; }
+      .tip-md hr { border: none; border-top: 1px solid rgba(255, 255, 255, 0.2); margin: 10px 0; }
+      .tip-md img { max-width: 100%; }
       /* Math renders after the preview text: the TeX shows first, then MathML. */
       .md-math[data-display="0"] { opacity: 0.75; font-style: italic; }
       .md-math[data-display="1"] { display: block; margin: 6px 0; opacity: 0.75; }

@@ -100,7 +100,14 @@ function MatchedDas({
           );
         }
         return (
-          <Link key={d.ref} className="cs1-match" to={d.ref} onClick={() => onSelectTag(d.ref)}>
+          <Link
+            key={d.ref}
+            className="cs1-match"
+            to={d.ref}
+            onClick={() => onSelectTag(d.ref)}
+            {...{ [TIP_ATTR]: '' }}
+            ref={(el) => setTip(el, d)}
+          >
             {label}
           </Link>
         );

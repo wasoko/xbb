@@ -7,7 +7,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { getColorChar11 } from '../src/fc'
-import { TIP_ATTR, tipHead } from '../src/ui/Tip'
+import { TIP_ATTR, tipAnchor, tipFittedLeft, tipHead } from '../src/ui/Tip'
 import type { Da } from '../src/sdb'
 
 /** Row shaped like a rest-list markdown row. */
@@ -48,5 +48,37 @@ describe('tipHead', () => {
 describe('tip marker', () => {
   it('names the attribute rows opt in with', () => {
     expect(TIP_ATTR).toBe('data-tip')
+  })
+})
+
+describe('tipAnchor', () => {
+  it('puts the panel left edge on the list container left edge', () => {
+    expect(tipAnchor({ bottom: 100 }, 300, 1000).left).toBe(300)
+  })
+
+  it('keeps the panel exactly on a container that starts at the viewport edge', () => {
+    expect(tipAnchor({ bottom: 100 }, 0, 1000).left).toBe(0)
+  })
+
+  it('keeps a gap when the container reaches the right edge', () => {
+    expect(tipAnchor({ bottom: 100 }, 999, 1000).left).toBe(992)
+  })
+
+  it('hangs flush under the row', () => {
+    expect(tipAnchor({ bottom: 100 }, 300, 1000).top).toBe(99)
+  })
+})
+
+describe('tipFittedLeft', () => {
+  it('leaves an anchor alone when the panel fits', () => {
+    expect(tipFittedLeft(300, 700, 1000)).toBe(300)
+  })
+
+  it('slides the panel left when it overflows the right edge', () => {
+    expect(tipFittedLeft(600, 1100, 1000)).toBe(492)
+  })
+
+  it('stops at the viewport edge', () => {
+    expect(tipFittedLeft(0, 1400, 1000)).toBe(0)
   })
 })

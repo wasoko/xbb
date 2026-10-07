@@ -255,8 +255,8 @@ function RestGroupHead({ label, level = 1 }: { label: string; level?: 1 | 2 }) {
  * @param props.da - Row to render.
  * @param props.onSelectTag - Opens the row's ref in the editor pane.
  * @param props.selectedRef - Ref currently open, rendered as selected.
- * @param props.tip - Whether a markdown row opens the hover preview; the pin-row
- *   caller leaves it off, the rest-list caller sets it.
+ * @param props.tip - Whether the row opens the hover preview instead of the native
+ *   `title`; the pin-row caller leaves it off, the rest-list caller sets it.
  * @param props.capline - Tag color of the capline drawn over the row, tying it to
  *   the tag chips rendered in front of it.
  * @returns The preview row element.
@@ -304,7 +304,9 @@ function Cs2Renderer({
     /* A recr row opens the chat at its session or node, or opens a config row as a tab. */
     return (
       <button className="da-row" onClick={() => onJump(recrTargetOf(da.ref))}
-        title={da.ref} style={rowStyle} {...hover}>
+        title={tip ? undefined : da.ref}
+        {...(tip ? { [TIP_ATTR]: '', ref: (el: HTMLButtonElement | null) => setTip(el, da) } : {})}
+        style={rowStyle} {...hover}>
         {preview}
       </button>
     );
@@ -312,7 +314,9 @@ function Cs2Renderer({
   if (isUrl) {
     return (
       <a className="da-row" href={da.ref} target="_blank" rel="noreferrer"
-        title={title} style={rowStyle} {...hover}>
+        title={tip ? undefined : title}
+        {...(tip ? { [TIP_ATTR]: '', ref: (el: HTMLAnchorElement | null) => setTip(el, da) } : {})}
+        style={rowStyle} {...hover}>
         {preview}
       </a>
     );

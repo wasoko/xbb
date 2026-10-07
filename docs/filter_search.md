@@ -33,7 +33,7 @@ flowchart TD
 | `cardSeer` | `'cs2'` | pin rows render the cropped preview row (`Cs2Renderer`) |
 | `restGrouper` | `'rsdt'` (default) | rest rows split into one block per exact `dt`, newest first (`src/ui/restGrouper.ts`) |
 | `restGrouper` | `'rsid'` | `rsdt` plus one visit-time subgroup per exact `rec.visitTime` inside each date block; rows without a visit time stay under the date heading |
-| `restGrouper` | `'rstag'` | the `rsdt` blocks unchanged, plus each row's `srctag` suggestions as dotted-outline chips; hovering a chip names the channels that produced it |
+| `restGrouper` | `'rstag'` | the `rsdt` blocks unchanged, plus each row's `srctag` suggestions as dotted-outline chips; hovering a chip names the channels that produced it ([sTag.md](sTag.md#read-only-chips-restgrouper-rstag)) |
 | `restGrouper` | `'none'` or empty | rest rows render flat, without headings |
 | `restGrouper` | any other ref | the `type='src'` row of that ref returns the blocks; a block carries `items`, `subgroups`, or both. A missing row, a throwing body, or a result that is not an array of blocks falls back to flat |
 
@@ -74,75 +74,45 @@ Same call and same arguments at the same `limit`: CardTab never returns rows Bad
 
 Only crumbs are cached: `availableDas(tags)` keyed by `{f, s, t, l}` (`src/sdb.ts:210-215`); `iq` re-runs per prefix on every read (`:227`). Crumbs therefore inherit both the limit and the post-limit filters.
 
-## Tagging seams (`src/srctag.ts`)
+## Tagging (`src/srctag.ts`, `src/srctagRows.ts`)
 
-`src/srctag.ts` scores and writes `tags[]`. It imports only `src/runsrc.ts` and takes rows structurally as `{ tid, txt, ref, type, tags, dt, modAt, rec }`, which is what keeps it free of Dexie, React and the DOM; `src/ui/tagApply.ts`, `src/ui/tap.tsx` and the `rstag` grouper are its callers.
+How a row's `tags[]` are scored and written is documented in [sTag.md](sTag.md), split by
+methodology: the static channels in `src/srctag.ts` (TF-IDF, the FlashText trie,
+`hashEmbed`, the priority and classifier shares) and the dynamic `type='src'` rows
+`run_src` evaluates (`srctag/embed.js`, `srctag/classify.js`, `srctag/suggest.js`,
+`srctag/suggest-ds.js`).
 
-### Channels
-
-| Channel | Source | Default weight |
-|---|---|---|
-| TF-IDF | `txt` tokens plus `urlTokens(ref)` and any Markdown link in `txt`, against the neighbour window | 0.35 |
-| Embedding cosine | an injected `EmbedFn` against the neighbour centroid; `hashEmbed` (64-bin character histogram) when none is supplied | 0.35 |
-| Priority tags | `#tag` tokens in pin md-card headings (`pinPriorityTags`, the same rules `Cs1Renderer` renders) | 0.20 |
-| Classifier labels | an injected `ClassifyFn` | 0.10 |
-
-`KeywordTagger` is the FlashText seam: a trie of the priority tags plus `srctag/keywords.md` surface forms, scanned once per row, longest match wins, and a hit lifts the priority channel by `keywordBoost` (1.5). `tokenize` cuts Latin runs on non-alphanumerics and CJK runs into sliding bigrams. Every weight lives in `DEFAULT_TAG_SCORE` and is overridable per call; none is persisted.
-
-### Window and clusters
-
-`TagWindowConfig.dim` chooses the ordering — `tid` (insert order), `dt`/`modAt`, or `rec.visitTime`, read through the typo `rec.visitTIme` and the keys of `rec.access2discard` the way `sdb.maxRecKey` does — and `defaultWindow(dim)` seeds `burstGap` and `denseSpan` in that dimension's own unit (rows for `tid`, milliseconds otherwise). `neighbourhood` shrinks the radius when `denseCount` rows sit within `denseSpan`, grows it when a row has at most one local neighbour, and clamps to `[minWindow, maxWindow]`; `clusterRows` cuts where consecutive stamps differ by more than `burstGap`.
-
-### Dynamic callers
-
-`srctag/embed.js` and `srctag/classify.js` are `type='src'` rows evaluated by `runsrc.runBody`, so the caller is data rather than code: a function body `return`s the adapter, a module exports `default (ctx) => adapter`, and `ctx` is how the row reaches `db` for its key. `srctag/suggest.js` is the third row and returns a report instead of an adapter: it scores one row set under each neighbourhood rule — `tid`, `dt`, `visitTime`, plus the `suffix_*` tag `fc.txtRx` writes on a title tail, where the rows sharing a tag become one another's neighbourhood — and reports each rule's suggestion count, distinct tags, mean and max score, priority-tag hits, and its Jaccard overlap with `tid`, so the caller can see which rule proposes more. Its `ctx.args.provider`/`model` reach the embed and classify rows, which read the same args; `srctag/suggest-ds.js` is that same body with those defaults set to the `ds` provider, so a caller naming no provider still resolves through `ds` instead of the adapters' own `cfw` / `cjev`. `src/srctagRows.ts` holds all three bodies as text plus `srctag/keywords.md`, and `seedTagRows` / `clearTagRows` write and tombstone them (a ref that already has a live row is kept, not overwritten). Nothing seeds them on its own: the `Tag adapters (smoke)` item in the userbar settings menu (`src/ui/srctagSmoke.ts`) seeds them, loads them through `loadAdaptersFromStore`, and runs one live call per adapter, reporting each failure as a line instead of throwing. A body resolves its endpoint from `secret.md` under `## Providers` / `### <name>` (`* Base URL:`, `- alias: model` under `* Models:`, the first `- name: key` under `* API Keys:`), with `ctx.args` choosing the provider and model alias — `{ provider: 'ere', model: 'nbed' }` moves the same row from Cloudflare to OpenRouter. The request follows the Base URL: a `/ai/run` root posts `{ text: [...] }` and reads `result.data`; anything else posts `{ model, input, encoding_format }` and reads `data[].embedding`; the classifier row posts `{ inputs, labels, instructions }` to `{base}/v1/classify` and normalizes `labels` / `results` / `outputs` / a bare array. Each body inherits the secret reader and the normalizer as text, because a `data:`-URL module cannot import; the secret is read per call, so an unknown provider or a missing key is the caller's error to report rather than a row that silently fails to load. The in-process clients (`createEmbedClient`, `createCloudflareEmbed`, `createClassifierDevClassify`) stay available for callers that hold a key directly, and `embedWithCache` memoizes per `model|text` through a caller-supplied `TagVectorCache`. The unused `vecs` table (`[tid+mdl]`) is the intended backing store; its key is row-based, so a text edit leaves the stored vector stale.
-
-### Write path
-
-`planTagUpdates` turns results into `{ tags, rec }`. `add` only adds, `replaceAuto` also removes tags the row's own `rec.tagAuto` provenance names, `replace` sets the list outright, and `[del]` plus the `keep` list survive all three. `dexieTagPort` writes `tags`, `rec` and a local `modAt`; `commitTagUpdates` sequences writes; a row without a `tid` is skipped. `dexieTagPort` does not shelf a version the way `sdb.daEdit` does, so an auto-written tag never reaches the diff tab; `src/ui/tagApply.ts` is the app-side port that writes through `daEdit` instead. Because `rec` merges by union (`fc.recMerge` through `sdb.deepMerge`), a provenance key removed on one client returns when a copy still carrying it merges in.
-
-### Entry points
-
-| Use | Call | Default window |
-|---|---|---|
-| pin card saved | `tagRowsForPinSave(pins, rows)` | `visitTime` |
-| agent chat, user-picked rows | `tagRowsInteractive(rows, tids)` | `tid` |
-| extension tab sweep | `tagSweepRows(rows)` | `tid` |
-| rest-list chips (`rstag`) | `tagRowReports(rows)` via `ui/restGrouper.restTagMap` | `tid` |
-| rule comparison (`run_src`) | `run_src('srctag/suggest.js')` | all four, side by side |
-
-All of them are `tagRows` with defaults; `onlyTids`, `priorityTags`, `synonyms`, `embed`, `embeddings`, `classify` and `labels` are per-call options.
-
-`tagRowReports` is the read-only entry point: it scores with the lexical channels alone unless `embed`/`classify` is injected, and returns one `RowTagReport` per row — the window and cluster the score was measured in, plus one `TagExplanation` per tag. `explainTag` splits a suggestion into its channel shares, so `channels[].contribution` adds up to `score` (a trie hit is reported as a base `priority` share plus the extra `flashtext` share), and `explanationText` formats that as the hover text. `installSrctagGlobal()` publishes `srctagApi()` on `globalThis.srctag` so a `run_src` row can call it — a `data:`-URL module cannot resolve a relative import — and `src/ui/routes.tsx` calls it at boot.
-
-Written tags land in the `*tags` MultiEntry index that `iq` and `availableDas` read, so a tag write is immediately a filter crumb; `rec.tagAuto` is read by nothing in the read path. The userbar search box tags the rows its dropdown shows (`src/ui/tagApply.ts`): the query's tokens become priority tags, the write is add-only, and the toast carries a revert. Focusing the empty box shows two zones instead of results — `srctag`'s suggestions, ranked by the rest list's own pass (`restTagStore.rank`: tags ordered by how many scored rows suggest them, then by best score; clicking applies one), then the most used tags from `availableDas` (clicking searches one). `iq`'s `search` argument is still unwired.
-
-### Read-only chips (`restGrouper: 'rstag'`)
-
-`rstag` is `rsdt` plus a tag layer: the blocks come from `groupByDt` synchronously, while `ui/restGrouper.restTagMap` scores the newest 200 rows in a live query and returns `Map<tid, RowTagReport>`, dropping any tag a row already carries. Each report's tags render **in front of** its row as dotted-outline chips (`src/ui/cardTab.tsx`), so a tag reads as the delimiter of the item it precedes, and the row carries a capline — an overline, the opposite of the hover underline — in its leading tag's color, which is the same color that chip uses. That color is `getColorChar11`'s hue lifted, because the panel is dark and the function draws tags at lightness 0.2 for the filled chips the hover preview and cs1 paint. The rows' own tags seed the trie's priority channel, so a row that carries `react` still lends `react` to its neighbours. Nothing is written, and a chip's `title` carries `explanationText`: the score, the `tfidf`/`embed`/`priority`/`flashtext`/`classify` shares, the neighbour window, and the reminder that the tag is only a suggestion. Persisting one is still the search box's job.
+This document keeps what the read path needs: `rstag` in the View switch above renders
+those suggestions as chips, and the hover preview prints the per-channel shares `explainTag`
+computes.
 
 ## Hover preview
 
-Any row that carries content previews itself on hover: the cs1 pin-card matches
-(`.cs1-match` buttons, `src/ui/cs1.tsx`) and the rest rows (`Cs2Renderer`,
-`src/ui/cardTab.tsx` and `src/ui/tabs.tsx`). The cs2 pin row and the url rows keep
-their native `title` tooltip.
+Any row of the list previews itself on hover — the cs1 pin-card matches
+(`.cs1-match`, `src/ui/cs1.tsx`) and every rest row (`Cs2Renderer`,
+`src/ui/cardTab.tsx` and `src/ui/tabs.tsx`), `http(s)` and recr rows included. Only
+the cs2 pin row keeps its native `title` tooltip.
 
 One popover serves the whole list (`src/ui/Tip.tsx`): a single `mouseover` /
 `focus` pair on a `display: contents` wrapper, a 160 ms hover delay, and a
 200-entry markdown cache. Rows register themselves through `setTip` in a `ref`
 callback, so no list re-render is needed to keep previews current.
 
-The body follows `da.type`: `md` renders markdown (math deferred, below), `src`
-shows the row through the editor pane's CodeMirror setup read-only, and every
-other type prints as plain text. The first line carries the sync ages, `tid: <n>`
-when the row has one, and the row's tags as chips colored by `getColorChar11` —
-the same color `cs1` gives that tag's button.
+The body follows `da.type`: `md` renders markdown (math deferred, below) inside
+`.tip-md`, which restores the heading weight, list markers and block margins
+Tailwind's preflight flattens; `src` shows the row through the editor pane's
+CodeMirror setup read-only, highlighted as JavaScript whenever the ref's suffix
+names no other grammar; every other type prints `txt || ref` as plain text, which
+is what a link row shows. The first line carries the sync ages, `tid: <n>` when the
+row has one, and the row's tags as chips colored by `getColorChar11` — the same
+color `cs1` gives that tag's button.
 
-The popover is placed flush under the row (`top: row.bottom - 1`) and shares the
-row's left edge, so the pointer can travel from the row into the preview without
-crossing a gap. Leaving the row starts a 220 ms close timer that the popover
-cancels on entry, so a hover that ends on the preview stays open.
+The popover is placed flush under the row (`top: row.bottom - 1`) with its left
+edge on the list container's, so every row of one list previews in the same
+column and the pointer can still travel down into it. `tipFittedLeft` slides the
+rendered panel left when a wide body would leave the viewport's right edge.
+Leaving the row starts a 220 ms close timer that the popover cancels on entry, so
+a hover that ends on the preview stays open.
 
 ## Markdown parse and render
 
