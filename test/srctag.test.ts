@@ -10,7 +10,7 @@ import {
   keywordEntries, loadAdaptersFromStore, loadTagAdapter, markdownLinks, mergeTags, neighbourhood,
   normalizeText, parseKeywordDoc, pinPriorityTags, pinTags, planTagUpdates, rankTags, rowSources,
   rowStamp, scoreTagsForRow, sortByDim, srctagApi, tagRows, tagRowsForPinSave, tagRowsInteractive,
-  tagSweepRows, tagRowReports, tfidfVectors, tokenize, urlTokens,
+  tagSweepRows, tagRowReports, tfidfVectors, textRank, tokenize, urlTokens,
 } from '../src/srctag';
 import type { SparseVector, TagParts, TagRow, TagRowsOptions } from '../src/srctag';
 
@@ -123,12 +123,56 @@ describe('tf-idf', () => {
   });
 });
 
+describe('textRank', () => {
+  it('ranks the token that recurs beside many others above a one-off', () => {
+    const ranks = textRank(tokenize('react hooks guide react hooks state react'));
+    expect(ranks.react).toBe(1);
+    expect(ranks.react).toBeGreaterThan(ranks.guide);
+    expect(ranks.guide).toBeGreaterThan(0);
+  });
+
+  it('normalizes by the top rank and returns nothing for no tokens', () => {
+    const ranks = textRank(['a', 'b', 'a']);
+    expect(Math.max(...Object.values(ranks))).toBe(1);
+    expect(textRank([])).toEqual({});
+  });
+
+  it('scores a lone token without an edge as the top rank', () => {
+    expect(textRank(['solo'])).toEqual({ solo: 1 });
+  });
+
+  it('is deterministic for the same input and options', () => {
+    const tokens = tokenize('alpha beta gamma');
+    expect(textRank(tokens, { window: 4 })).toEqual(textRank(tokens, { window: 4 }));
+    // window 2 leaves a path; window 4 closes it into a triangle, whose three
+    // equally weighted nodes rank alike
+    expect(textRank(tokens, { window: 2 })).not.toEqual(textRank(tokens, { window: 4 }));
+  });
+
+  it('honours the minLength filter', () => {
+    expect(textRank(['ab', 'abcdef'], { minLength: 3 })).toEqual({ abcdef: 1 });
+  });
+});
+
 describe('KeywordTagger', () => {
   it('prefers the longest form and consumes its span', () => {
     const t = new KeywordTagger([{ tag: 'ml', keywords: ['machine learning'] }, { tag: 'm', keywords: ['machine'] }]);
     expect(t.match('machine learning is fun')).toEqual([
       { tag: 'ml', form: 'machine learning', start: 0, end: 16 },
     ]);
+  });
+
+  it('reports every occurrence, overlaps included, in one pass', () => {
+    const t = new KeywordTagger([{ tag: 'ml', keywords: ['machine learning'] }, { tag: 'm', keywords: ['machine'] }]);
+    // the same text `match` collapses to one hit
+    expect(t.matchAll('machine learning is fun').map(h => h.tag)).toEqual(['m', 'ml']);
+    expect(t.counts('machine learning is fun')).toEqual(new Map([['m', 1], ['ml', 1]]));
+  });
+
+  it('counts a repeated keyword like a FlashText trie cannot', () => {
+    const t = new KeywordTagger([{ tag: 'react', keywords: ['react'] }]);
+    expect(t.counts('react and react again').get('react')).toBe(2);
+    expect(t.match('react and react again')).toHaveLength(2);
   });
 
   it('refuses to match inside a longer word', () => {
@@ -235,7 +279,10 @@ describe('fusion', () => {
     row(3, 'react state management', { tags: ['react'] }),
   ];
   const cfg = defaultWindow('tid', { window: 1, minWindow: 1, maxWindow: 1 });
-  const scoreCfg = { tfidf: 0.35, embed: 0.35, priority: 0.2, suggest: 0.1, keywordBoost: 1.5, topK: 8, minScore: 0.01 };
+  const scoreCfg = {
+    tfidf: 0.35, embed: 0.35, textRank: 0, clusterRank: 0,
+    priority: 0.2, suggest: 0.1, keywordBoost: 1.5, topK: 8, minScore: 0.01,
+  };
 
   function vectors(rows: TagRow[]) {
     return tfidfVectors(rows.map(r => tokenize(r.txt))).vectors;
@@ -519,7 +566,10 @@ describe('src-row adapters', () => {
 describe('option surface', () => {
   it('keeps every documented channel configurable', () => {
     const opts: TagRowsOptions = {
-      score: { tfidf: 1, embed: 0, priority: 0, suggest: 0, keywordBoost: 2, topK: 3, minScore: 0.2 },
+      score: {
+        tfidf: 1, embed: 0, textRank: 0, clusterRank: 0,
+        priority: 0, suggest: 0, keywordBoost: 2, topK: 3, minScore: 0.2,
+      },
       window: { dim: 'dt', window: 2, burstGap: 1000 },
       priorityTags: ['a'],
       synonyms: { a: ['b'] },
@@ -533,7 +583,10 @@ describe('option surface', () => {
 describe('score explanations', () => {
   const suggestion = (score: number, parts: Partial<TagParts>) => ({
     tag: 'react', score,
-    parts: { tfidf: 0, embed: 0, priority: 0, keyword: 0, suggest: 0, ...parts },
+    parts: {
+      tfidf: 0, embed: 0, textRank: 0, clusterRank: 0,
+      priority: 0, keyword: 0, suggest: 0, ...parts,
+    },
   });
 
   it('splits a suggestion into channel shares that add up to the score', () => {
@@ -544,11 +597,11 @@ describe('score explanations', () => {
     expect(e.text).toContain('tfidf');
   });
 
-  it('splits a trie boost into a base priority share and a flashtext share', () => {
+  it('splits a trie boost into a base priority share and a turbotext share', () => {
     const e = explainTag(suggestion(0.3, { priority: 1.5, keyword: 1 }));
     expect(e.channels.reduce((n, c) => n + c.contribution, 0)).toBeCloseTo(0.3, 6);
     expect(e.channels.find((c) => c.channel === 'keyword')?.contribution).toBeCloseTo(0.1, 6);
-    expect(e.text).toContain('flashtext');
+    expect(e.text).toContain('turbotext');
   });
 
   it('names the window and the missing write in the hover text', () => {

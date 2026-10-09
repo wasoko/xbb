@@ -1,16 +1,27 @@
 /**
  * srctag.ts — score and write `db.das` `tags[]` for tab, url, and pin rows.
  *
- * Four channels are fused per row:
+ * Six channels are fused per row; the first four carry the default weights and
+ * the last two are off until a caller turns them on:
  *   - TF-IDF over a dynamic neighbour window, weighted 0.35
  *   - embedding cosine against the neighbour centroid, weighted 0.35
  *   - priority tags, taken from the `#tag` headings of pin md cards, weighted 0.20
  *   - a zero-shot classifier's labels, weighted 0.10
+ *   - TextRank centrality of the row's own tokens, weighted 0
+ *   - TextRank centrality of the neighbour burst's pooled tokens, weighted 0
+ *
+ * TF-IDF needs an IDF table, so its score folds in how rare a term is across the
+ * working set; that table is what misreads a burst of sibling links, where every
+ * row shares the same few terms. TextRank needs no corpus: it ranks a token by
+ * its position in a co-occurrence graph, so a row's own title yields a stable
+ * score whatever its neighbours happen to be.
  *
  * The neighbour window is measured on one of three dimensions — insert order
  * (`tid`), row time (`dt`/`modAt`), or browser visit time (`rec.visitTime`) —
  * and its radius adapts to local density, so tabs opened together in one burst
- * stay one cluster while sparse rows reach further.
+ * stay one cluster while sparse rows reach further. {@link groupByDomain}
+ * buckets a working set by hostname instead, for the caller that wants a row's
+ * peers to be its site rather than its neighbours in the array.
  *
  * Everything here is dependency-free: no `sdb`, no Dexie, no DOM. Rows are
  * accepted structurally, the embedding and classifier calls are injected
@@ -52,6 +63,10 @@ export interface TagParts {
   tfidf: number;
   /** Normalized TF-IDF weight times the embedding similarity; 0 without embeddings. */
   embed: number;
+  /** TextRank centrality of the token in the row's own text, normalized by the row's top rank. */
+  textRank: number;
+  /** TextRank centrality of the token in the neighbour burst's pooled text; 0 when the row lacks it. */
+  clusterRank: number;
   /** 1 for a priority tag, {@link TagScoreConfig.keywordBoost} when a trie match names it, else 0. */
   priority: number;
   /** 1 when a keyword (trie) match names the tag, else 0. */
@@ -71,6 +86,10 @@ export interface TagSuggestion {
 export interface TagScoreConfig {
   tfidf: number;
   embed: number;
+  /** Weight of the row's own TextRank centrality; 0 leaves the channel out. */
+  textRank: number;
+  /** Weight of the neighbour burst's pooled TextRank centrality; 0 leaves the channel out. */
+  clusterRank: number;
   priority: number;
   suggest: number;
   /** Factor applied to the priority channel when a keyword match names the tag. */
@@ -122,10 +141,32 @@ export interface TagRowResult {
 
 // ─── Defaults ──────────────────────────────────────────────────────────────
 
-/** Default channel weights, from the hybrid design: TF-IDF and embeddings carry most of the score. */
+/**
+ * Default channel weights.
+ *
+ * `textRank` and `clusterRank` are off here: the default sweep is the lexical
+ * pair plus the pin tags, and a caller that wants the graph channels (the
+ * `rstext` grouper does) names them explicitly. A zero weight skips the
+ * computation entirely, so the default path pays nothing for them.
+ */
 export const DEFAULT_TAG_SCORE: TagScoreConfig = {
-  tfidf: 0.35, embed: 0.35, priority: 0.2, suggest: 0.1,
+  tfidf: 0.35, embed: 0.35, textRank: 0, clusterRank: 0, priority: 0.2, suggest: 0.1,
   keywordBoost: 1.5, topK: 8, minScore: 0.05,
+};
+
+/**
+ * Weights of the `rstext` read path: TextRank carries the score, TF-IDF is
+ * suppressed because a burst of sibling links shares its vocabulary, and
+ * `clusterRank` is the term that reads the burst as a unit.
+ *
+ * The cut-off is higher than the default on purpose: a TextRank value is a
+ * normalized centrality, so most of a row's tokens clear 0.05 and the list
+ * would render a chip per token. The sweep in `test/srctag-cdp.test.ts` prints
+ * what this and every other knob does to the live table.
+ */
+export const RSTEXT_TAG_SCORE: Partial<TagScoreConfig> = {
+  tfidf: 0, embed: 0, textRank: 0.6, clusterRank: 0.4, priority: 0.5, suggest: 0,
+  topK: 5, minScore: 0.4,
 };
 
 /** `burstGap` defaults, in each dimension's own unit (rows for `tid`, milliseconds otherwise). */
@@ -302,6 +343,47 @@ function queryValues(search: string): string[] {
   return out;
 }
 
+/**
+ * Hostname a row was saved from, `www.` stripped, or `''` when the row names no
+ * absolute URL.
+ *
+ * @param row row to read
+ * @returns the hostname, or `''`
+ */
+export function rowDomain(row: TagRow): string {
+  const candidates = [row.rec?.url, row.ref].filter((v): v is string => typeof v === 'string');
+  for (const url of candidates) {
+    try {
+      return new URL(url).hostname.replace(/^www\./, '');
+    } catch {
+      // a ref that is not an absolute URL says nothing about the row's site
+    }
+  }
+  return '';
+}
+
+/**
+ * Bucket rows by the hostname they were saved from.
+ *
+ * This is the clustering a burst of search results does not provide: sibling
+ * links from one site share vocabulary a neighbour window would misread, so a
+ * caller can score each site's rows as their own working set. Rows with no URL
+ * land under `''`.
+ *
+ * @param rows rows to bucket
+ * @returns one bucket per hostname, insertion-ordered by first appearance
+ */
+export function groupByDomain(rows: TagRow[]): Map<string, TagRow[]> {
+  const out = new Map<string, TagRow[]>();
+  for (const row of rows) {
+    const key = rowDomain(row);
+    const held = out.get(key);
+    if (held) held.push(row);
+    else out.set(key, [row]);
+  }
+  return out;
+}
+
 /** Sparse term-weight vector keyed by token. */
 export type SparseVector = Record<string, number>;
 
@@ -410,7 +492,101 @@ export function hashEmbed(text: string, dim = 64): Float64Array {
   return vec;
 }
 
-// ─── Keyword trie (FlashText-style) ────────────────────────────────────────
+// ─── TextRank centrality ───────────────────────────────────────────────────
+
+/** Knobs of {@link textRank}. */
+export interface TextRankOptions {
+  /** Co-occurrence window in tokens: two tokens are linked when this close. */
+  window?: number;
+  /** Damping factor of the random walk. */
+  damping?: number;
+  /** Iteration cap; the walk stops earlier once no score moves by more than 1e-4. */
+  iterations?: number;
+  /** Tokens shorter than this are left out of the graph. */
+  minLength?: number;
+}
+
+/** {@link TextRankOptions} with every field resolved. */
+export type TextRankConfig = Required<TextRankOptions>;
+
+/** Defaults of {@link textRank}: the usual TextRank window and damping values. */
+export const DEFAULT_TEXTRANK: TextRankConfig = {
+  window: 4, damping: 0.85, iterations: 30, minLength: 0,
+};
+
+/**
+ * TextRank centrality of every distinct token of `tokens`.
+ *
+ * The graph is the sliding co-occurrence window over the token sequence: an edge
+ * joins two tokens at most `window` apart, weighted by how often that pair
+ * recurs. Each node spreads its weight over its neighbours in proportion to the
+ * edge weights — a PageRank over the token graph, so a token that recurs beside
+ * many different tokens wins over one that appears once or always beside the
+ * same partner. A weighting rather than a bare edge set is what keeps a short
+ * title from collapsing: a row of four distinct nouns is a complete graph, and
+ * an unweighted walk reads every one of them as equally central.
+ *
+ * No IDF table is involved, so a row's score does not depend on how rare its
+ * neighbours made the term — the property that makes this channel usable where
+ * a burst of sibling links has flattened TF-IDF.
+ *
+ * Scores are normalized by the highest one, so the top token always reads 1.
+ *
+ * @param tokens tokens in text order, duplicates kept
+ * @param opts graph and iteration knobs
+ * @returns token -> normalized centrality; `{}` for no tokens
+ */
+export function textRank(tokens: string[], opts: TextRankOptions = {}): SparseVector {
+  const cfg = { ...DEFAULT_TEXTRANK, ...opts };
+  const nodes: string[] = [];
+  const index = new Map<string, number>();
+  for (const t of tokens) {
+    if (t.length < cfg.minLength || index.has(t)) continue;
+    index.set(t, nodes.length);
+    nodes.push(t);
+  }
+  const n = nodes.length;
+  if (n === 0) return {};
+
+  const edges: Map<number, number>[] = Array.from({ length: n }, () => new Map<number, number>());
+  const link = (a: number, b: number) => {
+    edges[a].set(b, (edges[a].get(b) ?? 0) + 1);
+    edges[b].set(a, (edges[b].get(a) ?? 0) + 1);
+  };
+  const span = Math.max(1, cfg.window);
+  for (let i = 0; i < tokens.length; i++) {
+    const a = index.get(tokens[i]);
+    if (a === undefined) continue;
+    for (let j = i + 1; j < Math.min(tokens.length, i + span); j++) {
+      const b = index.get(tokens[j]);
+      if (b !== undefined && b !== a) link(a, b);
+    }
+  }
+
+  const outWeight = edges.map(r => [...r.values()].reduce((sum, w) => sum + w, 0));
+  let score = new Array<number>(n).fill(1);
+  for (let it = 0; it < cfg.iterations; it++) {
+    const next = new Array<number>(n).fill(1 - cfg.damping);
+    for (let i = 0; i < n; i++) {
+      let sum = 0;
+      for (const [j, w] of edges[i]) if (outWeight[j] > 0) sum += (w / outWeight[j]) * score[j];
+      next[i] += cfg.damping * sum;
+    }
+    let delta = 0;
+    for (let i = 0; i < n; i++) delta = Math.max(delta, Math.abs(next[i] - score[i]));
+    score = next;
+    if (delta < 1e-4) break;
+  }
+
+  let max = 0;
+  for (const v of score) max = Math.max(max, v);
+  if (max <= 0) return {};
+  const out: SparseVector = {};
+  for (let i = 0; i < n; i++) out[nodes[i]] = score[i] / max;
+  return out;
+}
+
+// ─── Keyword trie (TurboText: Aho–Corasick) ────────────────────────────────
 
 /** One tag and the surface forms that should match it. */
 export interface KeywordEntry {
@@ -427,23 +603,32 @@ export interface KeywordMatch {
   end: number;
 }
 
-interface TrieNode {
-  children: Map<string, TrieNode>;
-  tag?: string;
-  form?: string;
+interface AcNode {
+  children: Map<string, AcNode>;
+  /** Longest proper suffix that is also a node; set by {@link TurboTextTagger.build}. */
+  fail?: AcNode;
+  /** Terminal of a keyword, holding the tag it names and the form as written. */
+  out?: { tag: string; form: string; key: string };
 }
 
-const node = (): TrieNode => ({ children: new Map() });
+const acNode = (): AcNode => ({ children: new Map() });
 
 /**
- * A keyword-to-tag dictionary scanned in one pass, the FlashText idea: build a
- * trie once, then find every keyword in a text without re-testing tags one by
- * one. Longest match wins and a match consumes its span, so overlapping forms
- * cannot produce two tags for one occurrence.
+ * A keyword-to-tag dictionary over an Aho–Corasick automaton, the TurboText
+ * arrangement of the FlashText idea.
+ *
+ * The dictionary is a trie; failure links then make one left-to-right scan find
+ * every occurrence of every keyword, so a scan is O(text) whatever the
+ * dictionary holds, and overlapping or nested keywords are all reported.
+ * {@link match} keeps the older FlashText reading — longest form wins and a
+ * match consumes its span, so one occurrence cannot yield two tags — while
+ * {@link matchAll} and {@link counts} expose the automaton's full output, which
+ * is what a caller ranking terms by how often a keyword occurs needs.
  */
-export class KeywordTagger {
-  private root = node();
+export class TurboTextTagger {
+  private root = acNode();
   private count = 0;
+  private built = false;
 
   /** @param entries tag -> surface forms to load */
   constructor(entries: KeywordEntry[] = []) {
@@ -461,19 +646,39 @@ export class KeywordTagger {
     const key = normalizeText(form);
     if (!key || !tag) return;
     let cur = this.root;
-    for (const ch of key) {
-      let next = cur.children.get(ch);
-      if (!next) { next = node(); cur.children.set(ch, next); }
+    for (let i = 0; i < key.length; i++) {
+      let next = cur.children.get(key[i]);
+      if (!next) { next = acNode(); cur.children.set(key[i], next); }
       cur = next;
     }
-    if (cur.tag === undefined) this.count++;
-    cur.tag = tag;
-    cur.form = form;
+    if (cur.out === undefined) this.count++;
+    cur.out = { tag, form, key };
+    this.built = false;
   }
 
   /** Add every entry's forms. */
   addEntries(entries: KeywordEntry[]): void {
     for (const e of entries) for (const k of e.keywords) this.add(e.tag, k);
+  }
+
+  /** Link every node to its longest proper suffix, once per dictionary change. */
+  private build(): void {
+    if (this.built) return;
+    const queue: AcNode[] = [];
+    for (const child of this.root.children.values()) {
+      child.fail = this.root;
+      queue.push(child);
+    }
+    for (let qi = 0; qi < queue.length; qi++) {
+      const node = queue[qi];
+      for (const [ch, next] of node.children) {
+        queue.push(next);
+        let f = node.fail;
+        while (f && f !== this.root && !f.children.has(ch)) f = f.fail;
+        next.fail = f?.children.get(ch) ?? this.root;
+      }
+    }
+    this.built = true;
   }
 
   /** Tags whose forms occur in `text`, deduplicated, in text order. */
@@ -483,17 +688,18 @@ export class KeywordTagger {
     let i = 0;
     while (i < src.length) {
       let cur = this.root;
-      let best: { node: TrieNode; end: number } | undefined;
+      let best: { node: AcNode; end: number } | undefined;
       let j = i;
       while (j < src.length) {
         const next = cur.children.get(src[j]);
         if (!next) break;
         cur = next;
         j++;
-        if (cur.tag !== undefined && boundaryOk(src, i, j)) best = { node: cur, end: j };
+        if (cur.out !== undefined && boundaryOk(src, i, j)) best = { node: cur, end: j };
       }
       if (best) {
-        out.push({ tag: best.node.tag!, form: best.node.form ?? src.slice(i, best.end), start: i, end: best.end });
+        const hit = best.node.out!;
+        out.push({ tag: hit.tag, form: hit.form, start: i, end: best.end });
         i = best.end;
         continue;
       }
@@ -501,7 +707,51 @@ export class KeywordTagger {
     }
     return out;
   }
+
+  /**
+   * Every keyword occurrence in `text`, including overlapping and nested ones,
+   * from one pass over the automaton.
+   *
+   * @param text text to scan
+   * @returns the hits in end-offset order
+   */
+  matchAll(text: string): KeywordMatch[] {
+    this.build();
+    const src = normalizeText(text ?? '');
+    const out: KeywordMatch[] = [];
+    let cur = this.root;
+    for (let i = 0; i < src.length; i++) {
+      const ch = src[i];
+      while (cur !== this.root && !cur.children.has(ch)) cur = cur.fail!;
+      cur = cur.children.get(ch) ?? this.root;
+      for (let node: AcNode | undefined = cur; node; node = node.fail) {
+        const hit = node.out;
+        if (!hit) continue;
+        const start = i + 1 - hit.key.length;
+        if (start >= 0 && boundaryOk(src, start, i + 1)) {
+          out.push({ tag: hit.tag, form: hit.form, start, end: i + 1 });
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * How often each tag's forms occur in `text`, counting overlapping and nested
+   * occurrences separately.
+   *
+   * @param text text to scan
+   * @returns tag -> occurrence count, keys in first-occurrence order
+   */
+  counts(text: string): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const hit of this.matchAll(text)) out.set(hit.tag, (out.get(hit.tag) ?? 0) + 1);
+    return out;
+  }
 }
+
+/** The FlashText-era name for {@link TurboTextTagger}, kept for existing callers. */
+export { TurboTextTagger as KeywordTagger };
 
 /**
  * Whether a match at `[start, end)` stands alone.
@@ -524,7 +774,7 @@ function boundaryOk(src: string, start: number, end: number): boolean {
  *
  * @param tags tags to match against text
  * @param synonyms extra surface forms per tag
- * @returns entries ready for {@link KeywordTagger}
+ * @returns entries ready for {@link TurboTextTagger}
  */
 export function keywordEntries(tags: string[], synonyms: Record<string, string[]> = {}): KeywordEntry[] {
   const out: KeywordEntry[] = [];
@@ -753,6 +1003,13 @@ export interface RowContext {
   suggestions?: { tag: string; score: number }[];
   /** One dense vector per row, when an embedding channel is available. */
   embeddings?: ArrayLike<number>[];
+  /**
+   * Tokens per row, in the same order as `rows`. Supplies the two TextRank
+   * channels; without it they read 0 even when their weights are set.
+   */
+  docs?: string[][];
+  /** Graph knobs for the TextRank channels. */
+  rank?: TextRankOptions;
 }
 
 /**
@@ -763,6 +1020,11 @@ export interface RowContext {
  * token's own weight, so a neighbour's shared vocabulary only lifts tags the
  * row actually carries, while a proposal with no textual support still scores
  * through the classifier channel alone.
+ *
+ * The TextRank channels are computed here, per row: `textRank` walks the row's
+ * own tokens and `clusterRank` walks the neighbour window's pooled tokens, so
+ * both follow the window the other channels use. A zero weight on both skips
+ * the graph entirely, which is what keeps the default path free of the cost.
  *
  * @param ctx the row, its corpus, and its configured channels
  * @returns suggestions sorted by descending score
@@ -780,6 +1042,12 @@ export function scoreTagsForRow(ctx: RowContext): TagSuggestion[] {
     const neigh = win.indices.map(j => embeddings[j]).filter((v): v is ArrayLike<number> => v !== undefined);
     embedSim = cosineDense(embeddings[index], centroidDense(neigh.length > 0 ? neigh : [embeddings[index]]));
   }
+
+  const docs = ctx.docs;
+  const ownRank = cfg.textRank > 0 && docs?.[index] ? textRank(docs[index], ctx.rank) : undefined;
+  const poolRank = cfg.clusterRank > 0 && docs
+    ? textRank(win.indices.flatMap(j => docs[j] ?? []), ctx.rank)
+    : undefined;
 
   const prioritySet = new Set(priority);
   const keywordTags = new Set(keywords.map(k => k.tag));
@@ -802,11 +1070,14 @@ export function scoreTagsForRow(ctx: RowContext): TagSuggestion[] {
     const parts: TagParts = {
       tfidf: tfNorm * tfidfSim,
       embed: tfNorm * embedSim,
+      textRank: ownRank ? (ownRank[tag] ?? 0) : 0,
+      clusterRank: poolRank && (own[tag] ?? 0) > 0 ? (poolRank[tag] ?? 0) : 0,
       priority: prio,
       keyword: isKeyword ? 1 : 0,
       suggest: suggestMap.get(tag) ?? 0,
     };
     const score = cfg.tfidf * parts.tfidf + cfg.embed * parts.embed
+      + cfg.textRank * parts.textRank + cfg.clusterRank * parts.clusterRank
       + cfg.priority * parts.priority + cfg.suggest * parts.suggest;
     out.push({ tag, score, parts });
   }
@@ -887,9 +1158,10 @@ export interface TagExplanation {
   text: string;
 }
 
-/** Display names for the channels, so a tooltip reads `flashtext` rather than `keyword`. */
+/** Display names for the channels, so a tooltip reads `turbotext` rather than `keyword`. */
 const CHANNEL_LABEL: Record<keyof TagParts, string> = {
-  tfidf: 'tfidf', embed: 'embed', priority: 'priority', keyword: 'flashtext', suggest: 'classify',
+  tfidf: 'tfidf', embed: 'embed', textRank: 'textrank', clusterRank: 'clusterrank',
+  priority: 'priority', keyword: 'turbotext', suggest: 'classify',
 };
 
 /** Two decimals keep a tooltip short. */
@@ -901,7 +1173,8 @@ const fixed = (n: number): string => n.toFixed(2);
  * A trie hit scores through `parts.priority === keywordBoost`, so the report
  * splits that back into one base `priority` share and one `keyword` share worth
  * `cfg.priority * (keywordBoost - 1)`. `channels[].contribution` therefore adds
- * up to `score` in every case.
+ * up to `score` in every case. A channel whose weight is 0 contributes 0 and is
+ * left out, so a suppressed channel does not pad a hover tooltip.
  *
  * @param s scored suggestion
  * @param cfg the weights the fusion used
@@ -914,11 +1187,13 @@ export function explainTag(s: TagSuggestion, cfg: TagScoreConfig = DEFAULT_TAG_S
   const all: TagChannelStat[] = [
     { channel: 'tfidf', weight: cfg.tfidf, value: p.tfidf, contribution: cfg.tfidf * p.tfidf },
     { channel: 'embed', weight: cfg.embed, value: p.embed, contribution: cfg.embed * p.embed },
+    { channel: 'textRank', weight: cfg.textRank, value: p.textRank, contribution: cfg.textRank * p.textRank },
+    { channel: 'clusterRank', weight: cfg.clusterRank, value: p.clusterRank, contribution: cfg.clusterRank * p.clusterRank },
     { channel: 'priority', weight: cfg.priority, value: basePriority, contribution: cfg.priority * basePriority },
     { channel: 'keyword', weight: keywordWeight, value: p.keyword, contribution: keywordWeight * p.keyword },
     { channel: 'suggest', weight: cfg.suggest, value: p.suggest, contribution: cfg.suggest * p.suggest },
   ];
-  const channels = all.filter((c) => c.value > 0).sort((a, b) => b.contribution - a.contribution);
+  const channels = all.filter((c) => c.contribution > 0).sort((a, b) => b.contribution - a.contribution);
   return {
     tag: s.tag,
     score: s.score,
@@ -956,13 +1231,15 @@ export function explanationText(
 export interface TagRowsOptions {
   score?: Partial<TagScoreConfig>;
   window?: Partial<TagWindowConfig> & { dim?: TagDim };
+  /** Graph knobs of the TextRank channels. */
+  rank?: TextRankOptions;
   /** Priority tags; when omitted they are read from `pins`. */
   priorityTags?: string[];
   /** Pin md cards whose headings supply the priority tags. */
   pins?: TagRow[];
   /** Extra keyword surface forms per tag. */
   synonyms?: Record<string, string[]>;
-  /** Embedding function called once for the whole working set. */
+  /** Embedding function; one call per working set, and one per site bucket under `bucket: 'domain'`. */
   embed?: EmbedFn;
   /** Pre-computed vectors keyed by row `ref`; wins over `embed`. */
   embeddings?: Record<string, ArrayLike<number>>;
@@ -972,19 +1249,58 @@ export interface TagRowsOptions {
   labels?: string[];
   /** Restrict scoring to these `tid`s. */
   onlyTids?: number[];
+  /**
+   * `'domain'` scores each hostname's rows as their own working set, so a row's
+   * peers are its site's rows rather than its neighbours in the array. See
+   * {@link groupByDomain}.
+   */
+  bucket?: 'domain';
+}
+
+/**
+ * Wrap an {@link EmbedFn} so no text is embedded twice across a bucketed run.
+ *
+ * A vector is a pure function of its text, so the second site to hold a title
+ * would only repeat a request. The returned function keeps the caller's order
+ * and asks the client for the texts it has not seen yet.
+ *
+ * @param embed the client, or undefined
+ * @returns the memoizing wrapper, or undefined when there is nothing to wrap
+ */
+function memoEmbed(embed: EmbedFn | undefined): EmbedFn | undefined {
+  if (!embed) return undefined;
+  const seen = new Map<string, number[]>();
+  return async (texts: string[]) => {
+    const missing = [...new Set(texts.filter(t => !seen.has(t)))];
+    if (missing.length > 0) {
+      const fresh = await embed(missing);
+      missing.forEach((t, i) => { if (fresh[i]) seen.set(t, fresh[i] as number[]); });
+    }
+    return texts.map(t => seen.get(t) ?? []);
+  };
 }
 
 /**
  * Score tags for every row of a working set.
  *
  * Rows are ordered on the configured dimension, so the neighbour window and the
- * clusters describe one browsing run rather than the caller's array order.
+ * clusters describe one browsing run rather than the caller's array order. With
+ * `bucket: 'domain'` the set is first split by hostname and each site is scored
+ * on its own, which is the reading a burst of sibling links needs.
  *
  * @param rows rows to score, in any order
  * @param opts channels and configuration
  * @returns one result per scored row, in the working set's order
  */
 export async function tagRows(rows: TagRow[], opts: TagRowsOptions = {}): Promise<TagRowResult[]> {
+  if (opts.bucket === 'domain') {
+    const out: TagRowResult[] = [];
+    const embed = memoEmbed(opts.embed);
+    for (const bucket of groupByDomain(rows).values()) {
+      out.push(...await tagRows(bucket, { ...opts, bucket: undefined, embed }));
+    }
+    return out;
+  }
   const cfg = mergeTagScore(opts.score);
   const windowCfg = defaultWindow(opts.window?.dim ?? 'tid', opts.window);
   const sorted = sortByDim(rows, windowCfg.dim);
@@ -997,7 +1313,7 @@ export async function tagRows(rows: TagRow[], opts: TagRowsOptions = {}): Promis
   const { vectors } = tfidfVectors(docs);
 
   const priority = opts.priorityTags ?? pinPriorityTags(opts.pins ?? []);
-  const tagger = new KeywordTagger(keywordEntries(priority, opts.synonyms));
+  const tagger = new TurboTextTagger(keywordEntries(priority, opts.synonyms));
   const texts = sources.map(s => [s.text, ...s.urls].join(' '));
 
   let embeddings: ArrayLike<number>[] | undefined;
@@ -1013,7 +1329,8 @@ export async function tagRows(rows: TagRow[], opts: TagRowsOptions = {}): Promis
       ? normalizeClassify(await opts.classify(texts[i], opts.labels))
       : undefined;
     const scored = scoreTagsForRow({
-      rows: sorted, index: i, vectors, windowCfg, cfg,
+      rows: sorted, index: i, vectors, windowCfg, cfg, docs,
+      rank: opts.rank,
       priority, keywords: tagger.match(texts[i]), suggestions, embeddings,
     });
     results.push({
@@ -1077,6 +1394,120 @@ export async function tagRowReports(rows: TagRow[], opts: TagRowsOptions = {}): 
   const cfg = mergeTagScore(opts.score);
   const dim = opts.window?.dim ?? 'tid';
   return (await tagRows(rows, opts)).map((r) => reportRowTags(r, cfg, dim));
+}
+
+// ─── Run statistics ────────────────────────────────────────────────────────
+
+/** One tag's aggregate over a scored working set. */
+export interface TagRunTag {
+  tag: string;
+  /** Rows whose report suggested the tag. */
+  count: number;
+  /** Best score any row gave the tag. */
+  score: number;
+}
+
+/** One channel's share of a run's total contribution. */
+export interface TagRunChannel {
+  channel: keyof TagParts;
+  /** `channel contribution / sum of all contributions`, or 0 when nothing scored. */
+  share: number;
+}
+
+/** Aggregate statistics of one {@link tagRows} run, for comparing channel sets. */
+export interface TagRunStats {
+  /** Rows the run was given. */
+  rows: number;
+  /** Rows that kept at least one suggestion. */
+  scored: number;
+  /** Suggestions across all rows, before {@link rankTags} cut them. */
+  suggested: number;
+  /** Distinct tags suggested. */
+  distinct: number;
+  /** Rows that kept no suggestion. */
+  empty: number;
+  meanScore: number;
+  maxScore: number;
+  /** Suggestions whose tag is a priority tag or a keyword match. */
+  priorityHits: number;
+  /** Channel shares, largest first. */
+  channels: TagRunChannel[];
+  /** Most widespread tags first, then by best score. */
+  topTags: TagRunTag[];
+}
+
+/** Four decimals keep a printed statistic stable across runs. */
+function round4(n: number): number {
+  return Math.round(n * 10_000) / 10_000;
+}
+
+/**
+ * Fold a run's results into the numbers that compare one channel set against
+ * another: how many rows kept a tag, how many tags came back, how the score
+ * split over the channels, and which tags spread widest.
+ *
+ * Channel shares come from {@link explainTag}, so they add up to the run's
+ * score total whether or not a channel is weighted.
+ *
+ * @param results scored rows
+ * @param cfg the weights the fusion used
+ * @param topK how many tags {@link TagRunStats.topTags} lists
+ * @returns the run's statistics
+ */
+export function summarizeTagRun(
+  results: TagRowResult[],
+  cfg: TagScoreConfig = DEFAULT_TAG_SCORE,
+  topK = 8,
+): TagRunStats {
+  const hits = new Map<string, TagRunTag>();
+  const byChannel = new Map<keyof TagParts, number>();
+  let suggested = 0;
+  let sum = 0;
+  let max = 0;
+  let priorityHits = 0;
+  let empty = 0;
+
+  for (const result of results) {
+    if (result.suggestions.length === 0) empty++;
+    for (const s of result.suggestions) {
+      suggested++;
+      sum += s.score;
+      max = Math.max(max, s.score);
+      if (s.parts.priority > 0) priorityHits++;
+      const held = hits.get(s.tag);
+      if (held) {
+        held.count++;
+        held.score = Math.max(held.score, s.score);
+      } else {
+        hits.set(s.tag, { tag: s.tag, count: 1, score: s.score });
+      }
+      for (const c of explainTag(s, cfg).channels) {
+        byChannel.set(c.channel, (byChannel.get(c.channel) ?? 0) + c.contribution);
+      }
+    }
+  }
+
+  const total = [...byChannel.values()].reduce((a, b) => a + b, 0);
+  const channels = [...byChannel.entries()]
+    .map(([channel, v]) => ({ channel, share: total > 0 ? round4(v / total) : 0 }))
+    .sort((a, b) => b.share - a.share || a.channel.localeCompare(b.channel));
+  const topTags = [...hits.values()]
+    .sort((a, b) => (b.count - a.count) || (b.score - a.score) || a.tag.localeCompare(b.tag))
+    .slice(0, topK)
+    .map((t) => ({ tag: t.tag, count: t.count, score: round4(t.score) }));
+
+  return {
+    rows: results.length,
+    scored: results.length - empty,
+    suggested,
+    distinct: hits.size,
+    empty,
+    meanScore: suggested > 0 ? round4(sum / suggested) : 0,
+    maxScore: round4(max),
+    priorityHits,
+    channels,
+    topTags,
+  };
 }
 
 /** Accept classifier output in the shapes the adapters may produce. */
@@ -1576,6 +2007,14 @@ export interface SrctagApi {
   parseKeywordDoc: typeof parseKeywordDoc;
   tokenize: typeof tokenize;
   rankTags: typeof rankTags;
+  /** TextRank centrality of a token list. */
+  textRank: typeof textRank;
+  /** Aggregate a scored run into the numbers a channel comparison prints. */
+  summarizeTagRun: typeof summarizeTagRun;
+  /** Bucket rows by hostname, for a domain-clustered working set. */
+  groupByDomain: typeof groupByDomain;
+  /** Hostname of one row, `www.` stripped. */
+  rowDomain: typeof rowDomain;
 }
 
 /** The public surface, as a plain object. */
@@ -1584,7 +2023,7 @@ export function srctagApi(): SrctagApi {
     tagRows, tagRowsForPinSave, tagRowsInteractive, tagSweepRows,
     planTagUpdates, commitTagUpdates, dexieTagPort, customTagPort,
     pinPriorityTags, loadAdaptersFromStore, keywordEntries, parseKeywordDoc,
-    tokenize, rankTags,
+    tokenize, rankTags, textRank, summarizeTagRun, groupByDomain, rowDomain,
   };
 }
 

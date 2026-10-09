@@ -8,7 +8,7 @@ import { RECR_TYPE } from '../recrConst';
 import { recrRowLabel, recrTargetOf, type RecrTarget } from '../sessionTree';
 import { cardDoubleClick, Cs1Renderer, matchedRefsByPins } from './cs1';
 import { setTip, TipHost, TIP_ATTR } from './Tip';
-import { dtMs, groupRest, isRestGrouperScript, restGroupsFor, restTagMap, restTagStore, RSSESS_GROUPER, RSTAG_GROUPER, type RestGroup } from './restGrouper';
+import { dtMs, groupRest, isRestGrouperScript, restGroupsFor, restTagMap, restTagStore, restTextMap, RSSESS_GROUPER, RSTAG_GROUPER, RSTEXT_GROUPER, type RestGroup } from './restGrouper';
 import { explanationText, type RowTagReport } from '../srctag';
 import { useTreeCac } from './useTreeCac';
 
@@ -123,20 +123,22 @@ export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, ren
   const restGroups = syncGroups ?? scriptGroups;
 
   /*
-   * `rstag` keeps the rsdt blocks and adds srctag's suggestions as chips. The
-   * tags are scored in a live query because the lexical pass is asynchronous,
-   * and the row cap keeps a 555-row page cheap. The pass runs for every
-   * grouper — the omnibox's suggestion zone ranks the same reports — and only
-   * the chips are `rstag`-specific.
+   * `rstag` and `rstext` keep the rsdt blocks and add srctag's suggestions as
+   * chips. The tags are scored in a live query because the lexical pass is
+   * asynchronous, and the row cap keeps a 555-row page cheap. The pass runs for
+   * every grouper — the omnibox's suggestion zone ranks the same reports — and
+   * only the chips are tag-specific.
    */
-  const restTagging = restGrouper === RSTAG_GROUPER;
+  const restTagging = restGrouper === RSTAG_GROUPER || restGrouper === RSTEXT_GROUPER;
   const restTagKey = useMemo(
     () => listedRest.map((d) => `${String(d.tid)}:${d.ref}`).join('|'),
     [listedRest],
   );
   const restTags = useLiveQuery(
-    async () => await restTagMap(listedRest),
-    [restTagKey],
+    async () => await (restGrouper === RSTEXT_GROUPER
+      ? restTextMap(listedRest)
+      : restTagMap(listedRest)),
+    [restTagKey, restGrouper],
     new Map<number, RowTagReport>(),
   );
   useEffect(() => { restTagStore.set(restTags, listedRest); }, [restTags, restTagKey]);

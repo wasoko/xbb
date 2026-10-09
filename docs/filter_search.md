@@ -34,6 +34,7 @@ flowchart TD
 | `restGrouper` | `'rsdt'` (default) | rest rows split into one block per exact `dt`, newest first (`src/ui/restGrouper.ts`) |
 | `restGrouper` | `'rsid'` | `rsdt` plus one visit-time subgroup per exact `rec.visitTime` inside each date block; rows without a visit time stay under the date heading |
 | `restGrouper` | `'rstag'` | the `rsdt` blocks unchanged, plus each row's `srctag` suggestions as dotted-outline chips; hovering a chip names the channels that produced it ([sTag.md](sTag.md#read-only-chips-restgrouper-rstag)) |
+| `restGrouper` | `'rstext'` | the same blocks and chips scored by the TextRank channels instead: TF-IDF off, each site's rows scored as their own working set on the visit-time window ([sTag.md](sTag.md#read-only-chips-restgrouper-rstext)) |
 | `restGrouper` | `'none'` or empty | rest rows render flat, without headings |
 | `restGrouper` | any other ref | the `type='src'` row of that ref returns the blocks; a block carries `items`, `subgroups`, or both. A missing row, a throwing body, or a result that is not an array of blocks falls back to flat |
 
@@ -77,14 +78,14 @@ Only crumbs are cached: `availableDas(tags)` keyed by `{f, s, t, l}` (`src/sdb.t
 ## Tagging (`src/srctag.ts`, `src/srctagRows.ts`)
 
 How a row's `tags[]` are scored and written is documented in [sTag.md](sTag.md), split by
-methodology: the static channels in `src/srctag.ts` (TF-IDF, the FlashText trie,
-`hashEmbed`, the priority and classifier shares) and the dynamic `type='src'` rows
-`run_src` evaluates (`srctag/embed.js`, `srctag/classify.js`, `srctag/suggest.js`,
-`srctag/suggest-ds.js`).
+methodology: the static channels in `src/srctag.ts` (TF-IDF, TextRank, the TurboText
+keyword automaton, `hashEmbed`, the priority and classifier shares) and the dynamic
+`type='src'` rows `run_src` evaluates (`srctag/embed.js`, `srctag/classify.js`,
+`srctag/suggest.js`, `srctag/suggest-ds.js`).
 
-This document keeps what the read path needs: `rstag` in the View switch above renders
-those suggestions as chips, and the hover preview prints the per-channel shares `explainTag`
-computes.
+This document keeps what the read path needs: `rstag` and `rstext` in the View switch
+above render those suggestions as chips, and the hover preview prints the per-channel
+shares `explainTag` computes.
 
 ## Hover preview
 

@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { db, type Da } from '../src/sdb';
 import {
   groupByDt, groupByDtVisit, groupBySession, groupRest, isRestGrouperScript, restGroupsFor,
-  restTagMap, restTagStore, RECR_CONFIG_LABEL, RSSESS_GROUPER, RSTAG_GROUPER, RSTAG_LIMIT, UNDATED_LABEL,
+  restTagMap, restTagStore, RECR_CONFIG_LABEL, RSSESS_GROUPER, RSTAG_GROUPER, RSTAG_LIMIT, RSTEXT_GROUPER, RSTEXT_LIMIT, restTextMap, UNDATED_LABEL,
 } from '../src/ui/restGrouper';
 import type { RowTagReport } from '../src/srctag';
 
@@ -244,6 +244,53 @@ describe('rstag', () => {
     const map = await restTagMap(rows);
     expect(map.size).toBe(RSTAG_LIMIT);
     expect(map.has(RSTAG_LIMIT + 5)).toBe(true);
+    expect(map.has(5)).toBe(false);
+  });
+});
+
+describe('rstext', () => {
+  const site = (tid: number, txt: string, url: string, tags: string[] = []): Da =>
+    ({ tid, ref: url, txt, type: 'tab', dt: new Date(T0), tags, rec: { url } });
+
+  it('resolves as a built-in whose blocks are exactly rsdt', () => {
+    const rows = [row(1, new Date(T0)), row(2, new Date(T0)), row(3, new Date(T0 + 1000))];
+    expect(isRestGrouperScript(RSTEXT_GROUPER)).toBe(false);
+    expect(restGroupsFor(rows, RSTEXT_GROUPER)).toEqual(groupByDt(rows));
+  });
+
+  it('reads each row on the visit-time dimension and leaves TF-IDF out of the channels', async () => {
+    const map = await restTextMap([
+      site(1, 'react hooks tutorial', 'https://react.dev/learn', ['react']),
+      site(2, 'react hooks guide', 'https://react.dev/reference', ['react']),
+    ]);
+    const report = map.get(1)!;
+    expect(report.dim).toBe('visitTime');
+    const hooks = report.tags.find((t) => t.tag === 'hooks')!;
+    expect(hooks.channels.map((c) => c.channel)).not.toContain('tfidf');
+    expect(hooks.channels.map((c) => c.channel)).toContain('textRank');
+  });
+
+  it('lifts a term its own site shares, and never invents one the row lacks', async () => {
+    const map = await restTextMap([
+      site(1, 'deep learning framework', 'https://pytorch.org/docs'),
+      site(2, 'site map', 'https://example.com/a'),
+      site(3, 'torch optimizer notes', 'https://pytorch.org/tutorials'),
+    ]);
+    // `pytorch` occurs on both pytorch.org rows, so the site pool ranks it for row 1
+    const one = map.get(1)!;
+    const pytorch = one.tags.find((t) => t.tag === 'pytorch')!;
+    expect(pytorch.channels.map((c) => c.channel)).toContain('clusterRank');
+    // a candidate must occur in the row's own text, so the sibling's `torch` never lands here
+    expect(one.tags.map((t) => t.tag)).not.toContain('torch');
+    expect(map.get(2)!.tags.map((t) => t.tag)).not.toContain('pytorch');
+  });
+
+  it('scores only the newest rows within the cap', async () => {
+    const rows = Array.from({ length: RSTEXT_LIMIT + 5 }, (_, i) =>
+      site(i + 1, `row ${i}`, `https://s${i % 3}.example.com/${i}`));
+    const map = await restTextMap(rows);
+    expect(map.size).toBe(RSTEXT_LIMIT);
+    expect(map.has(RSTEXT_LIMIT + 5)).toBe(true);
     expect(map.has(5)).toBe(false);
   });
 });

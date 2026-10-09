@@ -3,7 +3,10 @@ import { db, daStamp, type Da } from '../sdb';
 import { dtMs } from '../fc';
 import { getStore, runBody } from '../recr';
 import { metaTitle, parseSessionRef, SESSION_PREFIX } from '../sessionTree';
-import { TAG_DEL, tagRowReports, type RowTagReport, type TagRow, type TagRowsOptions } from '../srctag';
+import {
+  RSTEXT_TAG_SCORE, TAG_DEL, tagRowReports,
+  type RowTagReport, type TagRow, type TagRowsOptions,
+} from '../srctag';
 
 export { dtMs };
 
@@ -37,8 +40,25 @@ export const RSSESS_GROUPER = 'rsess';
  */
 export const RSTAG_GROUPER = 'rstag';
 
+/**
+ * `treeCac['restGrouper']` value: the same blocks and chips as
+ * {@link RSTAG_GROUPER}, scored by the TextRank channels instead.
+ *
+ * `rstag` reads a row against its neighbours in `tid` order, which is wrong for
+ * the case this list mostly holds — a burst of sibling links opened from one
+ * search page shares its vocabulary, so both TF-IDF and the neighbour centroid
+ * find the same terms everywhere. This mode scores each site's rows as their own
+ * working set (see {@link restTextMap}) and drops TF-IDF entirely, so a tag has
+ * to be central to the row's own text or to its site's, not merely present in
+ * the burst around it.
+ */
+export const RSTEXT_GROUPER = 'rstext';
+
 /** Rows {@link restTagMap} scores; the rest list can hold hundreds of rows. */
 export const RSTAG_LIMIT = 200;
+
+/** Rows {@link restTextMap} scores. */
+export const RSTEXT_LIMIT = 200;
 
 /** Heading of the trailing `rsess` block holding recr's non-session rows. */
 export const RECR_CONFIG_LABEL = 'recr config';
@@ -197,6 +217,7 @@ const BUILT_IN_GROUPERS = new Map<string, (das: Da[]) => RestGroup[]>([
   [RSSESS_GROUPER, groupBySession],
   // the tag chips are a decoration layer, so the blocks are `rsdt` itself
   [RSTAG_GROUPER, groupByDt],
+  [RSTEXT_GROUPER, groupByDt],
 ]);
 
 /** Options for {@link restTagMap}. */
@@ -205,8 +226,31 @@ export interface RestTagOptions {
   priorityTags?: string[];
   /** Rows scored, newest `tid` first; defaults to {@link RSTAG_LIMIT}. */
   limit?: number;
-  /** Extra channels, e.g. an API `embed`/`classify`. Omitted leaves the local lexical channels only. */
+  /** Extra channels, e.g. an API `embed`/`classify`, and weight overrides. Omitted leaves the local lexical channels only. */
   tag?: TagRowsOptions;
+}
+
+/** Priority tags of a rest pass: the tags the scored rows themselves carry. */
+const restPriorityTags = (rows: Da[]): string[] =>
+  [...new Set(rows.flatMap((d) => d.tags ?? []))].filter((t) => t !== 'pin' && t !== TAG_DEL);
+
+/**
+ * Key one pass's reports by `tid`, dropping any tag the row already carries so
+ * the chips only ever show what `srctag` would add.
+ *
+ * @param rows rows the pass scored
+ * @param reports reports the pass returned
+ * @returns one report per scored row, keyed by `tid`
+ */
+function ownTagLess(rows: Da[], reports: RowTagReport[]): Map<number, RowTagReport> {
+  const held = new Map(rows.map((d) => [d.tid, new Set(d.tags ?? [])]));
+  const out = new Map<number, RowTagReport>();
+  for (const r of reports) {
+    if (typeof r.tid !== 'number') continue;
+    const own = held.get(r.tid);
+    out.set(r.tid, own ? { ...r, tags: r.tags.filter((t) => !own.has(t.tag)) } : r);
+  }
+  return out;
 }
 
 /**
@@ -220,21 +264,42 @@ export interface RestTagOptions {
  */
 export async function restTagMap(das: Da[], opts: RestTagOptions = {}): Promise<Map<number, RowTagReport>> {
   const rows = byTidDesc(das).slice(0, opts.limit ?? RSTAG_LIMIT);
-  const priorityTags = opts.priorityTags
-    ?? [...new Set(rows.flatMap((d) => d.tags ?? []))].filter((t) => t !== 'pin' && t !== TAG_DEL);
+  const priorityTags = opts.priorityTags ?? restPriorityTags(rows);
   const reports = await tagRowReports(rows as TagRow[], {
     ...opts.tag,
     window: { dim: 'tid', ...opts.tag?.window },
     priorityTags,
   });
-  const held = new Map(rows.map((d) => [d.tid, new Set(d.tags ?? [])]));
-  const out = new Map<number, RowTagReport>();
-  for (const r of reports) {
-    if (typeof r.tid !== 'number') continue;
-    const own = held.get(r.tid);
-    out.set(r.tid, own ? { ...r, tags: r.tags.filter((t) => !own.has(t.tag)) } : r);
-  }
-  return out;
+  return ownTagLess(rows, reports);
+}
+
+/**
+ * The `rstext` pass: score each site's rows as their own working set, on the
+ * visit-time dimension, with TF-IDF suppressed and TextRank carrying the score.
+ *
+ * Bucketing by hostname is what the neighbour window cannot do on its own — a
+ * burst of sibling links from one search page shares its vocabulary, so a row's
+ * nearest neighbours are the wrong evidence for what it is about, while its
+ * site's other rows are the right one. Within a bucket the window is the
+ * visit-time one, so the rows a user opened together still pool their terms.
+ *
+ * Nothing is written back; the caller renders the reports as chips.
+ *
+ * @param das rows below the pin cards
+ * @param opts priority tags, row cap, and channel overrides
+ * @returns one report per scored row, keyed by `tid`
+ */
+export async function restTextMap(das: Da[], opts: RestTagOptions = {}): Promise<Map<number, RowTagReport>> {
+  const rows = byTidDesc(das).slice(0, opts.limit ?? RSTEXT_LIMIT);
+  const priorityTags = opts.priorityTags ?? restPriorityTags(rows);
+  const reports = await tagRowReports(rows as TagRow[], {
+    ...opts.tag,
+    bucket: 'domain',
+    score: { ...RSTEXT_TAG_SCORE, ...opts.tag?.score },
+    window: { dim: 'visitTime', ...opts.tag?.window },
+    priorityTags,
+  });
+  return ownTagLess(rows, reports);
 }
 
 /** One tag the rest list's `srctag` pass scored highly, with the rows that support it. */

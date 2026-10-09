@@ -26,7 +26,7 @@ flowchart TB
   K["srctag/keywords.md"] -->|"synonyms"| T
   T --> F["scoreTagsForRow + rankTags"]
   F --> W["planTagUpdates to a TagWritePort"]
-  F --> E["explainTag: hover text, rstag chips"]
+  F --> E["explainTag: hover text, rstag/rstext chips"]
   C["agent chat write_file"] -->|"new adapter row"| D
   U["Tag adapters (smoke) menu"] -->|"seedTagRows"| D
 ```
@@ -44,18 +44,27 @@ one file serve the webapp, a `run_src` row, and a copy inside the tabext extensi
 |---|---|---|
 | TF-IDF | `txt` tokens plus `urlTokens(ref)` and any Markdown link in `txt`, against the neighbour window | 0.35 |
 | Embedding cosine | an injected `EmbedFn` against the neighbour centroid; `hashEmbed` (64-bin character histogram) when none is supplied | 0.35 |
+| TextRank | `textRank()` over the row's own tokens: a weighted co-occurrence graph, normalized by its top rank | 0 |
+| Burst TextRank (`clusterRank`) | the same walk over the neighbour window's pooled tokens, gated on the row's own copy of the term | 0 |
 | Priority tags | `#tag` tokens in pin md-card headings (`pinPriorityTags`, the same rules `Cs1Renderer` renders) | 0.20 |
 | Classifier labels | an injected `ClassifyFn` | 0.10 |
+
+The two TextRank weights are 0 by default, so the default sweep is unchanged and pays
+nothing for the graph: a zero weight skips the walk entirely. `RSTEXT_TAG_SCORE` is the
+preset that turns them on and TF-IDF off, and `rstext` is the read path built on it.
 
 `scoreTagsForRow` scores the candidates, `rankTags` filters and cuts. A candidate is
 **only** a token of the row's own text, a keyword-trie match, or a classifier label —
 the priority list cannot introduce a tag on its own, it only lifts one that already
-qualified. `TagParts` keeps the shares apart (`tfidf`, `embed`, `priority`, `keyword`,
-`suggest`); an entry in the trie sets `priority` to `keywordBoost` (1.5) and reports the
-extra half as `keyword`, which is what `explainTag` splits and `explanationText` prints.
+qualified. `TagParts` keeps the shares apart (`tfidf`, `embed`, `textRank`,
+`clusterRank`, `priority`, `keyword`, `suggest`); an entry in the trie sets `priority`
+to `keywordBoost` (1.5) and reports the extra half as `keyword`, which is what
+`explainTag` splits and `explanationText` prints. A channel whose weight is 0
+contributes 0 and is left out of the tooltip rather than printed as `0.00`.
 
 Weights live in `DEFAULT_TAG_SCORE` and are overridable per call; none is persisted.
-`minScore` 0.05, `topK` 8.
+`minScore` 0.05, `topK` 8 — the `rstext` preset raises both, because a TextRank value is
+a normalized centrality and almost every token of a row clears 0.05.
 
 ### Lexical: TF-IDF
 
@@ -68,24 +77,42 @@ minus `URL_STOP`. Term weight is sublinear (`1 + log tf`), IDF is
 centroid of its neighbours' vectors. With no neighbours the centroid falls back to the
 row itself, so the channel reads 1 instead of dropping out.
 
-### Lexical: FlashText trie
+### Lexical: TurboText (Aho–Corasick) trie
 
-`KeywordTagger` is the FlashText seam: a trie of the priority tags plus the surface forms
-in `srctag/keywords.md`, scanned once per row, longest match wins, and a match consumes
-its span so one occurrence cannot yield two tags. A Latin keyword may not sit inside a
+`TurboTextTagger` (also exported as `KeywordTagger`) is the keyword seam: an
+Aho–Corasick automaton over the priority tags plus the surface forms in
+`srctag/keywords.md`. Failure links make one left-to-right pass find every occurrence of
+every keyword, so a scan costs O(text) whatever the dictionary holds and overlapping or
+nested keywords are all reported. `match` keeps the older FlashText reading — longest
+form wins and a match consumes its span, so one occurrence cannot yield two tags — while
+`matchAll` and `counts` expose the automaton's whole output, which is what a caller
+ranking terms by how often a keyword recurs needs. A Latin keyword may not sit inside a
 longer word (`art` in `cart` fails the boundary test); an adjacent CJK character is
 allowed, because CJK has no word spacing. `keywordEntries` gives each tag itself, its
 hyphen/underscore form as spaced words, and any synonym the caller supplies;
 `parseKeywordDoc` reads the `## tag` + `- keyword` document.
 
-### Not implemented: TextRank
+### TextRank centrality
 
-There is no graph centrality anywhere in this layer — no co-occurrence graph, no
-PageRank-style ranking of tokens — and no function named TextRank, TurboText, RAKE or
-YAKE. A co-occurrence ranking would be a *static* channel: deterministic, local, and
-fusable like TF-IDF, either as a new `TagParts` share or as a re-ranking of `topK`.
-Today the nearest thing is the FlashText trie's `keywordBoost`, which is a fixed 1.5
-rather than a computed importance.
+`textRank(tokens, opts)` walks a co-occurrence graph: an edge joins two tokens at most
+`window` apart, weighted by how often that pair recurs, and every node spreads its weight
+over its neighbours in proportion to those weights — a PageRank over the token graph.
+Scores are normalized by the highest one, so the top token always reads 1. The weighting
+is what keeps a short title from collapsing: four distinct nouns in one title form a
+complete graph, and an unweighted walk would call every one of them equally central.
+Defaults live in `DEFAULT_TEXTRANK` — `window` 4, `damping` 0.85, `iterations` 30 with an
+early stop at 1e-4 — and `tagRows` passes `opts.rank` through to them.
+
+Two channels use it. `textRank` walks the row's own tokens and needs no corpus, which is
+exactly its advantage over TF-IDF: a row's score does not depend on how rare its
+neighbours made the term, so a burst of sibling links cannot flatten it. `clusterRank`
+walks the neighbour window's pooled tokens and is gated on the row's own copy of the
+term, so the burst can lift a tag the row already carries but can never introduce one —
+the same rule the priority list follows.
+
+A co-occurrence graph is still a lexical reading. RAKE, YAKE and any stemming-based
+phrase extractor appear nowhere in this layer, and `dedupeTags`' plural strip is the only
+stemming there is.
 
 ### Fallback: hashEmbed
 
@@ -103,7 +130,7 @@ globally, in first-appearance order. Which rows count as cards is the caller's c
 the app uses `type === 'md' && ref.startsWith('pin')`, the predicate in
 `src/ui/cardTab.tsx`.
 
-### Window and clusters
+### Window, clusters, and the domain bucket
 
 `TagWindowConfig.dim` chooses the ordering — `tid` (insert order), `dt`/`modAt`, or
 `rec.visitTime`, read through the typo `rec.visitTIme` and the keys of
@@ -118,6 +145,13 @@ no stamp for the chosen dimension reads 0, so undated rows sort together and can
 one burst of their own.
 
 `onlyTids` restricts which rows are *reported*, not which rows feed a window.
+
+`opts.bucket: 'domain'` is a different axis from `dim`: `groupByDomain` splits the set by
+hostname (`rowDomain`, `www.` stripped) and `tagRows` scores each site as its own working
+set, so a row's peers are its site's rows rather than its neighbours in the array. This
+is the reading a burst of sibling search results needs — those rows share vocabulary, so
+a neighbour window finds the same terms everywhere. A bucketed run wraps the `EmbedFn`
+in `memoEmbed`, so no title is embedded twice across the sites that hold it.
 
 ### Post-processing
 
@@ -236,8 +270,9 @@ reporting each failure as a line instead of throwing.
 import, so a row's only route to the static half is that global. It exposes `tagRows`,
 `tagRowsForPinSave`, `tagRowsInteractive`, `tagSweepRows`, `planTagUpdates`,
 `commitTagUpdates`, `dexieTagPort`, `customTagPort`, `pinPriorityTags`,
-`loadAdaptersFromStore`, `keywordEntries`, `parseKeywordDoc`, `tokenize` and `rankTags`,
-so a row can score rows *and* write tags without reimplementing either.
+`loadAdaptersFromStore`, `keywordEntries`, `parseKeywordDoc`, `tokenize`, `rankTags`,
+`textRank`, `summarizeTagRun`, `groupByDomain` and `rowDomain`, so a row can score rows,
+read the graph channels, and write tags without reimplementing any of it.
 
 ### Authoring a row from the agent chat
 
@@ -270,6 +305,60 @@ suggested, because `rowSources` reads a row's `txt` and URLs and not its `tags`.
 `suffix_*` a candidate would mean feeding `row.tags` into the token sources, which is a
 behaviour change for every existing row, not a script change.
 
+## Measuring a channel set (`test/srctag-cdp.test.ts`)
+
+Choosing between the channels is a measurement, not a preference, and the measurement runs
+against the user's own table. `test/srctag-cdp.test.ts` connects to the browser on
+`:9222`, reads the live `tagDB_0` out of the page at `localhost:5173`, and runs `tagRows`
+in Node over those rows, so the working set is the tabs the user actually has. The first
+describe replays the `src`-row bodies; the second, `hybrid sweep over the live working
+set`, is the comparison:
+
+- every channel set in `CHANNEL_CASES`, one ordering each — `tfidf` as the baseline,
+  `textrank` on `tid`/`dt`/`visitTime`/`domain`, a `hybrid` mix, and the `rstext` preset;
+- `HYPER_CASES`, which move one knob at a time around `RSTEXT_TAG_SCORE` — `topK`,
+  `minScore`, the window radius, the TextRank window and damping, `burstGap`, and the
+  effect of dropping `clusterRank`, dropping the priority channel, or putting TF-IDF back;
+- the dynamic pair, `rstext+embed` and `hybrid+embed+classify`, over a 24-row sample
+  because the classifier costs one request per row.
+
+`summarizeTagRun` folds a run into the printed numbers: rows, rows that kept a tag, empty
+rows, suggestions, distinct tags, mean and max score, priority hits, the share each
+channel contributed, and the tags that spread widest. The channel shares come from
+`explainTag`, so they add up to the run's score total. Each run also gets its wall time
+and its Jaccard overlap with the baseline, which is the number that says whether two
+channel sets are telling the user the same thing.
+
+The dynamic path is exercised twice over. The sweep reports what the live store holds, and
+when it holds no adapter row the same code runs against a stub provider the test starts on
+`127.0.0.1`: the real `srctag/embed.js` and `srctag/classify.js` bodies load through
+`loadAdaptersFromStore`, resolve their Base URL out of a synthetic `secret.md`, post the
+real request shapes, and their replies feed the fusion. `SRCTAG_CDP_LIMIT`,
+`SRCTAG_API_SAMPLE` and `SRCTAG_SKIP_API=1` trim the run; `pnpm vitest run
+test/srctag-cdp.test.ts --reporter=verbose` prints the tables into `test.log`.
+
+What the live table (1499 rows, one pin card with six tags) showed on 2026-10-08, before
+any tuning:
+
+| Case | rows scored | suggestions | distinct | mean | max | ms |
+|---|---|---|---|---|---|---|
+| `tfidf` | 175 | 801 | 561 | 0.126 | 0.958 | 155 |
+| `textrank` | 1499 | 10643 | 4921 | 0.898 | 1.907 | 870 |
+| `textrank@domain` | 1499 | 10644 | 4479 | 0.982 | 2.250 | 550 |
+| `rstext` | 1499 | 6958 | 2519 | 0.692 | 1.750 | 579 |
+
+Three facts fall out of that. TF-IDF leaves 1324 of 1499 rows with nothing to suggest,
+while TextRank keeps the default cut-off trivial — every row clears `minScore` 0.05, which
+is why `RSTEXT_TAG_SCORE` raises it to 0.4 and `topK` to 5. On the same table `minScore
+0.02` and `minScore 0.2` are then indistinguishable (7188 and 7186 suggestions), and
+`minScore 0.7` is what starts to bite (1237 rows kept, 262 empty), so a TextRank-driven
+preset's cut-off belongs an order of magnitude above the TF-IDF default. And `clusterRank`
+is not decoration: dropping it moves 31% of the tags the preset proposes.
+
+The sweep is the selection step, not the answer. Which cut-off, window, and weight mix is
+right for a user depends on their own table, which is why the numbers are printed per
+hyperparameter rather than frozen into a constant.
+
 ## Write path
 
 `planTagUpdates` turns results into `{ tags, rec }`. `add` only adds, `replaceAuto` also
@@ -290,17 +379,17 @@ carrying it merges in.
 | agent chat, user-picked rows | `tagRowsInteractive(rows, tids)` | `tid` |
 | extension tab sweep | `tagSweepRows(rows)` | `tid` |
 | rest-list chips (`rstag`) | `tagRowReports(rows)` via `ui/restGrouper.restTagMap` | `tid` |
+| rest-list chips (`rstext`) | `tagRowReports(rows)` via `ui/restGrouper.restTextMap` | `visitTime`, bucketed by domain |
 | rule comparison (`run_src`) | `run_src('srctag/suggest.js')` | all four, side by side |
 
 All of them are `tagRows` with defaults; `onlyTids`, `priorityTags`, `synonyms`, `embed`,
-`embeddings`, `classify` and `labels` are per-call options.
+`embeddings`, `classify`, `labels`, `rank` and `bucket` are per-call options.
 
 `tagRowReports` is the read-only entry point: it scores with the lexical channels alone
 unless `embed`/`classify` is injected, and returns one `RowTagReport` per row — the window
 and cluster the score was measured in, plus one `TagExplanation` per tag. `explainTag`
 splits a suggestion into its channel shares, so `channels[].contribution` adds up to
 `score`, and `explanationText` formats that as the hover text.
-
 Written tags land in the `*tags` MultiEntry index that `iq` and `availableDas` read, so a
 tag write is immediately a filter crumb; `rec.tagAuto` is read by nothing in the read
 path. The userbar search box tags the rows its dropdown shows (`src/ui/tagApply.ts`): the
@@ -323,9 +412,23 @@ same color that chip uses. That color is `getColorChar11`'s hue lifted, because 
 is dark and the function draws tags at lightness 0.2 for the filled chips the hover
 preview and cs1 paint. The rows' own tags seed the trie's priority channel, so a row that
 carries `react` still lends `react` to its neighbours. Nothing is written, and a chip's
-`title` carries `explanationText`: the score, the `tfidf`/`embed`/`priority`/`flashtext`/
-`classify` shares, the neighbour window, and the reminder that the tag is only a
-suggestion. Persisting one is still the search box's job.
+`title` carries `explanationText`: the score, the `tfidf`/`embed`/`textrank`/
+`clusterrank`/`priority`/`turbotext`/`classify` shares, the neighbour window, and the
+reminder that the tag is only a suggestion. Persisting one is still the search box's job.
+
+## Read-only chips (`restGrouper: 'rstext'`)
+
+`rstext` renders the same blocks and the same chips from a different pass. Where `rstag`
+reads a row against its `tid` neighbours with TF-IDF carrying the score, `restTextMap`
+runs `RSTEXT_TAG_SCORE` — TF-IDF and embeddings off, `textRank` and `clusterRank` on —
+with `bucket: 'domain'` and the `visitTime` window, so a row is read against its own
+site and the terms it shares with the rest of that site. The chips and their tooltips are
+identical; only the numbers differ, and the `rstext` tooltip shows no `tfidf` line because
+that channel contributes 0.
+
+Both groupers keep `rsdt`'s blocks, so the mode is a decoration layer and the list paints
+before the tags arrive. `restTagStore` receives whichever pass ran, so the userbar
+omnibox's suggestion zone ranks the same reports either way.
 
 ## Review notes
 
@@ -340,23 +443,33 @@ Findings from moving and re-reading this material, worth knowing before changing
 - `pinTags` ends a tag at a hyphen, so `#machine-learning` becomes `machine`.
 - `hashEmbed` is a fallback signal, not an embedding; a sweep that never injects an
   `EmbedFn` still reports a non-zero `embed` share.
-- "TextRank", "TurboText", RAKE and YAKE appear nowhere in the code. FlashText is the
-  trie's algorithm name. A graph-centrality channel is an open idea (above), not a
-  missing wiring.
+- The keyword matcher is an Aho–Corasick automaton (`TurboTextTagger`, exported twice as
+  that name and as `KeywordTagger`); RAKE and YAKE appear nowhere in the code.
+- TextRank is implemented as a *weighted* walk on purpose. An unweighted walk over a
+  four-token title lands on a complete graph and reports every token as equally central,
+  which is indistinguishable from no ranking at all — the weight is what makes the channel
+  do anything on titles this short.
+- `clusterRank` can never introduce a tag: it is gated on the row's own copy of the term,
+  the same rule the priority channel follows. A tag a sibling row has and this row does
+  not is not a candidate here, and the sweep for a domain bucket confirms it.
 - `vecs` is declared in the schema and counted in `sdb.stat()`'s stats line, but no vector
   is written to it or read from it; the cache that exists is `embedWithCache`'s
   caller-supplied `TagVectorCache`.
 - The `srctag/*` rows reach `srctag`'s fusion only through `globalThis.srctag`, so a row
   run outside the app (a test, a worker) must have the API published for it or it returns
   an error object rather than throwing.
+- A bucketed run calls the `EmbedFn` once per site, so an embedder that bills per request
+  pays per site holding a new title. `memoEmbed` keeps that from costing a request per
+  duplicate title; a single request for the whole table is not what this path does.
 - Live check on a real table (400-row window, pin cards excluded): 299 rows scored, 53
   `suffix_*` buckets, ranking `suffix_*` > `dt` > `tid` > `visitTime`. Reproduce with
   `npx vitest run test/srctag-cdp.test.ts --reporter=verbose --silent=false`, which reads
   the running app's own IndexedDB over CDP and runs the rows in the page as well as in
-  Node.
+  Node. The same file's second describe is the channel and hyperparameter sweep (above).
 
 ## Related
 
 - `docs/filter_search.md` — the read path these tags feed.
 - `docs/recr-agloop.md` — `run_src`, the `rwr` gate, and `secret.md`.
-- `src/srctag.ts`, `src/srctagRows.ts`, `src/runsrc.ts`, `src/ui/tagApply.ts`.
+- `src/srctag.ts`, `src/srctagRows.ts`, `src/runsrc.ts`, `src/ui/restGrouper.ts`,
+  `src/ui/tagApply.ts`.

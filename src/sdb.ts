@@ -81,8 +81,8 @@ export let treeCacOpts: Record<string, string[]> = {
   'cardSeer': ['cs1', 'cs2'],
   // `snap_pin` options are the recent CDN snapshots, cached here by the settings menu.
   'snap_pin': [],
-  // `rsdt`/`rsid`/`rsess`/`rstag` are built in; `restGroupers/...` refs are appended from `db.das` at render.
-  'restGrouper': ['rsdt', 'rsid', 'rsess', 'rstag', 'none'],
+  // `rsdt`/`rsid`/`rsess`/`rstag`/`rstext` are built in; `restGroupers/...` refs are appended from `db.das` at render.
+  'restGrouper': ['rsdt', 'rsid', 'rsess', 'rstag', 'rstext', 'none'],
   'provider-model': ['Default'],
 };
 
