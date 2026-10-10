@@ -33,8 +33,8 @@ flowchart TD
 | `cardSeer` | `'cs2'` | pin rows render the cropped preview row (`Cs2Renderer`) |
 | `restGrouper` | `'rsdt'` (default) | rest rows split into one block per exact `dt`, newest first (`src/ui/restGrouper.ts`) |
 | `restGrouper` | `'rsid'` | `rsdt` plus one visit-time subgroup per exact `rec.visitTime` inside each date block; rows without a visit time stay under the date heading |
-| `restGrouper` | `'rstag'` | the `rsdt` blocks unchanged, plus each row's `srctag` suggestions as dotted-outline chips; hovering a chip names the channels that produced it ([sTag.md](sTag.md#read-only-chips-restgrouper-rstag)) |
-| `restGrouper` | `'rstext'` | the same blocks and chips scored by the TextRank channels instead: TF-IDF off, each site's rows scored as their own working set on the visit-time window ([sTag.md](sTag.md#read-only-chips-restgrouper-rstext)) |
+| `restGrouper` | `'rstag'` / `'rstext'` | the `rsdt` blocks unchanged, plus each row's `srctag` suggestions as dotted-outline chips in a cropped, scrollable strip (solid and italic for a promoted `parent/theme` sub-tag); hovering a chip names the channels that produced it and every scored row proposing it ([sTag.md](sTag.md#read-only-chips-restgrouper-rstag)) |
+| `restGrouper` | `'rsfreq'` / `'rstrank'` / `'rstt'` | the same blocks and chips scored by one channel family instead of the fused mix — TF-IDF, the two TextRank walks, or the TurboText trie — with the pin cards' `#tag` headings as the priority tags, the aim pass on, and a visualization switch plus hyperparameters above the blocks ([sTag.md](sTag.md#algorithm-groupers-rsfreq-rstrank-rstt)) |
 | `restGrouper` | `'none'` or empty | rest rows render flat, without headings |
 | `restGrouper` | any other ref | the `type='src'` row of that ref returns the blocks; a block carries `items`, `subgroups`, or both. A missing row, a throwing body, or a result that is not an array of blocks falls back to flat |
 

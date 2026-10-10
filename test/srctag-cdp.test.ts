@@ -19,13 +19,15 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { createServer } from 'node:http';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { runBody, type RecrScriptContext } from '../src/runsrc';
 import { SRCTAG_ROW_SEEDS, SRCTAG_SUGGEST_BODY, SRCTAG_SUGGEST_DS_BODY, SRCTAG_ROW_REFS } from '../src/srctagRows';
 import {
-  RSTEXT_TAG_SCORE, embedBatch, installSrctagGlobal, loadAdaptersFromStore, mergeTagScore, pinPriorityTags,
-  rowSources, summarizeTagRun, tagRows, tokenize, urlTokens,
-  type ClassifyFn, type EmbedFn, type TagDim, type TagRow, type TagScoreConfig,
-  type TagWindowConfig, type TextRankOptions,
+  DEFAULT_TAG_AIM, RSTEXT_TAG_SCORE, applyTagAim, embedBatch, installSrctagGlobal, loadAdaptersFromStore,
+  mergeTagScore, pinPriorityTags, rowSources, summarizeTagAim, summarizeTagRun, tagRows, tokenize, urlTokens,
+  type ClassifyFn, type EmbedFn, type TagAimConfig, type TagDim, type TagRow, type TagRowResult,
+  type TagScoreConfig, type TagWindowConfig, type TextRankOptions,
 } from '../src/srctag';
 
 /** IndexedDB the app opens, and the table its rows live in. */
@@ -564,6 +566,7 @@ function printTable(results: SweepResult[], title: string): void {
   console.info(`[srctag-sweep] ${title}`);
   console.info('[srctag-sweep] ' + COLUMNS
     .map(([name, width, right]) => (right ? padL(name, width) : pad(name, width))).join(' '));
+  const rows: string[][] = [];
   for (const r of results) {
     const cells: string[] = [
       r.key, r.dim, String(r.rows), String(r.scored), String(r.empty), String(r.suggested),
@@ -573,8 +576,187 @@ function printTable(results: SweepResult[], title: string): void {
     console.info('[srctag-sweep] ' + COLUMNS
       .map(([, width, right], i) => (right ? padL(cells[i], width) : pad(cells[i], width))).join(' '));
     console.info(`[srctag-sweep]   ${r.key} channels: ${r.shares}${r.note ? ` — ${r.note}` : ''}`);
+    rows.push([...cells, r.shares]);
   }
+  SECTIONS.push({ title, headers: [...COLUMNS.map(([name]) => name), 'channels'], rows });
 }
+
+// ─── Aim pass ──────────────────────────────────────────────────────────────
+
+/** One aim case: the two knobs it moves, and what the pass left behind. */
+interface AimCase {
+  key: string;
+  /** `aimMin` the case ran with; the off case reports the raw scores' own cut-off. */
+  aimMin: number;
+  promoteMin: number;
+  rows: number;
+  /** Rows that kept no tag. */
+  untagged: number;
+  /** Rows keeping at least one curated tag. */
+  prio: number;
+  /** Mean tags kept per row that kept at least one. */
+  perTagged: number;
+  /** The same mean over the scored tags alone, without the promoted sub-tags. */
+  focusPer: number;
+  /** Rows carrying a promoted sub-tag, and how many distinct sub-tags exist. */
+  subRows: number;
+  subTags: number;
+  ms: number;
+}
+
+/** The aim cases the sweep runs: the pass off, then one knob at a time. */
+const AIM_CASES: { key: string; cfg: Partial<TagAimConfig> | false }[] = [
+  { key: 'off', cfg: false },
+  { key: 'aimMin 0.2', cfg: { aimMin: 0.2 } },
+  { key: 'aimMin 0.4', cfg: { aimMin: 0.4 } },
+  { key: 'aimMin 0.7', cfg: { aimMin: 0.7 } },
+  { key: 'promoteMin 2', cfg: { promoteMin: 2 } },
+  { key: 'promoteMin 3', cfg: { promoteMin: 3 } },
+  { key: 'promoteMin 4', cfg: { promoteMin: 4 } },
+];
+
+/** The printed aim columns, one header and one row format. */
+const AIM_COLUMNS: [string, number, boolean][] = [
+  ['case', 15, false], ['aimMin', 7, true], ['promote', 8, true], ['rows', 6, true],
+  ['untagged', 9, true], ['prio', 6, true], ['focus/row', 10, true], ['tags/row', 9, true],
+  ['sub rows', 9, true], ['sub tags', 9, true], ['ms', 7, true],
+];
+
+/** One line per aim case, so `test.log` carries the whole grid. */
+function printAimTable(cases: AimCase[], title: string): void {
+  console.info(`[srctag-sweep] ${title}`);
+  console.info('[srctag-aim] ' + AIM_COLUMNS
+    .map(([name, width, right]) => (right ? padL(name, width) : pad(name, width))).join(' '));
+  const rows: string[][] = [];
+  for (const c of cases) {
+    const cells = [
+      c.key, c.aimMin.toFixed(2), String(c.promoteMin), String(c.rows), String(c.untagged),
+      String(c.prio), c.focusPer.toFixed(2), c.perTagged.toFixed(2), String(c.subRows),
+      String(c.subTags), `${c.ms}ms`,
+    ];
+    console.info('[srctag-aim] ' + AIM_COLUMNS
+      .map(([, width, right], i) => (right ? padL(cells[i], width) : pad(cells[i], width))).join(' '));
+    rows.push(cells);
+  }
+  SECTIONS.push({ title, headers: AIM_COLUMNS.map(([name]) => name), rows });
+  AIM_ROWS.splice(0, AIM_ROWS.length, ...cases);
+}
+
+// ─── Artifacts ─────────────────────────────────────────────────────────────
+
+/** One printed table, kept so a run can also write it to disk. */
+interface ArtifactSection {
+  title: string;
+  headers: string[];
+  rows: string[][];
+}
+
+/** Where a sweep writes its measurement; `SRCTAG_SWEEP_OUT` overrides the directory. */
+const SWEEP_DIR = process.env.SRCTAG_SWEEP_OUT ?? 'test-artifacts';
+
+/** Tables this run printed, in the order it printed them. */
+const SECTIONS: ArtifactSection[] = [];
+/** The aim grid, for the chart. */
+const AIM_ROWS: AimCase[] = [];
+
+/** A section's rows as a Markdown table. */
+function markdownTable(section: ArtifactSection): string {
+  const head = `| ${section.headers.join(' | ')} |`;
+  const rule = `| ${section.headers.map(() => '---').join(' | ')} |`;
+  const body = section.rows.map((r) => `| ${r.map((c) => c.replace(/\|/g, '\\|')).join(' | ')} |`);
+  return [head, rule, ...body].join('\n');
+}
+
+/**
+ * The aim grid as a horizontal bar chart: one row per case, the kept share of the
+ * table in blue with the rows carrying a promoted sub-tag overlaid in green.
+ *
+ * @param cases the aim cases the run measured
+ * @returns the SVG document
+ */
+function aimChart(cases: AimCase[]): string {
+  const width = 720;
+  const rowH = 26;
+  const top = 34;
+  const barX = 250;
+  const barW = 340;
+  const height = top + cases.length * rowH + 24;
+  const bars = cases.map((c, i) => {
+    const y = top + i * rowH;
+    const kept = c.rows > 0 ? (c.rows - c.untagged) / c.rows : 0;
+    const sub = c.rows > 0 ? c.subRows / c.rows : 0;
+    return [
+      `<text x="8" y="${y + 15}" class="k">${c.key}</text>`,
+      `<rect x="${barX}" y="${y + 4}" width="${barW}" height="16" class="track"/>`,
+      `<rect x="${barX}" y="${y + 4}" width="${(barW * kept).toFixed(1)}" height="16" class="kept"/>`,
+      `<rect x="${barX}" y="${y + 4}" width="${(barW * sub).toFixed(1)}" height="16" class="sub"/>`,
+      `<text x="${barX + barW + 8}" y="${y + 16}" class="n">`
+        + `${c.rows - c.untagged} kept · ${c.untagged} untagged · ${c.subTags} sub-tags</text>`,
+    ].join('');
+  });
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+    '<style>',
+    '  .t { fill: #dbe4f0; font: 13px system-ui, sans-serif; }',
+    '  .k, .n { fill: #9fb0c6; font: 11px system-ui, sans-serif; }',
+    '  .track { fill: rgba(255,255,255,0.10); }',
+    '  .kept { fill: rgba(120,170,255,0.55); }',
+    '  .sub { fill: rgba(150,230,170,0.60); }',
+    '</style>',
+    `<rect width="${width}" height="${height}" fill="#15181d"/>`,
+    `<text x="8" y="20" class="t">srctag aim pass over the live table</text>`,
+    ...bars,
+    '</svg>',
+  ].join('\n');
+}
+
+/** The whole measurement as one dated Markdown document. */
+function sweepMarkdown(date: string): string {
+  return [
+    '# srctag sweep over the live table',
+    '',
+    `Recorded ${date} by \`test/srctag-cdp.test.ts\` against the running app on \`localhost:5173\`.`,
+    'Rows, channel sets and dates come from that page’s own IndexedDB, so the numbers are',
+    'this table’s, not a fixture’s. Re-record with:',
+    '',
+    '```sh',
+    'npx vitest run test/srctag-cdp.test.ts --reporter=verbose --silent=false',
+    '```',
+    '',
+    ...SECTIONS.flatMap((s) => [`## ${s.title}`, '', markdownTable(s), '']),
+    '## aim pass',
+    '',
+    '![aim pass](srctag-sweep.svg)',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Write the run's tables and chart, and say where.
+ *
+ * A run that skipped — no page, no CDP — has nothing to write, and writes
+ * nothing.
+ *
+ * @param date the run's date, as the document prints it
+ */
+async function writeArtifacts(date: string): Promise<void> {
+  if (SECTIONS.length === 0) return;
+  const dir = resolve(SWEEP_DIR);
+  await mkdir(dir, { recursive: true });
+  const md = join(dir, 'srctag-sweep.md');
+  await writeFile(md, sweepMarkdown(date), 'utf8');
+  const written = [md];
+  if (AIM_ROWS.length > 0) {
+    const svg = join(dir, 'srctag-sweep.svg');
+    await writeFile(svg, aimChart(AIM_ROWS), 'utf8');
+    written.push(svg);
+  }
+  console.info(`[srctag-sweep] wrote ${written.join(', ')}`);
+}
+
+afterAll(async () => {
+  await writeArtifacts(new Date().toISOString().slice(0, 10));
+});
 
 describe('hybrid sweep over the live working set', () => {
   /** Rows the sweep scores: the live table without the pin cards. */
@@ -718,6 +900,61 @@ describe('hybrid sweep over the live working set', () => {
     expect(b.result.suggested).toBe(a.result.suggested);
     expect(b.result.shares).toBe(a.result.shares);
   }, 120_000);
+
+  it('focuses the table and promotes its bursts, one knob at a time', async ({ skip }) => {
+    if (down) {
+      console.warn(`[srctag-sweep] skipped: ${down}`);
+      skip();
+    }
+    /*
+     * The aim pass is what the groupers run by default, so the sweep scores the
+     * table once and reads it through every aim case. `tid` is the ordering the
+     * block list uses, which is the burst a promote group is cut from.
+     */
+    const score = rstextScore();
+    const base: TagRowResult[] = await tagRows(sweepRows as TagRow[], {
+      score, priorityTags, window: { dim: 'tid' },
+    });
+
+    const cases: AimCase[] = [];
+    for (const c of AIM_CASES) {
+      const started = performance.now();
+      const list = c.cfg === false
+        ? base
+        : applyTagAim(base, c.cfg, mergeTagScore(score).minScore);
+      const ms = Math.round(performance.now() - started);
+      const stats = summarizeTagAim(list);
+      const tagged = stats.rows - stats.untagged;
+      const kept = list.reduce((n, r) => n + r.suggestions.length, 0);
+      const scored = list.reduce((n, r) => n + r.suggestions.filter((s) => s.parts.group <= 0).length, 0);
+      cases.push({
+        key: c.key,
+        aimMin: c.cfg === false || c.cfg.aimMin === undefined ? DEFAULT_TAG_AIM.aimMin : c.cfg.aimMin,
+        promoteMin: c.cfg === false || c.cfg.promoteMin === undefined
+          ? DEFAULT_TAG_AIM.promoteMin : c.cfg.promoteMin,
+        rows: stats.rows,
+        untagged: stats.untagged,
+        prio: stats.priority,
+        perTagged: tagged > 0 ? kept / tagged : 0,
+        focusPer: tagged > 0 ? scored / tagged : 0,
+        subRows: list.filter((r) => r.suggestions.some((s) => s.parts.group > 0)).length,
+        subTags: stats.subTags.length,
+        ms,
+      });
+    }
+
+    printAimTable(cases, `aim pass over ${sweepRows.length} live rows · priority from ${prioritySource} (${priorityTags.length} tags)`);
+    const at = (key: string) => cases.find((c) => c.key === key)!;
+    // every case accounts for every row, and focus can only ever remove a tag
+    for (const c of cases) expect(c.untagged, c.key).toBeLessThanOrEqual(c.rows);
+    expect(at('aimMin 0.2').untagged).toBeLessThanOrEqual(at('aimMin 0.4').untagged);
+    expect(at('aimMin 0.4').untagged).toBeLessThanOrEqual(at('aimMin 0.7').untagged);
+    expect(at('aimMin 0.4').focusPer).toBeLessThanOrEqual(at('off').focusPer);
+    expect(at('aimMin 0.7').focusPer).toBeLessThanOrEqual(at('aimMin 0.4').focusPer);
+    // a lower promote threshold cannot mint fewer sub-tags than a higher one
+    expect(at('promoteMin 2').subTags).toBeGreaterThanOrEqual(at('promoteMin 4').subTags);
+    expect(at('promoteMin 2').subRows).toBeGreaterThanOrEqual(at('promoteMin 4').subRows);
+  }, 300_000);
 
   it('reports what each dynamic path did, without failing when it cannot reach a provider', async ({ skip }) => {
     if (down) {

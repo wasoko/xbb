@@ -17,16 +17,32 @@ Two methodologies produce the evidence, and they differ in cost and in who can a
 The static half is the default and the fallback: it runs with no network at all, so a
 missing adapter or a missing key degrades the score instead of stopping a sweep.
 
+What the evidence is *for* is two rules, and they are what the rest list's tag
+groupers apply by default ([the aim pass](#the-aim-pass-focus-and-promote)):
+
+- **Focus** — a title is about a few curated tags or about none of them. A suggestion
+  survives only if the priority half carried it, or if it clears a stricter second
+  cut-off (`aimMin`); everything else is dropped, and a row left with nothing stays
+  untagged.
+- **Promote** — a term more than two rows of one burst-and-tag group propose is a
+  direction, not a tag: the group mints it as `parent/theme`, so the sub-tag says which
+  of the curated tags those rows were filed under.
+
+The scores themselves are still what the tuner moves. The two aims are what turn a
+ranked list into a small number of chips.
+
 ```mermaid
 flowchart TB
   R[("db.das rows")] --> T["tagRows(rows, opts)"]
   S["src/srctag.ts<br/>static channels"] --> T
   D["type='src' rows<br/>runBody(ctx)"] -->|"embed / classify fns"| T
+  V[("db.embs content-keyed<br/>vectors")] -->|"embedWithCache"| T
   P["pin md cards<br/>#tag headings"] -->|"priorityTags"| T
   K["srctag/keywords.md"] -->|"synonyms"| T
   T --> F["scoreTagsForRow + rankTags"]
-  F --> W["planTagUpdates to a TagWritePort"]
-  F --> E["explainTag: hover text, rstag/rstext chips"]
+  F --> A["applyTagAim: focus + promote"]
+  A --> W["planTagUpdates to a TagWritePort"]
+  A --> E["explainTag: hover text, rstag/rstext chips"]
   C["agent chat write_file"] -->|"new adapter row"| D
   U["Tag adapters (smoke) menu"] -->|"seedTagRows"| D
 ```
@@ -47,6 +63,7 @@ one file serve the webapp, a `run_src` row, and a copy inside the tabext extensi
 | TextRank | `textRank()` over the row's own tokens: a weighted co-occurrence graph, normalized by its top rank | 0 |
 | Burst TextRank (`clusterRank`) | the same walk over the neighbour window's pooled tokens, gated on the row's own copy of the term | 0 |
 | Priority tags | `#tag` tokens in pin md-card headings (`pinPriorityTags`, the same rules `Cs1Renderer` renders) | 0.20 |
+| TurboText trie (`keyword`) | a keyword match's own weight, added on top of the `keywordBoost` factor the priority channel already applies | 0 |
 | Classifier labels | an injected `ClassifyFn` | 0.10 |
 
 The two TextRank weights are 0 by default, so the default sweep is unchanged and pays
@@ -57,10 +74,13 @@ preset that turns them on and TF-IDF off, and `rstext` is the read path built on
 **only** a token of the row's own text, a keyword-trie match, or a classifier label —
 the priority list cannot introduce a tag on its own, it only lifts one that already
 qualified. `TagParts` keeps the shares apart (`tfidf`, `embed`, `textRank`,
-`clusterRank`, `priority`, `keyword`, `suggest`); an entry in the trie sets `priority`
+`clusterRank`, `priority`, `keyword`, `suggest`, plus `group` for a sub-tag the aim pass
+promoted); an entry in the trie sets `priority`
 to `keywordBoost` (1.5) and reports the extra half as `keyword`, which is what
-`explainTag` splits and `explanationText` prints. A channel whose weight is 0
-contributes 0 and is left out of the tooltip rather than printed as `0.00`.
+`explainTag` splits and `explanationText` prints; the `keyword` **weight** is the trie
+channel's own, 0 everywhere except `rstt`, and a match adds it on top of that boost rather
+than replacing it. A channel whose weight is 0 contributes 0 and is left out of the
+tooltip rather than printed as `0.00`.
 
 Weights live in `DEFAULT_TAG_SCORE` and are overridable per call; none is persisted.
 `minScore` 0.05, `topK` 8 — the `rstext` preset raises both, because a TextRank value is
@@ -92,6 +112,39 @@ allowed, because CJK has no word spacing. `keywordEntries` gives each tag itself
 hyphen/underscore form as spaced words, and any synonym the caller supplies;
 `parseKeywordDoc` reads the `## tag` + `- keyword` document.
 
+`TrieOptions` moves three things. `distance` is a fuzzy budget: a window of the text
+within that many edits (insert, delete, substitute) of a form matches it, which is a
+bounded Levenshtein comparison against every form, so the scan costs
+O(text × forms × distance) in place of the automaton's O(text) — off unless a caller asks.
+`overlap` picks which of the candidates that match then survive: `greedy` is the FlashText
+reading above, and `optimal` keeps the non-overlapping set with the largest total matched
+length, by weighted interval scheduling. `caseSensitive` (default false) asks a form to
+match the text's letter case, which needs the case-preserving NFKC text the automaton
+already scans alongside the folded one. Only `match` consults any of them; `matchAll` and
+`counts` stay the full exact output. With none set, `match` runs the original scan
+unchanged.
+
+An entry carries three options of its own. `weight` (read as at least 1) multiplies the
+priority lift one match gives the tag, so `rstt`'s channel can emphasise one entry without
+suppressing another; `case` overrides `caseSensitive` for that entry; and `block: true`
+makes a match *suppress* its tag, which `match` and `counts` honour by dropping the hit
+while `matchAll` still reports it. `parseKeywordDoc` reads all three out of the same
+document, so an existing `## tag` + `- keyword` file parses to exactly the entries it
+always did:
+
+```md
+## react
+* weight: 2
+- react
+! react native
+```
+
+Overlap can only arise where the boundary test admits it, so it is a CJK phenomenon in
+practice: in `汉字学习机器` with forms `汉字学习`, `汉字` and `学习机器`, greedy takes the
+four-character `汉字学习` and optimal takes `汉字` plus `学习机器`, because 2 + 4 beats 4.
+In one Latin word the test rejects every candidate that would end mid-word, so two
+keywords inside `cart` cannot both match.
+
 ### TextRank centrality
 
 `textRank(tokens, opts)` walks a co-occurrence graph: an edge joins two tokens at most
@@ -100,8 +153,9 @@ over its neighbours in proportion to those weights — a PageRank over the token
 Scores are normalized by the highest one, so the top token always reads 1. The weighting
 is what keeps a short title from collapsing: four distinct nouns in one title form a
 complete graph, and an unweighted walk would call every one of them equally central.
-Defaults live in `DEFAULT_TEXTRANK` — `window` 4, `damping` 0.85, `iterations` 30 with an
-early stop at 1e-4 — and `tagRows` passes `opts.rank` through to them.
+Defaults live in `DEFAULT_TEXTRANK` — `window` 4, `damping` 0.85, `iterations` 30, stopped
+early once no score moves by more than `tol` (1e-4) — and `tagRows` passes `opts.rank`
+through to them. Every one of those four is a knob the tuner moves.
 
 Two channels use it. `textRank` walks the row's own tokens and needs no corpus, which is
 exactly its advantage over TF-IDF: a row's score does not depend on how rare its
@@ -119,6 +173,32 @@ stemming there is.
 `hashEmbed` is a 64-bin character histogram, unit-normalized. It is what the embedding
 channel degrades to when no `EmbedFn` is configured, so the channel keeps a weak lexical
 signal rather than disappearing; it is not a learned embedder and carries no semantics.
+
+### The vector cache (`db.embs`)
+
+`embedWithCache(embed, model, texts, cache)` asks the cache for each text first and
+embeds only the misses, so a repeated sweep pays for new rows alone. The cache owns the
+key: it is handed `(model, text)` and derives its own, because a vector is a pure function
+of its text — the same title in two rows is one vector, and an edited title is a different
+key rather than a stale hit.
+
+`src/vecCache.ts` is that store over `db.embs`, whose schema version 13 keys a row by
+`[hash+mdl]` with `mdl` indexed: `{ hash, mdl, vec }`, the hash being `textHash(text)` —
+sixteen hex characters from two independently mixed 32-bit hashes of the NFKC text, case
+kept. The table is a new one rather than a re-key of `vecs`: Dexie aborts an upgrade that
+changes a table's primary key (`UpgradeError: Not yet support for changing primary key`),
+so the same version deletes the row-keyed `vecs` and creates `embs` — nothing ever wrote
+the old one, and `sdb.stat()` now counts embeddings per model.
+`modelVecCache(model)` primes one `mdl`
+namespace into a `Map` and returns a `TagVectorCache` over it, so the synchronous `get`
+a scoring pass needs is satisfied while misses are written back through Dexie. It also
+reports `primed` and `written()`, which is what the panel's `rstag` status line prints.
+`mapVectorCache()` is the same interface with no store behind it, for a caller that has
+none.
+
+The namespace is the adapter row (`srctag/embed.js`), not a provider model: that is the
+identity this side can see, so pointing the row at another model through `secret.md`
+reuses the older vectors until the table is cleared.
 
 ### Priority tags from pin cards
 
@@ -163,6 +243,62 @@ The lower-scored of such a pair is the one that goes, which is why `react` beats
 while `ml` and `mlx` coexist: the containment test needs both sides long enough.
 `rankTags` filters below `minScore`, de-duplicates, then slices to `topK` — so a row's
 final list is at most eight tags, each with its explanation still attached.
+
+### The aim pass: focus and promote
+
+`applyTagAim(results, cfg, minScore)` is the step between `rankTags` and the report, and
+it is what the rest list's five tag groupers run by default. `tagRows` never calls it, so
+a raw sweep and a `run_src` row see the scored list unchanged.
+
+**Focus** keeps a suggestion whose `parts.priority > 0` — a trie match, or a tag the
+resolved priority list names — and every other suggestion only at or above `aimMin`
+(`DEFAULT_TAG_AIM.aimMin`, 0.4, raised to at least the run's own `minScore`). A row whose
+list survives nothing carries nothing, which is the point: the untagged share is an
+outcome, not a failure.
+
+**Promote** then groups the rows by `dim#cluster#anchor`, where the anchor is the
+highest-ranked tag focus left the row with, and counts tags over the **pre-focus**
+suggestion lists. A tag more than `promoteMin - 1` rows of a group propose (default 3,
+"more than two rows") becomes `anchor + sep + theme` (`sep` `/`), appended to every row
+of that group; a group with no anchor — the untagged rows of one burst — mints the bare
+theme. Only the `promoteTop` most widespread themes of a group are minted (default 2), and
+a sub-tag the row already carries, or already keeps, is skipped.
+
+Three properties are deliberate:
+
+- Evidence comes from *before* the focus cut, so the filter cannot erase the signal it is
+  reading. The consequence is that a sub-tag is always a term that row was already scored
+  on, never a term only some sibling supplies.
+- The anchor is not its own theme, so a group never mints `react/react`.
+- A promoted sub-tag is a synthetic suggestion: `parts.group` is the number of rows that
+  proposed the theme and every other channel is 0, so `explainTag` reports one `theme`
+  channel whose contribution is the group size and `channels[].contribution` still adds up
+  to `score`. `TagExplanation.origin` is `'sub'`, which is what `cardTab.tsx` keys the
+  solid-border chip off.
+
+`summarizeTagAim` folds a pass into `{ rows, untagged, histogram, priority, subTags }`,
+and `srctagApi()` publishes `applyTagAim`, `summarizeTagAim`, `textHash` and
+`mapVectorCache` so a `type='src'` row can drive them.
+
+The defaults were measured on the live table on 2026-10-10 (1499 rows, one pin card, the
+`rstext`-style score, `tid` window) — see [the aim grid](test-artifacts/srctag-sweep.md):
+
+| case | untagged | tags kept / row | rows with a sub-tag | distinct sub-tags |
+|---|---|---|---|---|
+| aim off | 0 | 4.47 | 0 | 0 |
+| `aimMin` 0.4 (default) | 0 | 5.12 | 573 | 77 |
+| `aimMin` 0.7 | 8 | 2.24 | 1164 | 48 |
+| `promoteMin` 2 | 0 | 5.53 | 834 | 253 |
+| `promoteMin` 4 | 0 | 4.94 | 412 | 35 |
+
+Two facts fall out of it. `aimMin` 0.4 is inert on a TextRank-scored family, because a
+normalized centrality puts most of a row's tokens near 1 — the same reason
+`RSTEXT_TAG_SCORE` raises `minScore`, and 0.7 is where it starts to bite. And `promoteTop`
+is not decoration either: without it the `tid` ordering, which cuts a cluster only where
+two consecutive insert ids are more than `burstGap` (1) apart, makes one cluster of the
+whole table, and the `aimMin` 0.7 case minted 53 sub-tags per row instead of 2.24. The
+groupers read `dt`/`visitTime` burst structure through their own window switch; a
+`tid` window pools everything.
 
 ## B. Dynamic scripts (`type='src'` through `run_src` / `runBody`)
 
@@ -246,13 +382,11 @@ answers `/v1/embeddings`, and a chat-completions-only endpoint will fail at call
 The same providers are reachable without a row: `createEmbedClient` (OpenAI-compatible),
 `createSiliconFlowEmbed`, `createOpenRouterEmbed`, `createCloudflareEmbed`,
 `createClassifierDevClassify`, plus `embedBatch` for chunking and `embedWithCache` with a
-caller-supplied `TagVectorCache` memoizing per `model|text`. These are for callers that
-hold a key directly — `test/srctag.test.ts` is the only one today — and they are what the
-rows re-implement as text; the app itself goes through the rows, because that is the half a
-user can change without a build. The `vecs` table (`[tid+mdl]`) is declared and appears in
-`sdb.stat()`'s stats line, but nothing writes or reads a vector there: the cache in use is
-the caller-supplied `TagVectorCache`, and a vector stored per row would go stale on any
-text edit anyway.
+caller-supplied `TagVectorCache` — the app's own is `src/vecCache.ts` over `db.embs`
+(above), and `mapVectorCache()` is the in-memory one. These are for callers that hold a key
+directly — `test/srctag.test.ts` is the only one today — and they are what the rows
+re-implement as text; the app itself goes through the rows, because that is the half a
+user can change without a build.
 
 ### Seeding, smoke, clearing
 
@@ -271,8 +405,10 @@ import, so a row's only route to the static half is that global. It exposes `tag
 `tagRowsForPinSave`, `tagRowsInteractive`, `tagSweepRows`, `planTagUpdates`,
 `commitTagUpdates`, `dexieTagPort`, `customTagPort`, `pinPriorityTags`,
 `loadAdaptersFromStore`, `keywordEntries`, `parseKeywordDoc`, `tokenize`, `rankTags`,
-`textRank`, `summarizeTagRun`, `groupByDomain` and `rowDomain`, so a row can score rows,
-read the graph channels, and write tags without reimplementing any of it.
+`textRank`, `summarizeTagRun`, `groupByDomain`, `rowDomain`, `applyTagAim`,
+`summarizeTagAim`, `textHash` and `mapVectorCache`, so a row can score rows, read the
+graph channels, focus and promote the result, and write tags without reimplementing any
+of it.
 
 ### Authoring a row from the agent chat
 
@@ -320,7 +456,14 @@ set`, is the comparison:
   `minScore`, the window radius, the TextRank window and damping, `burstGap`, and the
   effect of dropping `clusterRank`, dropping the priority channel, or putting TF-IDF back;
 - the dynamic pair, `rstext+embed` and `hybrid+embed+classify`, over a 24-row sample
-  because the classifier costs one request per row.
+  because the classifier costs one request per row;
+- `AIM_CASES`, which read one scored table through the aim pass — off, then one knob at a
+  time: `aimMin` 0.2 / 0.4 / 0.7, `promoteMin` 2 / 3 / 4.
+
+Every printed table is also written to `test-artifacts/srctag-sweep.md`, with the aim grid
+as `test-artifacts/srctag-sweep.svg`; `SRCTAG_SWEEP_OUT` moves the directory, and a run
+that skipped writes nothing at all. Both files are committed, so a sweep on a different
+table shows up as a diff.
 
 `summarizeTagRun` folds a run into the printed numbers: rows, rows that kept a tag, empty
 rows, suggestions, distinct tags, mean and max score, priority hits, the share each
@@ -378,16 +521,19 @@ carrying it merges in.
 | pin card saved | `tagRowsForPinSave(pins, rows)` | `visitTime` |
 | agent chat, user-picked rows | `tagRowsInteractive(rows, tids)` | `tid` |
 | extension tab sweep | `tagSweepRows(rows)` | `tid` |
-| rest-list chips (`rstag`) | `tagRowReports(rows)` via `ui/restGrouper.restTagMap` | `tid` |
-| rest-list chips (`rstext`) | `tagRowReports(rows)` via `ui/restGrouper.restTextMap` | `visitTime`, bucketed by domain |
+| rest-list chips (`rstag`) | `tagRowReports(rows)` via `ui/restGrouper.restProfileMap` (its profile), or `restTagMap` for the aim-free pass | `tid` |
+| rest-list chips (`rstext`) | the same, through its own profile | `visitTime`, bucketed by domain |
+| rest-list chips (`rsfreq`/`rstrank`/`rstt`) | the same, with the pin cards' `#tag` headings as the priority tags and the aim pass on | the tuner's window, `tid` by default |
 | rule comparison (`run_src`) | `run_src('srctag/suggest.js')` | all four, side by side |
 
 All of them are `tagRows` with defaults; `onlyTids`, `priorityTags`, `synonyms`, `embed`,
-`embeddings`, `classify`, `labels`, `rank` and `bucket` are per-call options.
+`embeddings`, `classify`, `labels`, `rank`, `bucket`, `urls`, `trie` and `aim` are per-call
+options.
 
 `tagRowReports` is the read-only entry point: it scores with the lexical channels alone
-unless `embed`/`classify` is injected, and returns one `RowTagReport` per row — the window
-and cluster the score was measured in, plus one `TagExplanation` per tag. `explainTag`
+unless `embed`/`classify` is injected, runs the aim pass when `opts.aim` asks for it, and
+returns one `RowTagReport` per row — the window and cluster the score was measured in, the
+trie hits it read, plus one `TagExplanation` per tag. `explainTag`
 splits a suggestion into its channel shares, so `channels[].contribution` adds up to
 `score`, and `explanationText` formats that as the hover text.
 Written tags land in the `*tags` MultiEntry index that `iq` and `availableDas` read, so a
@@ -403,32 +549,148 @@ unwired.
 ## Read-only chips (`restGrouper: 'rstag'`)
 
 `rstag` is `rsdt` plus a tag layer: the blocks come from `groupByDt` synchronously, while
-`ui/restGrouper.restTagMap` scores the newest 200 rows in a live query and returns
+`ui/restGrouper.restProfileMap` scores the newest 200 rows in a live query and returns
 `Map<tid, RowTagReport>`, dropping any tag a row already carries. Each report's tags
 render **in front of** its row as dotted-outline chips (`src/ui/cardTab.tsx`), so a tag
-reads as the delimiter of the item it precedes, and the row carries a capline — an
-overline, the opposite of the hover underline — in its leading tag's color, which is the
-same color that chip uses. That color is `getColorChar11`'s hue lifted, because the panel
-is dark and the function draws tags at lightness 0.2 for the filled chips the hover
-preview and cs1 paint. The rows' own tags seed the trie's priority channel, so a row that
-carries `react` still lends `react` to its neighbours. Nothing is written, and a chip's
-`title` carries `explanationText`: the score, the `tfidf`/`embed`/`textrank`/
-`clusterrank`/`priority`/`turbotext`/`classify` shares, the neighbour window, and the
-reminder that the tag is only a suggestion. Persisting one is still the search box's job.
+reads as the delimiter of the item it precedes. A chip the aim pass promoted (`origin
+=== 'sub'`) draws with a solid border and italic text instead, so a `parent/theme` reads
+as a direction rather than as a term the row's own text scored. The strip is cropped to a
+fixed width and
+scrolls the way a preview row does, so a row with many suggestions cannot widen the list,
+and the chip nearest the row drops its right border, so the box reads as open against the
+item it delimits. There is no capline on the row, and the chip color is
+`getColorChar11`'s hue mixed 70% toward the row text color, for text and border alike,
+because the panel is dark and the function draws tags at lightness 0.2 for the filled
+chips the hover preview and cs1 paint. The rows' own tags seed the trie's priority
+channel, so a row that carries `react` still lends `react` to its neighbours — this pass
+and `rstext` read the priority tags off the scored rows, where the algorithm groupers
+read them off the pin cards. The aim pass is off here: the pair's job is to show what the
+fused channels would propose, not to cut it down. Nothing is written, and a chip's `title`
+carries `explanationText`: the score, the `tfidf`/`embed`/`textrank`/`clusterrank`/
+`priority`/`turbotext`/`classify`/`theme` shares, the neighbour window, and the reminder
+that the tag is only a suggestion — followed by `suggested by <n>` and the `txt` of every
+scored row whose report proposes that tag (`restTagContributors`), so a suggestion is read
+against the items that produced it. Persisting one is still the search box's job.
 
 ## Read-only chips (`restGrouper: 'rstext'`)
 
 `rstext` renders the same blocks and the same chips from a different pass. Where `rstag`
-reads a row against its `tid` neighbours with TF-IDF carrying the score, `restTextMap`
-runs `RSTEXT_TAG_SCORE` — TF-IDF and embeddings off, `textRank` and `clusterRank` on —
-with `bucket: 'domain'` and the `visitTime` window, so a row is read against its own
+reads a row against its `tid` neighbours with TF-IDF carrying the score, the `rstext`
+profile runs `RSTEXT_TAG_SCORE` — TF-IDF and embeddings off, `textRank` and `clusterRank`
+on — with `bucket: 'domain'` and the `visitTime` window, so a row is read against its own
 site and the terms it shares with the rest of that site. The chips and their tooltips are
 identical; only the numbers differ, and the `rstext` tooltip shows no `tfidf` line because
 that channel contributes 0.
 
-Both groupers keep `rsdt`'s blocks, so the mode is a decoration layer and the list paints
-before the tags arrive. `restTagStore` receives whichever pass ran, so the userbar
-omnibox's suggestion zone ranks the same reports either way.
+Both read paths are ordinary `RestTagProfile`s, so `cardTab.tsx` reaches them through the
+same `restProfileMap` the algorithm groupers use, with their own tuner strip and panel.
+`restTagMap` and `restTextMap` remain as the aim-free passes they always were: the
+omnibox's suggestion zone and the `rsdt`/`rsid`/`rsess` groupers — which carry no profile —
+still call `restTagMap`, and a script or a test can call either without asking for the aim
+pass.
+
+All five chip groupers keep `rsdt`'s blocks under the `chips` reading, so the mode is a
+decoration layer and the list paints before the tags arrive. `restTagStore` receives
+whichever pass ran, so the userbar omnibox's suggestion zone ranks the same reports either
+way.
+
+## Algorithm groupers (`rsfreq`, `rstrank`, `rstt`)
+
+The three algorithm groupers are the same decoration layer over the same `rsdt` blocks,
+with one family of the static channels carrying the score instead of the fused mix, the
+pin cards' `#tag` headings as the priority tags, and the aim pass — focus and promote — on
+by default, because cutting the list down to a few chips is what this view is for:
+
+| Grouper | Carries the score | Channels it weighs |
+|---|---|---|
+| `rsfreq` | TF-IDF against the neighbour centroid | `tfidf`, `priority` |
+| `rstrank` | the row's own TextRank walk and the burst's | `textRank`, `clusterRank`, `priority` |
+| `rstt` | the TurboText Aho–Corasick trie | `keyword`, `priority` |
+
+The aim defaults are one setting for three score families, so `aimMin` is the knob to
+calibrate per grouper: 0.4 bites a TF-IDF-scored list and is inert on a TextRank one,
+where a normalized centrality puts most tokens near 1 (see the aim grid above).
+
+`rstt` is why `TagScoreConfig` gained a `keyword` weight. The trie's matches are a
+candidate list either way, but until a weight existed a match could only lift the priority
+channel; with one, a keyword the row's text contains and the priority list never named can
+carry a tag on its own, which is what a TurboText reading is. The default is 0, so the
+other presets are unchanged.
+
+A priority tag still cannot introduce a candidate by itself. It reaches the row through
+the trie — a priority tag is a keyword entry like any other — so a link whose title never
+mentions the pin card's word is proposed nothing.
+
+The priority tags come from `pinPriorityTags(pins)` rather than from the scored rows' own
+tags, because a pin card is the user's own statement of what the links are about. A table
+with no pin card falls back to the rows' own tags, so the trie is never empty.
+
+The rows' URLs are out of the inputs by default here (`urls` on the tuner, `TagRowsOptions.urls`
+under it). A hostname label or a path segment is the noisiest evidence a link row has —
+scoring `react.dev/learn` and `vuejs.org/guide` as text proposes `dev`, `learn` and `guide` all
+through the list — while the title is what names the item. The toggle puts the URL back,
+which is also what `rstag`/`rstext` still do. What remains is `txt` plus any Markdown link
+in it, so a CJK title contributes sliding bigrams; nothing here is Latin-only.
+
+### The tuner (`src/ui/restTuner.tsx`)
+
+Each of the five profiled groupers renders an always-editable strip above its panel:
+`RestTuner`, mounted by `cardTab.tsx` whenever `REST_PROFILES[restGrouper]` exists. Every
+value is component state (`RestHyperState`), so an experiment costs a keystroke and a
+reload restores the grouper's `RestTagProfile`; nothing is written to `db.tree`, and
+`reset` restores the profile. A number box keeps the text being typed and commits every
+parseable keystroke, so a half-typed `0.` is not overwritten by the value it came from.
+
+| Control | What it moves |
+|---|---|
+| `viz` | which reading the panel below draws, and — for `priority` and `themes` — which blocks the list renders; first on the bar because it changes what the list is telling the reader at all |
+| `aim` | whether the aim pass runs; the profile decides by default |
+| `aimMin`, `promote ≥`, `themes ≤` | `TagAimConfig.aimMin` and `promoteMin` / `promoteTop`, shown while aim is on |
+| `dyn` | loads the store's `srctag/*` adapters into the pass; offered only where a dynamic channel carries weight (`restDynCapable`), which is `rstag` |
+| `window` | `tid`, `dt`, `visitTime`, or `domain` — the last is `visitTime` restricted to the row's own hostname, the reading `rstext` is fixed on |
+| `urls` | `TagRowsOptions.urls`: whether the row's `ref` and its Markdown links feed the channels |
+| the profile's knobs | one weight per channel that family scores with |
+| `topK`, `min` | `TagScoreConfig.topK` and `minScore` |
+| `rows` | how many of the newest rows the pass scores |
+| `graph w`, `damp`, `iters`, `tol`, `minLen` | the `TextRankOptions` of both graph channels, on the groupers that use them |
+| `fuzz`, `overlap` | `TrieOptions.distance` and `overlap`, on `rstt` |
+
+The window switch is the whole difference between `rstrank` and `rstext`: the same
+channels, read against different evidence; `graph w` is the TextRank co-occurrence window,
+which is a different knob from the neighbour window `window` selects. `test/restGrouper.test.ts`
+covers the fold (a knob the profile does not expose is left alone), the profiles
+reproducing the two read-path passes, the aim defaults and the `dyn` gate, the trie
+carrying a `rstt` row, the pin-card priority tags and their fallback, the URL toggle both
+ways, a `minLen` floor that takes a token out of the graph, and the window switch — the
+last on titles, because the URLs it once read are off.
+
+### The visualization panel (`src/ui/restViz.tsx`)
+
+Between the tuner and the blocks sits a panel whose header is the same in every reading:
+rows, rows scored, rows that kept nothing, and the tags-per-title histogram, drawn as
+inline SVG. The body follows the `viz` switch:
+
+| Reading | Body | Blocks |
+|---|---|---|
+| `chips` | a line saying the tag layer stays beside each row | kept: `rsdt` |
+| `priority` | rows on a curated tag vs none, and bars per kept tag, the priority-backed ones in a second color | replaced by `priority tag kept` / `no tag kept` / `unscored` |
+| `themes` | one line per burst-and-anchor group carrying a shared theme, with its terms | replaced by one block per group |
+| `channels` | one bar per channel, split by its share of the pass's total contribution | kept: `rsdt` |
+| `keywords` | the surface forms the trie matched, with row counts and an example title | kept: `rsdt` |
+
+`src/ui/restVizData.ts` holds the readings as pure functions over the rows and the pass's
+reports — `tagsPerTitle`, `priorityCoverage`, `themeGroups`, `channelShares`,
+`keywordHits`, plus `vizBlocks`, which turns the two partitioning readings into blocks.
+Every row lands in exactly one block, and rows the pass's 200-row cap left unscored get a
+trailing `unscored` block rather than disappearing. A theme is counted by the same rule
+the promote half uses, so the panel shows the signal behind a sub-tag whether or not aim
+minted one, and the `themes` reading is the place to calibrate `promoteMin` and
+`themes ≤`.
+
+The `rstag` panel also carries the `dyn` flag's status: which adapters the store held, the
+`AdapterSet.errors` lines for the ones it did not, and the vector cache's `primed` and
+`written` counts. A failed adapter degrades the pass to its static channels — a scoring
+call never throws over one — and turning `dyn` off restores the lexical-only reading.
 
 ## Review notes
 
@@ -452,9 +714,22 @@ Findings from moving and re-reading this material, worth knowing before changing
 - `clusterRank` can never introduce a tag: it is gated on the row's own copy of the term,
   the same rule the priority channel follows. A tag a sibling row has and this row does
   not is not a candidate here, and the sweep for a domain bucket confirms it.
-- `vecs` is declared in the schema and counted in `sdb.stat()`'s stats line, but no vector
-  is written to it or read from it; the cache that exists is `embedWithCache`'s
-  caller-supplied `TagVectorCache`.
+- The `keyword` weight is not a rename of `keywordBoost`. `keywordBoost` still scales the
+  priority channel on a match, so `explainTag` keeps splitting that boost into a base
+  `priority` share and a `turbotext` share; the `keyword` weight is added on top, and a
+  report's `channels[].contribution` still adds up to its score.
+- `vecs` was replaced rather than re-keyed: Dexie refuses an upgrade that changes a
+  table's primary key, so schema version 13 deletes `vecs` and creates `embs`
+  (`[hash+mdl]`, `mdl` indexed), which `modelVecCache` in `src/vecCache.ts` is the
+  `TagVectorCache` the `dyn` embedder runs behind. The namespace is the adapter row, not a
+  provider model, so a provider switched inside `secret.md` reuses that row's older
+  vectors until the table is cleared. `test/vecCache.test.ts` opens a version-12 store and
+  upgrades it, which is the case that would otherwise abort at boot.
+- The aim pass's promote half reads `cluster`, and `clusterRows` cuts on `burstGap` in the
+  row's own dimension. On `tid` that gap is 1, so two consecutive insert ids can never be
+  further apart and the whole working set is one cluster; a promote group is then "every
+  row sharing the anchor". `promoteTop` is what keeps that from burying a row in sub-tags,
+  and the window switch is what gives the grouping real burst structure.
 - The `srctag/*` rows reach `srctag`'s fusion only through `globalThis.srctag`, so a row
   run outside the app (a test, a worker) must have the API published for it or it returns
   an error object rather than throwing.

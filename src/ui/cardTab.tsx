@@ -8,7 +8,10 @@ import { RECR_TYPE } from '../recrConst';
 import { recrRowLabel, recrTargetOf, type RecrTarget } from '../sessionTree';
 import { cardDoubleClick, Cs1Renderer, matchedRefsByPins } from './cs1';
 import { setTip, TipHost, TIP_ATTR } from './Tip';
-import { dtMs, groupRest, isRestGrouperScript, restGroupsFor, restTagMap, restTagStore, restTextMap, RSSESS_GROUPER, RSTAG_GROUPER, RSTEXT_GROUPER, type RestGroup } from './restGrouper';
+import { dtMs, groupRest, isRestGrouperScript, isTagGrouper, restGroupsFor, restProfileMap, restTagContributors, restTagMap, restTagStore, restVizMode, RSSESS_GROUPER, REST_PROFILES, type RestGroup, type RestHyperState } from './restGrouper';
+import { RestTuner } from './restTuner';
+import { RestViz } from './restViz';
+import { vizBlocks } from './restVizData';
 import { explanationText, type RowTagReport } from '../srctag';
 import { useTreeCac } from './useTreeCac';
 
@@ -123,43 +126,55 @@ export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, ren
   const restGroups = syncGroups ?? scriptGroups;
 
   /*
-   * `rstag` and `rstext` keep the rsdt blocks and add srctag's suggestions as
-   * chips. The tags are scored in a live query because the lexical pass is
-   * asynchronous, and the row cap keeps a 555-row page cheap. The pass runs for
-   * every grouper — the omnibox's suggestion zone ranks the same reports — and
-   * only the chips are tag-specific.
+   * The tag groupers keep the rsdt blocks and add srctag's suggestions as chips.
+   * The tags are scored in a live query because the lexical pass is asynchronous,
+   * and the row cap keeps a 555-row page cheap. The pass runs for every grouper —
+   * the omnibox's suggestion zone ranks the same reports — and only the chips are
+   * tag-specific.
    */
-  const restTagging = restGrouper === RSTAG_GROUPER || restGrouper === RSTEXT_GROUPER;
+  const restTagging = isTagGrouper(restGrouper);
   const restTagKey = useMemo(
     () => listedRest.map((d) => `${String(d.tid)}:${d.ref}`).join('|'),
     [listedRest],
   );
+  /* Tuner overrides are component state, so an experiment costs a keystroke and a
+     reload restores the profile's defaults. */
+  const [hyperState, setHyperState] = useState<RestHyperState>({});
+  const hyper = hyperState[restGrouper];
+  const hyperKey = JSON.stringify(hyper ?? null);
+  /* `profile` is what a grouper has a pass to tune; the rest only feed the store. */
+  const profile = REST_PROFILES[restGrouper];
   const restTags = useLiveQuery(
-    async () => await (restGrouper === RSTEXT_GROUPER
-      ? restTextMap(listedRest)
+    async () => (profile
+      ? restProfileMap(listedRest, restGrouper, hyper, { pins: pinRows })
       : restTagMap(listedRest)),
-    [restTagKey, restGrouper],
+    [restTagKey, restGrouper, hyperKey, profile !== undefined],
     new Map<number, RowTagReport>(),
+  );
+  /* The panel's reading; `priority` and `themes` also replace the `rsdt` blocks. */
+  const viz = profile ? restVizMode(profile, hyper) : undefined;
+  const vizGroups = useMemo(
+    () => (viz ? vizBlocks(viz, listedRest, restTags) : undefined),
+    [viz, restTagKey, restTags],
+  );
+  /* Which rows propose each tag, for the chip tooltips. */
+  const restContributors = useMemo(
+    () => restTagContributors(listedRest, restTags),
+    [listedRest, restTags],
   );
   useEffect(() => { restTagStore.set(restTags, listedRest); }, [restTags, restTagKey]);
 
   const renderRestRow = (d: Da) => {
     const report = restTagging && d.tid !== undefined ? restTags.get(d.tid) : undefined;
-    const top = report?.tags[0];
     return (
       /* A fragment, not a div: `.da-row` is inline-block and `.rest-group` has no
          rule, so same-block rows flow on one line until they wrap. */
       <React.Fragment key={d.ref + String(d.tid)}>
         {/* A tag precedes the row it delimits, so the chips read as the row's key. */}
-        {report && report.tags.length > 0 && <DynamicTagChips report={report} />}
-        <Cs2Renderer
-          da={d}
-          onSelectTag={onSelectTag}
-          onJump={onJump}
-          selectedRef={selectedRef}
-          tip
-          {...(top ? { capline: tagCue(top.tag) } : {})}
-        />
+        {report && report.tags.length > 0 && (
+          <DynamicTagChips report={report} contributors={restContributors} />
+        )}
+        <Cs2Renderer da={d} onSelectTag={onSelectTag} onJump={onJump} selectedRef={selectedRef} tip />
       </React.Fragment>
     );
   };
@@ -201,7 +216,18 @@ export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, ren
         )}
 
         <div className="rest-das">
-          {restGroups.map((g) => (
+          {profile && (
+            <RestTuner
+              grouper={restGrouper}
+              hyper={hyper}
+              onChange={(h) => setHyperState((s) => ({ ...s, [restGrouper]: h }))}
+            />
+          )}
+          {viz && (
+            <RestViz grouper={restGrouper} mode={viz} rows={listedRest} reports={restTags}
+              dyn={hyper?.dyn === true} />
+          )}
+          {(vizGroups ?? restGroups).map((g) => (
             <div key={g.key} className="rest-group">
               <RestGroupHead label={g.label} />
               {g.items.map(renderRestRow)}
@@ -259,19 +285,16 @@ function RestGroupHead({ label, level = 1 }: { label: string; level?: 1 | 2 }) {
  * @param props.selectedRef - Ref currently open, rendered as selected.
  * @param props.tip - Whether the row opens the hover preview instead of the native
  *   `title`; the pin-row caller leaves it off, the rest-list caller sets it.
- * @param props.capline - Tag color of the capline drawn over the row, tying it to
- *   the tag chips rendered in front of it.
  * @returns The preview row element.
  */
 function Cs2Renderer({
-  da, onSelectTag, onJump, selectedRef, tip = false, capline,
+  da, onSelectTag, onJump, selectedRef, tip = false,
 }: {
   da: Da;
   onSelectTag: (ref: string) => void;
   onJump: (target: RecrTarget) => void;
   selectedRef?: string;
   tip?: boolean;
-  capline?: string;
 }) {
   const [isHovered, setIsHovered] = useState(false);
   /* recr rows hold JSON; their label comes from the turn the row names, not from the text. */
@@ -287,15 +310,7 @@ function Cs2Renderer({
     cursor: 'pointer',
     ...PREVIEW_CROP,
     ...(selectedRef === da.ref ? { background: SELECTED_BG } : {}),
-    ...(capline
-      /* The capline is the opposite of the hover underline, and carries the color
-         of the tag rendered in front of the row. */
-      ? {
-        textDecoration: isHovered ? 'underline overline' : 'overline',
-        textDecorationColor: capline,
-        textDecorationThickness: '2px',
-      }
-      : { textDecoration: isHovered ? 'underline' : 'none' }),
+    textDecoration: isHovered ? 'underline' : 'none',
   };
   const hover = {
     onMouseEnter: () => setIsHovered(true),
@@ -346,9 +361,8 @@ function Cs2Renderer({
 /**
  * The tag's own hue, lifted for the dark panel. `getColorChar11` draws a tag at
  * lightness 0.2 — right for the filled chips the hover preview and cs1 paint,
- * too close to the panel color for an outline or a 2px line — so the same hue is
- * mixed toward the row text color. Chip and capline share it, which is what ties
- * a row to the tag in front of it.
+ * too close to the panel color for an outline — so the same hue is mixed toward
+ * the row text color. Chip text and border share it.
  */
 const tagCue = (tag: string): string =>
   `color-mix(in srgb, ${getColorChar11(tag)} 70%, rgb(230, 236, 244))`;
@@ -356,8 +370,10 @@ const tagCue = (tag: string): string =>
 /**
  * A `rstag` chip: a suggestion `srctag` found, not a tag the row carries. An
  * outline-only dotted border keeps it apart from the filled `#tag` buttons the
- * persisted tags render as, and the tag color is what the row's capline repeats.
- * The native title carries the channel breakdown, so a chip holds no state.
+ * persisted tags render as. Border longhands rather than the `border` shorthand,
+ * because the last chip of a strip unsets its right side. The native title
+ * carries the channel breakdown and the rows that proposed the tag, so a chip
+ * holds no state.
  */
 const DYNAMIC_CHIP: React.CSSProperties = {
   display: 'inline-block',
@@ -365,32 +381,79 @@ const DYNAMIC_CHIP: React.CSSProperties = {
   padding: '0 5px',
   borderRadius: 4,
   background: 'transparent',
-  border: '1px dotted',
+  borderWidth: 1,
+  borderStyle: 'dotted',
   fontSize: '0.78em',
   cursor: 'help',
   whiteSpace: 'nowrap',
 };
 
 /**
- * The `srctag` suggestions of one rest row, rendered in front of that row.
- * Hovering a chip names the channels that produced it; nothing here is written
- * to the store.
+ * Chip strip: cropped to a fixed width and scrolled, the way a preview row is, so
+ * a row with many suggestions cannot widen the list.
+ */
+const CHIP_STRIP: React.CSSProperties = {
+  display: 'inline-block',
+  maxWidth: 'max(33.33%, 222px)',
+  overflowX: 'auto',
+  overflowY: 'hidden',
+  whiteSpace: 'nowrap',
+  verticalAlign: 'bottom',
+  marginRight: 2,
+};
+
+/**
+ * A promoted sub-tag's chip: same hue, but a solid border and italic text, so a
+ * `parent/theme` the aim pass minted is not read as a term the row's own text
+ * scored.
+ */
+const SUB_CHIP: React.CSSProperties = {
+  borderStyle: 'solid',
+  fontStyle: 'italic',
+};
+
+/**
+ * The `srctag` suggestions of one rest row, rendered in front of that row. The
+ * chip nearest the row drops its right border, so the box reads as open against
+ * the item it delimits instead of boxing the item off. Hovering a chip names the
+ * channels that produced the tag and every scored row that proposes it;
+ * nothing here is written to the store.
  *
- * @param props.report - Row report returned by `restTagMap`.
+ * @param props.report - Row report returned by the rest pass.
+ * @param props.contributors - Rows proposing each tag, for the hover text.
  * @returns The chip strip, or nothing when the row has no suggestion.
  */
-function DynamicTagChips({ report }: { report: RowTagReport }) {
+function DynamicTagChips({ report, contributors }: {
+  report: RowTagReport;
+  contributors?: Map<string, Da[]>;
+}) {
   return (
-    <span className="rest-tag-chips" style={{ display: 'inline-block', marginRight: 4 }}>
-      {report.tags.map((t) => (
-        <span
-          key={t.tag}
-          style={{ ...DYNAMIC_CHIP, color: tagCue(t.tag), borderColor: tagCue(t.tag) }}
-          title={explanationText(t, { dim: report.dim, window: report.window })}
-        >
-          #{t.tag}
-        </span>
-      ))}
+    <span className="rest-tag-chips" style={CHIP_STRIP}>
+      {report.tags.map((t, i) => {
+        const rows = contributors?.get(t.tag) ?? [];
+        const title = [
+          explanationText(t, { dim: report.dim, window: report.window }),
+          ...(rows.length === 0 ? [] : [
+            `suggested by ${rows.length}:`,
+            ...rows.map((r) => r.txt || r.ref),
+          ]),
+        ].join('\n');
+        return (
+          <span
+            key={t.tag}
+            style={{
+              ...DYNAMIC_CHIP,
+              color: tagCue(t.tag),
+              borderColor: tagCue(t.tag),
+              ...(t.origin === 'sub' ? SUB_CHIP : {}),
+              ...(i === report.tags.length - 1 ? { borderRightStyle: 'none' } : {}),
+            }}
+            title={title}
+          >
+            #{t.tag}
+          </span>
+        );
+      })}
     </span>
   );
 }

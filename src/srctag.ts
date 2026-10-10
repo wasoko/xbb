@@ -73,6 +73,11 @@ export interface TagParts {
   keyword: number;
   /** Classifier score for the tag, else 0. */
   suggest: number;
+  /**
+   * Rows of one promote group that proposed this tag, for the synthetic sub-tag
+   * {@link applyTagAim} appends; 0 on every scored candidate.
+   */
+  group: number;
 }
 
 /** One scored candidate tag. */
@@ -92,6 +97,13 @@ export interface TagScoreConfig {
   clusterRank: number;
   priority: number;
   suggest: number;
+  /**
+   * Weight of the TurboText (Aho–Corasick trie) channel: what one keyword match
+   * adds on top of the {@link keywordBoost} factor the priority channel applies.
+   * 0 leaves the trie unable to carry a score on its own, which is the default
+   * for the lexical sweep; the `rstt` grouper turns it on.
+   */
+  keyword: number;
   /** Factor applied to the priority channel when a keyword match names the tag. */
   keywordBoost: number;
   /** Candidate tags kept per row. */
@@ -136,7 +148,16 @@ export interface TagRowResult {
   row: TagRow;
   suggestions: TagSuggestion[];
   window: TagWindow;
+  /** Dimension the working set was ordered on, the one {@link TagWindow} was measured in. */
+  dim: TagDim;
+  /**
+   * Burst this row belongs to. Cluster indices are unique across a whole run,
+   * including a `bucket: 'domain'` one, where each site's clusters are offset
+   * past the previous site's.
+   */
   cluster: number;
+  /** Trie hits on the row's text, the evidence the keyword channel read. */
+  keywords: KeywordMatch[];
 }
 
 // ─── Defaults ──────────────────────────────────────────────────────────────
@@ -151,7 +172,7 @@ export interface TagRowResult {
  */
 export const DEFAULT_TAG_SCORE: TagScoreConfig = {
   tfidf: 0.35, embed: 0.35, textRank: 0, clusterRank: 0, priority: 0.2, suggest: 0.1,
-  keywordBoost: 1.5, topK: 8, minScore: 0.05,
+  keyword: 0, keywordBoost: 1.5, topK: 8, minScore: 0.05,
 };
 
 /**
@@ -228,9 +249,14 @@ export interface TokenizeOptions {
   minLength?: number;
 }
 
+/** NFKC only, case preserved: the text a case-sensitive form is compared against. */
+function normalizeRaw(text: string): string {
+  return (text ?? '').normalize('NFKC');
+}
+
 /** NFKC + lowercase, so a tag and its text occurrence compare equal. */
 export function normalizeText(text: string): string {
-  return text.normalize('NFKC').toLowerCase();
+  return normalizeRaw(text).toLowerCase();
 }
 
 /**
@@ -500,8 +526,10 @@ export interface TextRankOptions {
   window?: number;
   /** Damping factor of the random walk. */
   damping?: number;
-  /** Iteration cap; the walk stops earlier once no score moves by more than 1e-4. */
+  /** Iteration cap; the walk stops earlier once no score moves by more than {@link TextRankOptions.tol}. */
   iterations?: number;
+  /** Convergence tolerance: the walk stops once no score moves by more than this. */
+  tol?: number;
   /** Tokens shorter than this are left out of the graph. */
   minLength?: number;
 }
@@ -511,7 +539,7 @@ export type TextRankConfig = Required<TextRankOptions>;
 
 /** Defaults of {@link textRank}: the usual TextRank window and damping values. */
 export const DEFAULT_TEXTRANK: TextRankConfig = {
-  window: 4, damping: 0.85, iterations: 30, minLength: 0,
+  window: 4, damping: 0.85, iterations: 30, tol: 1e-4, minLength: 0,
 };
 
 /**
@@ -575,7 +603,7 @@ export function textRank(tokens: string[], opts: TextRankOptions = {}): SparseVe
     let delta = 0;
     for (let i = 0; i < n; i++) delta = Math.max(delta, Math.abs(next[i] - score[i]));
     score = next;
-    if (delta < 1e-4) break;
+    if (delta < cfg.tol) break;
   }
 
   let max = 0;
@@ -592,6 +620,22 @@ export function textRank(tokens: string[], opts: TextRankOptions = {}): SparseVe
 export interface KeywordEntry {
   tag: string;
   keywords: string[];
+  /**
+   * Multiplier on the priority lift one match gives the tag — the `rstt` channel's
+   * own emphasis per entry. Values below 1 are read as 1, so a weight amplifies a
+   * match and never suppresses one; `block` is what suppresses.
+   */
+  weight?: number;
+  /**
+   * Case handling for this entry's forms, overriding {@link TrieOptions.caseSensitive}.
+   */
+  case?: 'sensitive' | 'insensitive';
+  /**
+   * Suppression: a match on this entry names a form that must not propose its tag.
+   * {@link TurboTextTagger.match} and {@link TurboTextTagger.counts} drop such a
+   * hit; {@link TurboTextTagger.matchAll} still reports it.
+   */
+  block?: boolean;
 }
 
 /** One trie hit. */
@@ -601,14 +645,49 @@ export interface KeywordMatch {
   form: string;
   start: number;
   end: number;
+  /** The entry's {@link KeywordEntry.weight}, when it set one. */
+  weight?: number;
+  /** True for a hit of a suppressing entry; see {@link KeywordEntry.block}. */
+  block?: boolean;
 }
+
+/** Knobs of {@link TurboTextTagger}. */
+export interface TrieOptions {
+  /**
+   * Character edits a keyword may differ by and still match — the fuzzy budget.
+   * 0 (the default) is exact matching, the automaton's own reading.
+   *
+   * A fuzzy scan costs O(text × forms × distance) bounded-Levenshtein checks,
+   * against the automaton's O(text), so it is off unless a caller asks.
+   */
+  distance?: number;
+  /**
+   * How overlapping candidates are resolved into the returned hits. `greedy`
+   * takes the longest form and consumes its span (FlashText's reading, the
+   * default); `optimal` keeps the non-overlapping candidate set with the largest
+   * total matched length, by weighted interval scheduling.
+   */
+  overlap?: 'greedy' | 'optimal';
+  /**
+   * Whether a form must match the text's letter case. False (the default) folds
+   * both sides to lower case, which is the reading every earlier caller had; an
+   * entry may override it either way with {@link KeywordEntry.case}.
+   */
+  caseSensitive?: boolean;
+}
+
+/** Defaults of {@link TrieOptions}: exact matching, greedy overlap, case folded. */
+export const DEFAULT_TRIE: Required<TrieOptions> = { distance: 0, overlap: 'greedy', caseSensitive: false };
 
 interface AcNode {
   children: Map<string, AcNode>;
   /** Longest proper suffix that is also a node; set by {@link TurboTextTagger.build}. */
   fail?: AcNode;
-  /** Terminal of a keyword, holding the tag it names and the form as written. */
-  out?: { tag: string; form: string; key: string };
+  /** Terminal of a keyword, holding what the tag needs and how the entry matches. */
+  out?: {
+    tag: string; form: string; key: string; caseSensitive: boolean;
+    weight?: number; block?: boolean;
+  };
 }
 
 const acNode = (): AcNode => ({ children: new Map() });
@@ -629,9 +708,18 @@ export class TurboTextTagger {
   private root = acNode();
   private count = 0;
   private built = false;
+  private cfg: Required<TrieOptions>;
 
-  /** @param entries tag -> surface forms to load */
-  constructor(entries: KeywordEntry[] = []) {
+  /**
+   * @param entries tag -> surface forms to load
+   * @param opts fuzzy budget, overlap resolution, and case handling
+   */
+  constructor(entries: KeywordEntry[] = [], opts: TrieOptions = {}) {
+    this.cfg = {
+      distance: Math.max(0, Math.floor(opts.distance ?? DEFAULT_TRIE.distance)),
+      overlap: opts.overlap ?? DEFAULT_TRIE.overlap,
+      caseSensitive: opts.caseSensitive ?? DEFAULT_TRIE.caseSensitive,
+    };
     this.addEntries(entries);
   }
 
@@ -640,8 +728,14 @@ export class TurboTextTagger {
     return this.count;
   }
 
-  /** Add one surface form for `tag`. A form may not be empty after normalization. */
-  add(tag: string, keyword: string): void {
+  /**
+   * Add one surface form for `tag`. A form may not be empty after normalization.
+   *
+   * @param tag tag the form proposes
+   * @param keyword surface form
+   * @param opts the entry's weight and case handling, and whether it suppresses
+   */
+  add(tag: string, keyword: string, opts: Omit<KeywordEntry, 'tag' | 'keywords'> = {}): void {
     const form = String(keyword ?? '').trim();
     const key = normalizeText(form);
     if (!key || !tag) return;
@@ -652,13 +746,24 @@ export class TurboTextTagger {
       cur = next;
     }
     if (cur.out === undefined) this.count++;
-    cur.out = { tag, form, key };
+    const weight = Math.max(1, opts.weight ?? 1);
+    cur.out = {
+      tag, form, key,
+      caseSensitive: opts.case === undefined ? this.cfg.caseSensitive : opts.case === 'sensitive',
+      ...(weight > 1 ? { weight } : {}),
+      ...(opts.block ? { block: true } : {}),
+    };
     this.built = false;
   }
 
-  /** Add every entry's forms. */
+  /** Add every entry's forms, carrying that entry's weight, case, and block. */
   addEntries(entries: KeywordEntry[]): void {
-    for (const e of entries) for (const k of e.keywords) this.add(e.tag, k);
+    for (const e of entries) {
+      const opts = { ...(e.weight !== undefined ? { weight: e.weight } : {})
+        , ...(e.case !== undefined ? { case: e.case } : {})
+        , ...(e.block ? { block: true } : {}) };
+      for (const k of e.keywords) this.add(e.tag, k, opts);
+    }
   }
 
   /** Link every node to its longest proper suffix, once per dictionary change. */
@@ -681,9 +786,40 @@ export class TurboTextTagger {
     this.built = true;
   }
 
-  /** Tags whose forms occur in `text`, deduplicated, in text order. */
+  /**
+   * Tags whose forms occur in `text`, deduplicated, in text order.
+   *
+   * The default reading is exact and greedy and runs on the automaton's own
+   * scan, so a caller that configures neither knob gets exactly the FlashText
+   * result. Setting {@link TrieOptions.distance} widens the candidate set to
+   * near-misses and {@link TrieOptions.overlap} picks which of the overlapping
+   * candidates survive. Hits of a suppressing entry are dropped here, because a
+   * caller asking for tags is not asking why one was withheld.
+   *
+   * @param text text to scan
+   * @returns the hits, in text order
+   */
   match(text: string): KeywordMatch[] {
-    const src = normalizeText(text ?? '');
+    const raw = normalizeRaw(text);
+    const src = raw.toLowerCase();
+    if (this.cfg.distance <= 0 && this.cfg.overlap === 'greedy') {
+      return this.scanGreedy(src, raw).filter(h => !h.block);
+    }
+    const exact = this.matchAll(text).filter(h => !h.block);
+    const candidates = this.cfg.distance > 0
+      ? [...exact, ...this.fuzzyMatches(src, raw, exact)]
+      : exact;
+    return this.cfg.overlap === 'optimal' ? optimalResolve(candidates) : greedyResolve(candidates);
+  }
+
+  /** Whether a terminal's hit at `[start, end)` matches the case its entry asked for. */
+  private caseOk(out: AcNode['out'], raw: string, start: number, end: number): boolean {
+    if (!out || !out.caseSensitive) return true;
+    return raw.slice(start, end) === normalizeRaw(out.form);
+  }
+
+  /** The exact, greedy scan: longest form at each position wins and consumes its span. */
+  private scanGreedy(src: string, raw: string): KeywordMatch[] {
     const out: KeywordMatch[] = [];
     let i = 0;
     while (i < src.length) {
@@ -695,11 +831,13 @@ export class TurboTextTagger {
         if (!next) break;
         cur = next;
         j++;
-        if (cur.out !== undefined && boundaryOk(src, i, j)) best = { node: cur, end: j };
+        if (cur.out !== undefined && boundaryOk(src, i, j) && this.caseOk(cur.out, raw, i, j)) {
+          best = { node: cur, end: j };
+        }
       }
       if (best) {
         const hit = best.node.out!;
-        out.push({ tag: hit.tag, form: hit.form, start: i, end: best.end });
+        out.push(hitMatch(hit, i, best.end));
         i = best.end;
         continue;
       }
@@ -708,16 +846,62 @@ export class TurboTextTagger {
     return out;
   }
 
+  /** Every surface form loaded, with the tag it names and its matching options. */
+  private forms(): { key: string; tag: string; form: string; caseSensitive: boolean }[] {
+    const out: { key: string; tag: string; form: string; caseSensitive: boolean }[] = [];
+    const stack: AcNode[] = [this.root];
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+      if (node.out) out.push(node.out);
+      for (const child of node.children.values()) stack.push(child);
+    }
+    return out;
+  }
+
+  /**
+   * Windows of `src` within {@link TrieOptions.distance} edits of a form. Exact
+   * hits are skipped, because the automaton already reported them.
+   *
+   * @param src normalized text, case folded
+   * @param raw normalized text, case preserved
+   * @param exact hits {@link matchAll} already reported
+   * @returns the near-miss hits, unsorted
+   */
+  private fuzzyMatches(src: string, raw: string, exact: KeywordMatch[]): KeywordMatch[] {
+    const d = this.cfg.distance;
+    const seen = new Set(exact.map((m) => `${m.tag}\u0000${m.start}\u0000${m.end}`));
+    const out: KeywordMatch[] = [];
+    for (const { key, tag, form, caseSensitive } of this.forms()) {
+      for (let start = 0; start < src.length; start++) {
+        for (let len = Math.max(1, key.length - d); len <= key.length + d; len++) {
+          const end = start + len;
+          if (end > src.length) break;
+          if (!boundaryOk(src, start, end)) continue;
+          if (caseSensitive && raw.slice(start, end) !== normalizeRaw(form)) continue;
+          const id = `${tag}\u0000${start}\u0000${end}`;
+          if (seen.has(id)) continue;
+          if (boundedDistance(src.slice(start, end), key, d) > d) continue;
+          seen.add(id);
+          out.push({ tag, form, start, end });
+        }
+      }
+    }
+    return out;
+  }
+
   /**
    * Every keyword occurrence in `text`, including overlapping and nested ones,
-   * from one pass over the automaton.
+   * from one pass over the automaton, and including the hits of a suppressing
+   * entry — a caller reading the full output is the one that wants to see why a
+   * form was withheld.
    *
    * @param text text to scan
    * @returns the hits in end-offset order
    */
   matchAll(text: string): KeywordMatch[] {
     this.build();
-    const src = normalizeText(text ?? '');
+    const raw = normalizeRaw(text);
+    const src = raw.toLowerCase();
     const out: KeywordMatch[] = [];
     let cur = this.root;
     for (let i = 0; i < src.length; i++) {
@@ -728,8 +912,8 @@ export class TurboTextTagger {
         const hit = node.out;
         if (!hit) continue;
         const start = i + 1 - hit.key.length;
-        if (start >= 0 && boundaryOk(src, start, i + 1)) {
-          out.push({ tag: hit.tag, form: hit.form, start, end: i + 1 });
+        if (start >= 0 && boundaryOk(src, start, i + 1) && this.caseOk(hit, raw, start, i + 1)) {
+          out.push(hitMatch(hit, start, i + 1));
         }
       }
     }
@@ -738,20 +922,35 @@ export class TurboTextTagger {
 
   /**
    * How often each tag's forms occur in `text`, counting overlapping and nested
-   * occurrences separately.
+   * occurrences separately. Suppressing entries are left out, the way
+   * {@link match} leaves them out.
    *
    * @param text text to scan
    * @returns tag -> occurrence count, keys in first-occurrence order
    */
   counts(text: string): Map<string, number> {
     const out = new Map<string, number>();
-    for (const hit of this.matchAll(text)) out.set(hit.tag, (out.get(hit.tag) ?? 0) + 1);
+    for (const hit of this.matchAll(text)) {
+      if (hit.block) continue;
+      out.set(hit.tag, (out.get(hit.tag) ?? 0) + 1);
+    }
     return out;
   }
 }
 
 /** The FlashText-era name for {@link TurboTextTagger}, kept for existing callers. */
 export { TurboTextTagger as KeywordTagger };
+
+/** One match of a terminal, carrying the entry's weight and suppression along. */
+function hitMatch(
+  out: NonNullable<AcNode['out']>, start: number, end: number,
+): KeywordMatch {
+  return {
+    tag: out.tag, form: out.form, start, end,
+    ...(out.weight !== undefined ? { weight: out.weight } : {}),
+    ...(out.block ? { block: true as const } : {}),
+  };
+}
 
 /**
  * Whether a match at `[start, end)` stands alone.
@@ -764,6 +963,75 @@ function boundaryOk(src: string, start: number, end: number): boolean {
   const after = src[end];
   const latin = (ch: string | undefined) => ch !== undefined && /[\p{L}\p{N}]/u.test(ch) && !CJK_RX.test(ch);
   return !latin(before) && !latin(after);
+}
+
+/**
+ * Levenshtein distance, abandoned as soon as it exceeds `max`.
+ *
+ * @param a first string
+ * @param b second string
+ * @param max budget above which the answer stops being interesting
+ * @returns the distance, or `max + 1` when it is larger than the budget
+ */
+function boundedDistance(a: string, b: string, max: number): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = new Array<number>(b.length + 1);
+  let cur = new Array<number>(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    cur[0] = i;
+    let best = cur[0];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+      if (cur[j] < best) best = cur[j];
+    }
+    if (best > max) return max + 1;
+    const swap = prev; prev = cur; cur = swap;
+  }
+  return prev[b.length];
+}
+
+/** Greedy overlap resolution: longest candidate first, its span consumed. */
+function greedyResolve(candidates: KeywordMatch[]): KeywordMatch[] {
+  const sorted = [...candidates]
+    .sort((a, b) => (b.end - b.start) - (a.end - a.start) || a.start - b.start);
+  const taken: KeywordMatch[] = [];
+  for (const c of sorted) {
+    if (taken.some((t) => c.start < t.end && t.start < c.end)) continue;
+    taken.push(c);
+  }
+  return taken.sort((a, b) => a.start - b.start || a.end - b.end);
+}
+
+/**
+ * Optimal overlap resolution: the non-overlapping subset with the largest total
+ * matched length, by weighted interval scheduling (weight = span length).
+ */
+function optimalResolve(candidates: KeywordMatch[]): KeywordMatch[] {
+  const sorted = [...candidates].sort((a, b) => a.end - b.end || a.start - b.start);
+  const prev = sorted.map((m) => {
+    let p = -1;
+    for (let j = 0; j < sorted.length; j++) {
+      if (sorted[j].end <= m.start) p = j;
+      else break;
+    }
+    return p;
+  });
+  const best = new Array<number>(sorted.length).fill(0);
+  const take = new Array<boolean>(sorted.length).fill(false);
+  for (let i = 0; i < sorted.length; i++) {
+    const withThis = (sorted[i].end - sorted[i].start) + (prev[i] >= 0 ? best[prev[i]] : 0);
+    const without = i > 0 ? best[i - 1] : 0;
+    best[i] = Math.max(withThis, without);
+    take[i] = withThis > without;
+  }
+  const out: KeywordMatch[] = [];
+  for (let i = sorted.length - 1; i >= 0;) {
+    if (take[i]) { out.push(sorted[i]); i = prev[i]; }
+    else i -= 1;
+  }
+  return out.sort((a, b) => a.start - b.start || a.end - b.end);
 }
 
 /**
@@ -786,11 +1054,25 @@ export function keywordEntries(tags: string[], synonyms: Record<string, string[]
   return out;
 }
 
+/** `* weight: <n>` — an entry's own multiplier, instead of `- form`'s plain form. */
+const DOC_WEIGHT_RX = /^\s*\*\s*weight\s*:\s*(\d+(?:\.\d+)?)\s*$/i;
+/** `* case: sensitive` / `* case: insensitive` — an entry's own case handling. */
+const DOC_CASE_RX = /^\s*\*\s*case\s*:\s*(sensitive|insensitive)\s*$/i;
+/** `! form` — a form that suppresses the current entry's tag rather than proposing it. */
+const DOC_BLOCK_RX = /^\s*!\s*(.+?)\s*$/;
+
 /**
- * Parse the `srctag/keywords.md` dialect: a `## tag` section holding `- keyword` items.
+ * Parse a keyword document: a `## tag` section holding `- keyword` items.
+ *
+ * Three lines extend the dialect without changing what an older document means.
+ * `* weight: <n>` and `* case: sensitive|insensitive` set the current section's
+ * {@link KeywordEntry.weight} and {@link KeywordEntry.case}, and `! form` appends
+ * a suppressing {@link KeywordEntry.block} entry for the current section's tag.
+ * A `*`-prefixed line that is neither of those two options reads as an item, the
+ * way it always did, so an existing document parses to the same entries.
  *
  * @param md document text
- * @returns one entry per heading, in document order
+ * @returns one entry per heading, in document order, plus one per `!` form
  */
 export function parseKeywordDoc(md: string): KeywordEntry[] {
   const out: KeywordEntry[] = [];
@@ -800,6 +1082,18 @@ export function parseKeywordDoc(md: string): KeywordEntry[] {
     if (heading) {
       current = { tag: heading[1], keywords: [] };
       out.push(current);
+      continue;
+    }
+    const weight = line.match(DOC_WEIGHT_RX);
+    if (weight && current) { current.weight = Number(weight[1]); continue; }
+    const kase = line.match(DOC_CASE_RX);
+    if (kase && current) {
+      current.case = kase[1].toLowerCase() as 'sensitive' | 'insensitive';
+      continue;
+    }
+    const blocked = line.match(DOC_BLOCK_RX);
+    if (blocked && current) {
+      out.push({ tag: current.tag, keywords: [blocked[1]], block: true });
       continue;
     }
     const item = line.match(/^\s*[-*]\s+(.+?)\s*$/);
@@ -1050,12 +1344,17 @@ export function scoreTagsForRow(ctx: RowContext): TagSuggestion[] {
     : undefined;
 
   const prioritySet = new Set(priority);
-  const keywordTags = new Set(keywords.map(k => k.tag));
+  /* One entry per tag: a weighted entry lifts the priority channel by that much,
+     and a tag reached by several forms keeps the strongest weight. */
+  const keywordTags = new Map<string, number>();
+  for (const k of keywords) {
+    keywordTags.set(k.tag, Math.max(keywordTags.get(k.tag) ?? 1, k.weight ?? 1));
+  }
   const suggestMap = new Map(suggestions.map(s => [s.tag, s.score]));
 
   const candidates = new Set<string>([
     ...Object.keys(own),
-    ...keywordTags,
+    ...keywordTags.keys(),
     ...suggestMap.keys(),
   ]);
 
@@ -1065,8 +1364,10 @@ export function scoreTagsForRow(ctx: RowContext): TagSuggestion[] {
   const out: TagSuggestion[] = [];
   for (const tag of candidates) {
     const tfNorm = maxWeight > 0 ? (own[tag] ?? 0) / maxWeight : 0;
-    const isKeyword = keywordTags.has(tag);
-    const prio = prioritySet.has(tag) || isKeyword ? (isKeyword ? cfg.keywordBoost : 1) : 0;
+    const word = keywordTags.get(tag);
+    const isKeyword = word !== undefined;
+    const prio = isKeyword ? cfg.keywordBoost * word
+      : (prioritySet.has(tag) ? 1 : 0);
     const parts: TagParts = {
       tfidf: tfNorm * tfidfSim,
       embed: tfNorm * embedSim,
@@ -1075,10 +1376,12 @@ export function scoreTagsForRow(ctx: RowContext): TagSuggestion[] {
       priority: prio,
       keyword: isKeyword ? 1 : 0,
       suggest: suggestMap.get(tag) ?? 0,
+      group: 0,
     };
     const score = cfg.tfidf * parts.tfidf + cfg.embed * parts.embed
       + cfg.textRank * parts.textRank + cfg.clusterRank * parts.clusterRank
-      + cfg.priority * parts.priority + cfg.suggest * parts.suggest;
+      + cfg.priority * parts.priority + cfg.keyword * parts.keyword
+      + cfg.suggest * parts.suggest;
     out.push({ tag, score, parts });
   }
   return out.sort((a, b) => b.score - a.score);
@@ -1154,14 +1457,19 @@ export interface TagExplanation {
   channels: TagChannelStat[];
   /** Channel with the largest contribution, or undefined when none contributed. */
   top?: keyof TagParts;
+  /**
+   * `'sub'` for the synthetic sub-tag {@link applyTagAim} promoted, absent on
+   * every tag a channel scored.
+   */
+  origin?: 'sub';
   /** One line of `channel value×weight=contribution`, for a hover tooltip. */
   text: string;
 }
 
 /** Display names for the channels, so a tooltip reads `turbotext` rather than `keyword`. */
-const CHANNEL_LABEL: Record<keyof TagParts, string> = {
+export const TAG_CHANNEL_LABEL: Record<keyof TagParts, string> = {
   tfidf: 'tfidf', embed: 'embed', textRank: 'textrank', clusterRank: 'clusterrank',
-  priority: 'priority', keyword: 'turbotext', suggest: 'classify',
+  priority: 'priority', keyword: 'turbotext', suggest: 'classify', group: 'theme',
 };
 
 /** Two decimals keep a tooltip short. */
@@ -1170,9 +1478,11 @@ const fixed = (n: number): string => n.toFixed(2);
 /**
  * Break one suggestion into the channels that produced it.
  *
- * A trie hit scores through `parts.priority === keywordBoost`, so the report
- * splits that back into one base `priority` share and one `keyword` share worth
- * `cfg.priority * (keywordBoost - 1)`. `channels[].contribution` therefore adds
+ * A trie hit scores through `parts.priority === keywordBoost × weight`, so the
+ * report splits that back into one base `priority` share and one `keyword` share
+ * worth `cfg.priority × (that lift − 1) + cfg.keyword` — the configured `keyword`
+ * weight is entirely the trie's own. A promoted sub-tag carries its group size as
+ * the whole `group` channel, weighted 1. `channels[].contribution` therefore adds
  * up to `score` in every case. A channel whose weight is 0 contributes 0 and is
  * left out, so a suppressed channel does not pad a hover tooltip.
  *
@@ -1183,7 +1493,8 @@ const fixed = (n: number): string => n.toFixed(2);
 export function explainTag(s: TagSuggestion, cfg: TagScoreConfig = DEFAULT_TAG_SCORE): TagExplanation {
   const p = s.parts;
   const basePriority = p.keyword > 0 ? 1 : p.priority;
-  const keywordWeight = cfg.priority * (cfg.keywordBoost - 1);
+  const boost = p.keyword > 0 ? Math.max(0, p.priority - basePriority) : 0;
+  const keywordWeight = cfg.priority * boost + cfg.keyword * p.keyword;
   const all: TagChannelStat[] = [
     { channel: 'tfidf', weight: cfg.tfidf, value: p.tfidf, contribution: cfg.tfidf * p.tfidf },
     { channel: 'embed', weight: cfg.embed, value: p.embed, contribution: cfg.embed * p.embed },
@@ -1192,6 +1503,7 @@ export function explainTag(s: TagSuggestion, cfg: TagScoreConfig = DEFAULT_TAG_S
     { channel: 'priority', weight: cfg.priority, value: basePriority, contribution: cfg.priority * basePriority },
     { channel: 'keyword', weight: keywordWeight, value: p.keyword, contribution: keywordWeight * p.keyword },
     { channel: 'suggest', weight: cfg.suggest, value: p.suggest, contribution: cfg.suggest * p.suggest },
+    { channel: 'group', weight: 1, value: p.group, contribution: p.group },
   ];
   const channels = all.filter((c) => c.contribution > 0).sort((a, b) => b.contribution - a.contribution);
   return {
@@ -1199,8 +1511,9 @@ export function explainTag(s: TagSuggestion, cfg: TagScoreConfig = DEFAULT_TAG_S
     score: s.score,
     channels,
     ...(channels[0] ? { top: channels[0].channel } : {}),
+    ...(p.group > 0 ? { origin: 'sub' as const } : {}),
     text: channels
-      .map((c) => `${CHANNEL_LABEL[c.channel]} ${fixed(c.value)}×${fixed(c.weight)}=${fixed(c.contribution)}`)
+      .map((c) => `${TAG_CHANNEL_LABEL[c.channel]} ${fixed(c.value)}×${fixed(c.weight)}=${fixed(c.contribution)}`)
       .join(' · '),
   };
 }
@@ -1223,6 +1536,223 @@ export function explanationText(
   }
   lines.push('srctag suggestion — not persisted');
   return lines.join('\n');
+}
+
+// ─── Aim pass: focus and promote ───────────────────────────────────────────
+
+/**
+ * Knobs of the aim pass {@link applyTagAim} runs over a scored set.
+ *
+ * The two halves answer two different questions. *Focus* is which suggestions a
+ * row should keep at all; *promote* is which term a burst keeps proposing, and
+ * therefore deserves a sub-tag of the tag the burst is already about.
+ */
+export interface TagAimConfig {
+  /**
+   * Score a suggestion must clear when neither the priority channel nor
+   * {@link TagAimConfig.priorityTags} carried it. Every pass measures this
+   * against the fusion's own cut-off too, so focusing can only drop more than
+   * {@link TagScoreConfig.minScore} already dropped.
+   */
+  aimMin: number;
+  /**
+   * Rows of one promote group that must propose a tag before the group mints its
+   * sub-tag. The default 3 is "more than two rows".
+   */
+  promoteMin: number;
+  /**
+   * Most sub-tags one promote group mints, keeping the most widespread themes.
+   *
+   * A cap is what keeps the rule usable on a burst that is not one: the `tid`
+   * ordering cuts a cluster only where two consecutive rows are more than
+   * `burstGap` apart, and consecutive insert ids are never that far apart, so one
+   * cluster holds the whole working set. Every term three of those rows share
+   * would otherwise be a theme of every row in it. `Infinity` mints them all.
+   */
+  promoteTop: number;
+  /** Joins a group's anchor tag to the theme it promoted. */
+  sep: string;
+  /** Whether the promote half runs; the focus half always runs. */
+  promote: boolean;
+  /** Tags whose suggestions survive focus whatever their score. */
+  priorityTags?: string[];
+}
+
+/**
+ * Defaults of the aim pass: keep what the priority half carried, or a score of
+ * 0.4, and mint a sub-tag for a term more than two rows of one burst share.
+ */
+export const DEFAULT_TAG_AIM: TagAimConfig = {
+  aimMin: 0.4, promoteMin: 3, promoteTop: 2, sep: '/', promote: true,
+};
+
+/** The channel breakdown of a promoted sub-tag: nothing but its group size. */
+const groupParts = (n: number): TagParts => ({
+  tfidf: 0, embed: 0, textRank: 0, clusterRank: 0, priority: 0, keyword: 0, suggest: 0,
+  group: n,
+});
+
+/**
+ * Resolve the aim knobs for one run, with `aimMin` raised to the fusion's own
+ * cut-off.
+ *
+ * @param over the caller's overrides, or undefined for the defaults
+ * @param minScore the run's {@link TagScoreConfig.minScore}
+ * @returns every field resolved
+ */
+function resolveTagAim(over: Partial<TagAimConfig> | undefined, minScore: number): TagAimConfig {
+  const aim = { ...DEFAULT_TAG_AIM, ...over };
+  return { ...aim, aimMin: Math.max(aim.aimMin, minScore) };
+}
+
+/**
+ * The aim pass: focus each row, then promote the themes its own burst shares.
+ *
+ * Focus keeps a suggestion the priority half carried — the pin cards' `#tag`
+ * headings, or whatever {@link TagAimConfig.priorityTags} names — and keeps every
+ * other suggestion only above {@link TagAimConfig.aimMin}. A row whose list
+ * survives nothing carries no tag, which is the point: a title is about a few
+ * curated tags or about none, not about whatever scored highest.
+ *
+ * Promote then reads the *pre-focus* lists, grouped by the row's cluster and the
+ * anchor tag focus left it with, and appends `anchor + sep + theme` to every row
+ * of a group where more than {@link TagAimConfig.promoteMin} rows proposed the
+ * theme. A group with no anchor — the untagged rows of one burst — mints the bare
+ * theme instead. Only the group's {@link TagAimConfig.promoteTop} most widespread
+ * themes are minted, so a group that is not really one burst cannot bury a row in
+ * sub-tags.
+ *
+ * Evidence deliberately comes from before the focus cut, so the filter cannot
+ * erase the signal it is reading; the consequence is that a sub-tag is always a
+ * term the row was already scored on, and never a term some other row of the
+ * group alone supplies.
+ *
+ * @param results scored rows, as {@link tagRows} returns them
+ * @param cfg aim overrides
+ * @param minScore the run's `minScore`, which `aimMin` is clamped to
+ * @returns new results carrying the focused lists and the promoted sub-tags
+ */
+export function applyTagAim(
+  results: TagRowResult[],
+  cfg: Partial<TagAimConfig> = {},
+  minScore = 0,
+): TagRowResult[] {
+  const aim = resolveTagAim(cfg, minScore);
+  const priority = new Set(aim.priorityTags ?? []);
+
+  const focused = results.map((r) => ({
+    ...r,
+    suggestions: r.suggestions.filter(
+      (s) => s.parts.priority > 0 || priority.has(s.tag) || s.score >= aim.aimMin,
+    ),
+  }));
+  if (!aim.promote || aim.promoteMin <= 0) return focused;
+
+  /* One group per burst-and-anchor: the rows that keep the same top tag inside
+     the same cluster of the same ordering. */
+  const anchor = focused.map((r) => r.suggestions[0]?.tag ?? '');
+  const groups = new Map<string, { anchor: string; members: number[]; counts: Map<string, number> }>();
+  results.forEach((r, i) => {
+    const key = `${r.dim}\u0000${r.cluster}\u0000${anchor[i]}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { anchor: anchor[i], members: [], counts: new Map() };
+      groups.set(key, group);
+    }
+    group.members.push(i);
+    for (const s of r.suggestions) group.counts.set(s.tag, (group.counts.get(s.tag) ?? 0) + 1);
+  });
+
+  for (const group of groups.values()) {
+    const themes = [...group.counts.entries()]
+      /* The anchor is the tag the group is already about, so it is never its own theme. */
+      .filter(([tag, n]) => n >= aim.promoteMin && tag !== group.anchor)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, aim.promoteTop);
+    for (const i of group.members) {
+      /* The row's own tags, and whatever focus already kept of it, are terms it
+         carries; a sub-tag repeats neither. */
+      const carried = new Set([...(results[i].row.tags ?? []), ...focused[i].suggestions.map((s) => s.tag)]);
+      for (const [theme, n] of themes) {
+        const tag = anchor[i] ? `${anchor[i]}${aim.sep}${theme}` : theme;
+        if (carried.has(tag)) continue;
+        carried.add(tag);
+        focused[i].suggestions.push({ tag, score: n, parts: groupParts(n) });
+      }
+    }
+  }
+  return focused;
+}
+
+/** One row-count bucket of a run's tags-per-row histogram. */
+export interface TagAimBucket {
+  /** Tags the rows of this bucket keep. */
+  tags: number;
+  rows: number;
+}
+
+/** One promoted sub-tag and the rows that carry it. */
+export interface TagAimSubTag {
+  tag: string;
+  rows: number;
+  /** Largest group size the sub-tag was minted with. */
+  group: number;
+}
+
+/** What one aim pass left behind, the numbers a viz panel and a sweep print. */
+export interface TagAimStats {
+  rows: number;
+  /** Rows that kept no tag at all. */
+  untagged: number;
+  /** Tags kept per row, ascending by tag count, the untagged bucket included. */
+  histogram: TagAimBucket[];
+  /** Rows keeping at least one suggestion the priority half carried. */
+  priority: number;
+  /** Distinct promoted sub-tags, most widespread first. */
+  subTags: TagAimSubTag[];
+}
+
+/**
+ * Fold an aim pass into the numbers that say whether it did its job: how many
+ * rows were left untagged, how many tags a row keeps, how many rows the priority
+ * half still reaches, and which themes promotion minted.
+ *
+ * @param results rows {@link applyTagAim} returned
+ * @returns the run's statistics
+ */
+export function summarizeTagAim(results: TagRowResult[]): TagAimStats {
+  const perRow = new Map<number, number>();
+  const subTags = new Map<string, TagAimSubTag>();
+  let untagged = 0;
+  let priority = 0;
+
+  for (const r of results) {
+    perRow.set(r.suggestions.length, (perRow.get(r.suggestions.length) ?? 0) + 1);
+    if (r.suggestions.length === 0) untagged++;
+    if (r.suggestions.some((s) => s.parts.priority > 0)) priority++;
+    for (const s of r.suggestions) {
+      if (s.parts.group <= 0) continue;
+      const held = subTags.get(s.tag);
+      if (held) {
+        held.rows++;
+        held.group = Math.max(held.group, s.parts.group);
+      } else {
+        subTags.set(s.tag, { tag: s.tag, rows: 1, group: s.parts.group });
+      }
+    }
+  }
+
+  const histogram = [...perRow.entries()]
+    .map(([tags, rows]) => ({ tags, rows }))
+    .sort((a, b) => a.tags - b.tags);
+  return {
+    rows: results.length,
+    untagged,
+    histogram,
+    priority,
+    subTags: [...subTags.values()]
+      .sort((a, b) => b.rows - a.rows || a.tag.localeCompare(b.tag)),
+  };
 }
 
 // ─── Orchestration over a row set ──────────────────────────────────────────
@@ -1255,6 +1785,22 @@ export interface TagRowsOptions {
    * {@link groupByDomain}.
    */
   bucket?: 'domain';
+  /**
+   * Whether a row's URLs feed the channels: its `ref`, and the Markdown links in
+   * its text. Defaults to true.
+   *
+   * A URL's hostname labels, path segments and query values are often the
+   * noisiest source a link row has — `dev`, `docs`, `www`, `org` — so a pass can
+   * turn them off and score the title alone.
+   */
+  urls?: boolean;
+  /** Trie knobs for this run: the fuzzy budget and the overlap resolution. */
+  trie?: TrieOptions;
+  /**
+   * Aim pass over the scored rows: `{}` runs {@link DEFAULT_TAG_AIM}, a partial
+   * config moves its knobs, and `false` (the default) leaves the raw scores.
+   */
+  aim?: Partial<TagAimConfig> | false;
 }
 
 /**
@@ -1309,12 +1855,15 @@ export async function tagRows(rows: TagRow[], opts: TagRowsOptions = {}): Promis
   for (const c of clusters) for (const i of c.indices) clusterOf.set(i, c.key);
 
   const sources = sorted.map(rowSources);
-  const docs = sources.map(s => [...tokenize(s.text), ...s.urls.flatMap(urlTokens)]);
+  const useUrls = opts.urls ?? true;
+  const docs = sources.map(s => useUrls
+    ? [...tokenize(s.text), ...s.urls.flatMap(urlTokens)]
+    : tokenize(s.text));
   const { vectors } = tfidfVectors(docs);
 
   const priority = opts.priorityTags ?? pinPriorityTags(opts.pins ?? []);
-  const tagger = new TurboTextTagger(keywordEntries(priority, opts.synonyms));
-  const texts = sources.map(s => [s.text, ...s.urls].join(' '));
+  const tagger = new TurboTextTagger(keywordEntries(priority, opts.synonyms), opts.trie);
+  const texts = sources.map(s => (useUrls ? [s.text, ...s.urls] : [s.text]).join(' '));
 
   let embeddings: ArrayLike<number>[] | undefined;
   if (opts.embeddings) embeddings = sorted.map(r => opts.embeddings![r.ref] ?? hashEmbed(r.txt ?? ''));
@@ -1328,16 +1877,19 @@ export async function tagRows(rows: TagRow[], opts: TagRowsOptions = {}): Promis
     const suggestions = opts.classify && opts.labels
       ? normalizeClassify(await opts.classify(texts[i], opts.labels))
       : undefined;
+    const keywords = tagger.match(texts[i]);
     const scored = scoreTagsForRow({
       rows: sorted, index: i, vectors, windowCfg, cfg, docs,
       rank: opts.rank,
-      priority, keywords: tagger.match(texts[i]), suggestions, embeddings,
+      priority, keywords, suggestions, embeddings,
     });
     results.push({
       row,
       suggestions: rankTags(scored, cfg),
       window: neighbourhood(sorted, i, windowCfg),
+      dim: windowCfg.dim,
       cluster: clusterOf.get(i) ?? 0,
+      keywords,
     });
   }
   return results;
@@ -1353,6 +1905,8 @@ export interface RowTagReport {
   window: TagWindow;
   /** Cluster index of the row within the sorted working set. */
   cluster: number;
+  /** Trie hits on the row's text, the surface forms a keyword reading lists. */
+  keywords: KeywordMatch[];
   /** Suggested tags, each with its channel breakdown. */
   tags: TagExplanation[];
 }
@@ -1376,6 +1930,7 @@ export function reportRowTags(
     dim,
     window: result.window,
     cluster: result.cluster,
+    keywords: result.keywords,
     tags: result.suggestions.map((s) => explainTag(s, cfg)),
   };
 }
@@ -1386,6 +1941,9 @@ export function reportRowTags(
  * supplied, so the default path makes no request. Nothing is written; persist
  * through {@link tagRows} plus {@link planTagUpdates}.
  *
+ * `opts.aim` runs {@link applyTagAim} between the scoring and the report, which
+ * is what the rest list's groupers do; the raw scores are the default.
+ *
  * @param rows rows to score, in any order
  * @param opts channels and configuration
  * @returns one report per scored row, in the working set's order
@@ -1393,7 +1951,12 @@ export function reportRowTags(
 export async function tagRowReports(rows: TagRow[], opts: TagRowsOptions = {}): Promise<RowTagReport[]> {
   const cfg = mergeTagScore(opts.score);
   const dim = opts.window?.dim ?? 'tid';
-  return (await tagRows(rows, opts)).map((r) => reportRowTags(r, cfg, dim));
+  const scored = await tagRows(rows, opts);
+  const results = opts.aim === undefined || opts.aim === false ? scored : applyTagAim(scored, {
+    ...opts.aim,
+    priorityTags: opts.aim.priorityTags ?? opts.priorityTags ?? pinPriorityTags(opts.pins ?? []),
+  }, cfg.minScore);
+  return results.map((r) => reportRowTags(r, cfg, dim));
 }
 
 // ─── Run statistics ────────────────────────────────────────────────────────
@@ -1717,10 +2280,61 @@ export async function embedBatch(
   return out;
 }
 
-/** Vector store {@link embedWithCache} reads and fills; xbb backs it with the `vecs` table. */
+/**
+ * 64-bit content hash of `text`, as sixteen hex characters.
+ *
+ * Two independently mixed 32-bit hashes of the same characters, so a collision
+ * needs both halves to agree. `Float32Array` storage is what caps the useful
+ * width here: a shared vector is 32 bits per element, and 64 bits of key is
+ * already far more than the storage error a single extra character can hide.
+ *
+ * @param text text to hash; NFKC-normalized with its case kept, so a compatibility
+ *   form and its plain spelling are the same content while a capitalization is not
+ * @returns the hash, zero-padded to 16 characters
+ */
+export function textHash(text: string): string {
+  const src = normalizeRaw(text ?? '');
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < src.length; i++) {
+    const c = src.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193);
+    h2 = Math.imul(h2 ^ c, 0x85ebca6b);
+    h2 ^= h2 >>> 13;
+  }
+  return mix32(h1).toString(16).padStart(8, '0') + mix32(h2).toString(16).padStart(8, '0');
+}
+
+/** Avalanche one 32-bit hash so neighbouring inputs land far apart. */
+function mix32(n: number): number {
+  let x = n;
+  x = Math.imul(x ^ (x >>> 16), 0x7feb352d);
+  x = Math.imul(x ^ (x >>> 15), 0x846ca68b);
+  return (x ^ (x >>> 16)) >>> 0;
+}
+
+/**
+ * Vector store {@link embedWithCache} reads and fills; the app backs it with the
+ * `vecs` table through `src/vecCache.ts`.
+ *
+ * The store owns the key: it receives the model and the text and derives its own
+ * — content, not row identity, so an edited title invalidates by itself. `get` is
+ * synchronous because a caller may hold a whole model's vectors in memory; `set`
+ * may return a promise, which {@link embedWithCache} awaits before the next one.
+ */
 export interface TagVectorCache {
-  get(key: string): ArrayLike<number> | undefined;
-  set(key: string, vec: number[]): void;
+  get(model: string, text: string): ArrayLike<number> | undefined;
+  set(model: string, text: string, vec: number[]): void | Promise<unknown>;
+}
+
+/** In-memory {@link TagVectorCache}, for a caller with no store to write to. */
+export function mapVectorCache(seed?: Map<string, ArrayLike<number>>): TagVectorCache {
+  const held = seed ?? new Map<string, ArrayLike<number>>();
+  const key = (model: string, text: string) => `${model}\u0000${textHash(text)}`;
+  return {
+    get: (model, text) => held.get(key(model, text)),
+    set: (model, text, vec) => { held.set(key(model, text), vec); },
+  };
 }
 
 /**
@@ -1739,20 +2353,19 @@ export async function embedWithCache(
   texts: string[],
   cache: TagVectorCache,
 ): Promise<number[][]> {
-  const key = (t: string) => `${model}|${t}`;
   const missing: { i: number; text: string }[] = [];
   const out: number[][] = new Array(texts.length);
   texts.forEach((text, i) => {
-    const hit = cache.get(key(text));
+    const hit = cache.get(model, text);
     if (hit) out[i] = Array.from(hit);
     else missing.push({ i, text });
   });
   if (missing.length > 0) {
     const fresh = await embed(missing.map(m => m.text));
-    missing.forEach((m, k) => {
+    for (const [k, m] of missing.entries()) {
       out[m.i] = fresh[k];
-      if (fresh[k]) cache.set(key(m.text), fresh[k]);
-    });
+      if (fresh[k]) await cache.set(model, m.text, fresh[k]);
+    }
   }
   return out;
 }
@@ -2015,6 +2628,14 @@ export interface SrctagApi {
   groupByDomain: typeof groupByDomain;
   /** Hostname of one row, `www.` stripped. */
   rowDomain: typeof rowDomain;
+  /** Focus a scored set on its priority tags and promote the themes a burst shares. */
+  applyTagAim: typeof applyTagAim;
+  /** Fold an aim pass into its untagged, histogram, priority, and sub-tag numbers. */
+  summarizeTagAim: typeof summarizeTagAim;
+  /** 64-bit content hash of a text, the key a vector cache stores under. */
+  textHash: typeof textHash;
+  /** In-memory `TagVectorCache`. */
+  mapVectorCache: typeof mapVectorCache;
 }
 
 /** The public surface, as a plain object. */
@@ -2024,6 +2645,7 @@ export function srctagApi(): SrctagApi {
     planTagUpdates, commitTagUpdates, dexieTagPort, customTagPort,
     pinPriorityTags, loadAdaptersFromStore, keywordEntries, parseKeywordDoc,
     tokenize, rankTags, textRank, summarizeTagRun, groupByDomain, rowDomain,
+    applyTagAim, summarizeTagAim, textHash, mapVectorCache,
   };
 }
 

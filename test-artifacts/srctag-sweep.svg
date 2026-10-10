@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="240" viewBox="0 0 720 240">
+<style>
+  .t { fill: #dbe4f0; font: 13px system-ui, sans-serif; }
+  .k, .n { fill: #9fb0c6; font: 11px system-ui, sans-serif; }
+  .track { fill: rgba(255,255,255,0.10); }
+  .kept { fill: rgba(120,170,255,0.55); }
+  .sub { fill: rgba(150,230,170,0.60); }
+</style>
+<rect width="720" height="240" fill="#15181d"/>
+<text x="8" y="20" class="t">srctag aim pass over the live table</text>
+<text x="8" y="49" class="k">off</text><rect x="250" y="38" width="340" height="16" class="track"/><rect x="250" y="38" width="340.0" height="16" class="kept"/><rect x="250" y="38" width="0.0" height="16" class="sub"/><text x="598" y="50" class="n">1499 kept · 0 untagged · 0 sub-tags</text>
+<text x="8" y="75" class="k">aimMin 0.2</text><rect x="250" y="64" width="340" height="16" class="track"/><rect x="250" y="64" width="340.0" height="16" class="kept"/><rect x="250" y="64" width="130.0" height="16" class="sub"/><text x="598" y="76" class="n">1499 kept · 0 untagged · 77 sub-tags</text>
+<text x="8" y="101" class="k">aimMin 0.4</text><rect x="250" y="90" width="340" height="16" class="track"/><rect x="250" y="90" width="340.0" height="16" class="kept"/><rect x="250" y="90" width="130.0" height="16" class="sub"/><text x="598" y="102" class="n">1499 kept · 0 untagged · 77 sub-tags</text>
+<text x="8" y="127" class="k">aimMin 0.7</text><rect x="250" y="116" width="340" height="16" class="track"/><rect x="250" y="116" width="338.2" height="16" class="kept"/><rect x="250" y="116" width="264.0" height="16" class="sub"/><text x="598" y="128" class="n">1491 kept · 8 untagged · 48 sub-tags</text>
+<text x="8" y="153" class="k">promoteMin 2</text><rect x="250" y="142" width="340" height="16" class="track"/><rect x="250" y="142" width="340.0" height="16" class="kept"/><rect x="250" y="142" width="189.2" height="16" class="sub"/><text x="598" y="154" class="n">1499 kept · 0 untagged · 253 sub-tags</text>
+<text x="8" y="179" class="k">promoteMin 3</text><rect x="250" y="168" width="340" height="16" class="track"/><rect x="250" y="168" width="340.0" height="16" class="kept"/><rect x="250" y="168" width="130.0" height="16" class="sub"/><text x="598" y="180" class="n">1499 kept · 0 untagged · 77 sub-tags</text>
+<text x="8" y="205" class="k">promoteMin 4</text><rect x="250" y="194" width="340" height="16" class="track"/><rect x="250" y="194" width="340.0" height="16" class="kept"/><rect x="250" y="194" width="93.4" height="16" class="sub"/><text x="598" y="206" class="n">1499 kept · 0 untagged · 35 sub-tags</text>
+</svg>

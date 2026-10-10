@@ -194,6 +194,33 @@ describe('KeywordTagger', () => {
     expect(t.size).toBe(1);
   });
 
+  it('matches within the configured edit budget', () => {
+    const entries = [{ tag: 'react', keywords: ['react'] }];
+    const exact = new KeywordTagger(entries);
+    const fuzzy = new KeywordTagger(entries, { distance: 1 });
+
+    expect(exact.match('reac hooks')).toEqual([]);
+    expect(fuzzy.match('reac hooks').map((m) => m.tag)).toEqual(['react']);
+    expect(fuzzy.match('reactt guide').map((m) => m.tag)).toEqual(['react']);
+    expect(fuzzy.match('reacd guide').map((m) => m.tag)).toEqual(['react']);
+    // two edits away is still out of budget
+    expect(fuzzy.match('rexx guide')).toEqual([]);
+  });
+
+  it('picks the weighted-optimal overlap set when asked', () => {
+    const entries = [
+      { tag: 'all', keywords: ['汉字学习'] },
+      { tag: 'head', keywords: ['汉字'] },
+      { tag: 'tail', keywords: ['学习机器'] },
+    ];
+    const text = '汉字学习机器';
+    // greedy takes the single longest candidate; optimal takes the pair that wins
+    // on total matched length (2 + 4 against 4)
+    expect(new KeywordTagger(entries).match(text).map((m) => m.tag)).toEqual(['all']);
+    expect(new KeywordTagger(entries, { overlap: 'optimal' }).match(text).map((m) => m.tag))
+      .toEqual(['head', 'tail']);
+  });
+
   it('turns a hyphenated tag into a spaced surface form', () => {
     expect(keywordEntries(['machine-learning'])).toEqual([
       { tag: 'machine-learning', keywords: ['machine-learning', 'machine learning'] },
@@ -281,7 +308,7 @@ describe('fusion', () => {
   const cfg = defaultWindow('tid', { window: 1, minWindow: 1, maxWindow: 1 });
   const scoreCfg = {
     tfidf: 0.35, embed: 0.35, textRank: 0, clusterRank: 0,
-    priority: 0.2, suggest: 0.1, keywordBoost: 1.5, topK: 8, minScore: 0.01,
+    priority: 0.2, suggest: 0.1, keyword: 0, keywordBoost: 1.5, topK: 8, minScore: 0.01,
   };
 
   function vectors(rows: TagRow[]) {
@@ -309,6 +336,19 @@ describe('fusion', () => {
     const hit = out.find(s => s.tag === 'react hooks')!;
     expect(hit.parts.keyword).toBe(1);
     expect(hit.parts.priority).toBe(1.5);
+  });
+
+  it('lets the trie channel carry a score without the priority channel', () => {
+    const rows = corpus;
+    const tagger = new KeywordTagger(keywordEntries(['react hooks']));
+    const trieCfg = { ...scoreCfg, tfidf: 0, embed: 0, priority: 0, keyword: 1 };
+    const out = scoreTagsForRow({
+      rows, index: 1, vectors: vectors(rows), windowCfg: cfg, cfg: trieCfg,
+      priority: ['react hooks'], keywords: tagger.match('react hooks guide'),
+    });
+    const hit = out.find(s => s.tag === 'react hooks')!;
+    expect(hit.score).toBeCloseTo(1, 6);
+    expect(explainTag(hit, trieCfg).channels.map((c) => c.channel)).toEqual(['keyword']);
   });
 
   it('carries a classifier proposal with no textual support', () => {
@@ -516,8 +556,11 @@ describe('network adapters', () => {
   });
 
   it('embeds only the cache misses', async () => {
-    const store = new Map<string, number[]>([['m|a', [1]]]);
-    const cache = { get: (k: string) => store.get(k), set: (k: string, v: number[]) => { store.set(k, v); } };
+    const store = new Map<string, number[]>();
+    const cache = {
+      get: (_model: string, text: string) => (text === 'a' ? [1] : undefined),
+      set: (model: string, text: string, vec: number[]) => { store.set(`${model}|${text}`, vec); },
+    };
     const embed = vi.fn(async (texts: string[]) => texts.map(() => [9]));
     expect(await embedWithCache(embed, 'm', ['a', 'b'], cache)).toEqual([[1], [9]]);
     expect(embed).toHaveBeenCalledWith(['b']);
@@ -568,7 +611,7 @@ describe('option surface', () => {
     const opts: TagRowsOptions = {
       score: {
         tfidf: 1, embed: 0, textRank: 0, clusterRank: 0,
-        priority: 0, suggest: 0, keywordBoost: 2, topK: 3, minScore: 0.2,
+        priority: 0, suggest: 0, keyword: 1, keywordBoost: 2, topK: 3, minScore: 0.2,
       },
       window: { dim: 'dt', window: 2, burstGap: 1000 },
       priorityTags: ['a'],
@@ -624,5 +667,25 @@ describe('tagRowReports', () => {
     expect(reports[1].dim).toBe('tid');
     expect(reports[1].window.indices.length).toBeGreaterThan(0);
     expect(reports[1].tags.some((t) => t.tag === 'react')).toBe(true);
+  });
+});
+
+describe('input and convergence knobs', () => {
+  it('reads the URL into the channels by default and leaves it out on request', async () => {
+    const rows = [row(1, 'React docs', { ref: 'https://pytorch.org/learn' })];
+    const on = await tagRows(rows, { priorityTags: ['pytorch'] });
+    const off = await tagRows(rows, { priorityTags: ['pytorch'], urls: false });
+
+    // the URL's hostname label reaches the trie, so the priority tag can be proposed
+    expect(on[0].suggestions.map((s) => s.tag)).toContain('pytorch');
+    expect(off[0].suggestions.map((s) => s.tag)).not.toContain('pytorch');
+  });
+
+  it('stops the TextRank walk at the configured tolerance', () => {
+    const tokens = tokenize('react hooks guide react hooks state react');
+    // a tolerance nothing can satisfy is the same as running a single iteration
+    expect(textRank(tokens, { tol: 1e9 })).toEqual(textRank(tokens, { iterations: 1 }));
+    // and the default still converges past it
+    expect(textRank(tokens, { tol: 1e9 })).not.toEqual(textRank(tokens, { iterations: 2 }));
   });
 });

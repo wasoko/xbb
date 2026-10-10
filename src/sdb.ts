@@ -35,6 +35,8 @@ export class DDB extends Dexie {
   tree!: Dexie.Table<{ key: string, value: unknown }>;
   das!: Dexie.Table<Da>;
   vecs!: Dexie.Table<{ tid: number, mdl: string, vec: Float32Array }>;
+  /** Content-keyed embeddings; see `src/vecCache.ts`. */
+  embs!: Dexie.Table<{ hash: string, mdl: string, vec: Float32Array }>;
   stat!: Dexie.Table<{ tid: number, key: string, value:unknown }>;
   bins!: Dexie.Table<{ key: string, rec: unknown, bin: Uint8Array, addAt?: Date, modAt?:Date}>;
 
@@ -48,6 +50,15 @@ export class DDB extends Dexie {
       stat: '[tid+key]',
       bins: 'key, [key+addAt], [key+modAt]',
       refs: '++id, title, href, dt, type'
+    })
+    /* `embs` holds an embedding under its content hash rather than under a row id,
+       so an edited title invalidates itself (`srctag.textHash`, `src/vecCache.ts`).
+       It is a new table rather than a re-key of `vecs`, because Dexie aborts an
+       upgrade that changes a table's primary key (`UpgradeError`); nothing ever
+       wrote the old row-keyed one, so the same version drops it. */
+    this.version(13).stores({
+      vecs: null,
+      embs: '[hash+mdl], mdl',
     })
     function updatingHook(mod:any) { return {...mod, modAt: new Date()}}
     function creatingHook(_priKey:any, row:any) { 
@@ -81,8 +92,8 @@ export let treeCacOpts: Record<string, string[]> = {
   'cardSeer': ['cs1', 'cs2'],
   // `snap_pin` options are the recent CDN snapshots, cached here by the settings menu.
   'snap_pin': [],
-  // `rsdt`/`rsid`/`rsess`/`rstag`/`rstext` are built in; `restGroupers/...` refs are appended from `db.das` at render.
-  'restGrouper': ['rsdt', 'rsid', 'rsess', 'rstag', 'rstext', 'none'],
+  // `rsdt`/`rsid`/`rsess`/`rstag`/`rstext`/`rsfreq`/`rstrank`/`rstt` are built in; `restGroupers/...` refs are appended from `db.das` at render.
+  'restGrouper': ['rsdt', 'rsid', 'rsess', 'rstag', 'rstext', 'rsfreq', 'rstrank', 'rstt', 'none'],
   'provider-model': ['Default'],
 };
 
@@ -447,10 +458,15 @@ async function stat_tags(){
   return str
 }
 export async function statStr() {
+  const byModel = new Map<string, number>();
+  await db.embs.each((v) => { byModel.set(v.mdl, (byModel.get(v.mdl) ?? 0) + 1); });
+  const embs = byModel.size === 0
+    ? '0 embeddings'
+    : `${await db.embs.count()} embeddings (${[...byModel.entries()]
+      .map(([mdl, n]) => `${mdl}:${n}`).join(', ')})`;
   return (`local saved: ${await db.das.count()} tags ${await stat_tags()}
   ...\n${await db.stat.count()} stats max(tid)=${
-    (await db.stat.reverse().last())?.tid},  ${await db.vecs.count()} vecs max(tid=${
-      (await db.vecs.reverse().last())?.tid})`)
+    (await db.stat.reverse().last())?.tid},  ${embs}`)
 }
 
 export function sanitize(arr: any[]): any[] {
