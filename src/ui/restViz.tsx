@@ -17,8 +17,12 @@
 
 import React, { useEffect, useState } from 'react';
 import type { Da } from '../sdb';
-import type { RowTagReport } from '../srctag';
-import { RSTAG_GROUPER, restDynAdapters, restVecStatus, type RestVizMode } from './restGrouper';
+import { TAG_CHANNEL_LABEL, type RowTagReport } from '../srctag';
+import {
+  RSTAG_GROUPER, REST_PROFILES, restDynAdapters, restHyperScore, restVecStatus,
+  type RestHyper, type RestVizMode,
+} from './restGrouper';
+import { VIZ_HELP, vizCaveat } from './restHelp';
 import {
   channelShares, keywordHits, priorityCoverage, tagsPerTitle, themeGroups,
   type VizBar,
@@ -36,6 +40,7 @@ const PANEL: React.CSSProperties = {
 
 const ROW: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 };
 const LABEL: React.CSSProperties = { opacity: 0.55 };
+const HINT: React.CSSProperties = { opacity: 0.5, fontStyle: 'italic' };
 const GROUP: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' };
 
 const TRACK: React.CSSProperties = {
@@ -66,11 +71,13 @@ const PRIORITY_FILL = 'rgba(150,230,170,0.6)';
  * @param props.bar - the reading's bar.
  * @param props.tone - fill color, when the reading distinguishes bars.
  * @param props.note - trailing text after the value.
+ * @param props.help - extra hover text after the bar's own numbers.
  * @returns The bar row element.
  */
-function Bar({ bar, tone, note }: { bar: VizBar; tone?: string; note?: string }) {
+function Bar({ bar, tone, note, help }: { bar: VizBar; tone?: string; note?: string; help?: string }) {
   return (
-    <span style={GROUP} title={`${bar.label}: ${bar.value} (${Math.round(bar.share * 100)}%)`}>
+    <span style={GROUP} title={[`${bar.label}: ${bar.value} (${Math.round(bar.share * 100)}%)`, help]
+      .filter(Boolean).join(' · ')}>
       <span style={TRACK}>
         <span style={{ ...FILL, width: `${Math.min(100, Math.round(bar.share * 100))}%`, ...(tone ? { background: tone } : {}) }} />
       </span>
@@ -137,6 +144,8 @@ export interface RestVizProps {
   rows: Da[];
   /** One report per scored row. */
   reports: Map<number, RowTagReport>;
+  /** Live tuner override, for the family-aware caveat on a reading. */
+  hyper?: RestHyper;
   /** Whether the pass ran with the store's adapters (`rstag`'s `dyn`). */
   dyn?: boolean;
 }
@@ -154,7 +163,7 @@ function Head({ mode, rows, reports }: { mode: RestVizMode; rows: Da[]; reports:
   const kept = head.buckets.reduce((n, b) => n + (Number(b.label) > 0 ? b.value : 0), 0);
   const total = head.buckets.reduce((n, b) => n + b.value, 0);
   return (
-    <div style={ROW}>
+    <div style={ROW} title={`${VIZ_HELP[mode]} — the header counts the rows the list holds, the rows the pass scored, and the tags each title kept`}>
       <span style={LABEL}>{mode}</span>
       <span>{head.rows} rows</span>
       <span>{head.scored} scored</span>
@@ -178,20 +187,42 @@ function Body({ mode, rows, reports }: { mode: RestVizMode; rows: Da[]; reports:
     );
   }
   if (mode === 'priority') {
-    const { tagged, untagged, unscored, bars } = priorityCoverage(rows, reports);
+    const { tagged, untagged, unscored, bars, topChannel } = priorityCoverage(rows, reports);
+    const curated = bars.filter((b) => b.priority).length;
+    /* A word one row keeps is not what the table is about, and on a list of
+       mostly-distinct titles it is most of the bars: a thousand one-off chips
+       would bury the few that repeat. The head is drawn and the tail counted. */
+    const head = bars.filter((b) => b.value > 1);
+    const once = bars.length - head.length;
     return (
       <>
         <div style={ROW}>
           <span>{tagged.length} rows on a priority tag</span>
           <span style={LABEL}>{untagged.length} no tag</span>
           <span style={LABEL}>{unscored.length} unscored</span>
+          <span style={LABEL}>
+            {`${bars.length} tags kept · ${curated} priority-backed · ${head.length} kept by more than one row — the bars below are those; \`topK\` shortens the list, \`stop\` and \`max df\` clean it`}
+          </span>
         </div>
         <div style={ROW}>
-          {bars.length === 0
-            ? <span style={LABEL}>no tag kept — the cut-off is above every score</span>
-            : bars.map((b) => (
-              <Bar key={b.label} bar={b} tone={b.priority ? PRIORITY_FILL : undefined} />
-            ))}
+          {head.length === 0
+            ? <span style={LABEL}>{bars.length === 0
+              ? 'no tag kept — the cut-off is above every score'
+              : `every tag was kept by a single row — raise \`max df\` or the aim cut-off, or lower \`topK\``}</span>
+            : head.map((b) => {
+              const top = topChannel.get(b.label);
+              return (
+                <Bar key={b.label} bar={b} tone={b.priority ? PRIORITY_FILL : undefined}
+                  help={b.priority
+                    ? 'priority-backed: a curated tag or a trie hit carried it'
+                    : `not priority-backed — the row's own ${top ? TAG_CHANNEL_LABEL[top] : 'text'} score kept it`} />
+              );
+            })}
+          {once > 0 && (
+            <span style={LABEL} title="a tag one row keeps says what that row is about, not what the list is">
+              {`+ ${once} kept by a single row`}
+            </span>
+          )}
         </div>
       </>
     );
@@ -248,13 +279,17 @@ function Body({ mode, rows, reports }: { mode: RestVizMode; rows: Da[]; reports:
  * @param props.mode - reading to render.
  * @param props.rows - rows below the pin cards.
  * @param props.reports - one report per scored row.
+ * @param props.hyper - live tuner override, for the caveat on a reading.
  * @param props.dyn - whether the pass loaded the store's adapters.
  * @returns The panel, or nothing when the grouper has no tag pass.
  */
-export function RestViz({ grouper, mode, rows, reports, dyn = false }: RestVizProps) {
+export function RestViz({ grouper, mode, rows, reports, hyper, dyn = false }: RestVizProps) {
+  const profile = REST_PROFILES[grouper];
+  const caveat = profile ? vizCaveat(mode, restHyperScore(profile, hyper)) : undefined;
   return (
     <div className="rest-viz" style={PANEL}>
       <Head mode={mode} rows={rows} reports={reports} />
+      {caveat && <div style={{ ...LABEL, ...HINT }} title={caveat}>{caveat}</div>}
       <Body mode={mode} rows={rows} reports={reports} />
       {grouper === RSTAG_GROUPER && dyn && <AdapterStatus />}
     </div>

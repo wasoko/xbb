@@ -3,12 +3,12 @@
  */
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { db, type Da } from '../src/sdb';
+import { db, treeCacOpts, type Da } from '../src/sdb';
 import {
   groupByDt, groupByDtVisit, groupBySession, groupRest, isRestGrouperScript, isTagGrouper,
   restAim, restDynAdapters, restDynCapable, restGroupsFor, restHyperScore, restProfileMap,
   restTagContributors, restTagMap, restTagStore, restTextMap, restVizMode, RECR_CONFIG_LABEL,
-  REST_PROFILES, RSDT_GROUPER, RSFREQ_GROUPER, RSSESS_GROUPER, RSTAG_GROUPER, RSTAG_LIMIT,
+  REST_PROFILES, RRF_GROUPER, RSDT_GROUPER, RSFREQ_GROUPER, RSSESS_GROUPER, RSTAG_GROUPER, RSTAG_LIMIT,
   RSTRANK_GROUPER, RSTEXT_GROUPER, RSTEXT_LIMIT, RSTT_GROUPER, UNDATED_LABEL,
 } from '../src/ui/restGrouper';
 import type { RowTagReport } from '../src/srctag';
@@ -485,7 +485,7 @@ describe('restTagContributors', () => {
   });
 });
 
-describe('the five tag groupers as profiles', () => {
+describe('the six tag groupers as profiles', () => {
   const site = (tid: number, txt: string, url: string, tags: string[] = []): Da =>
     ({ tid, ref: url, txt, type: 'tab', dt: new Date(T0), tags, rec: { url } });
 
@@ -507,7 +507,7 @@ describe('the five tag groupers as profiles', () => {
   });
 
   it('defaults aim on for the algorithm groupers and off for the read paths', () => {
-    for (const grouper of [RSFREQ_GROUPER, RSTRANK_GROUPER, RSTT_GROUPER]) {
+    for (const grouper of [RSFREQ_GROUPER, RSTRANK_GROUPER, RSTT_GROUPER, RRF_GROUPER]) {
       expect(restAim(REST_PROFILES[grouper]), grouper).toEqual({});
     }
     expect(restAim(REST_PROFILES[RSTAG_GROUPER])).toBe(false);
@@ -526,6 +526,9 @@ describe('the five tag groupers as profiles', () => {
 
   it('offers the dyn flag only where a dynamic channel carries weight', () => {
     expect(restDynCapable(REST_PROFILES[RSTAG_GROUPER])).toBe(true);
+    // the semantic list of the rrf fusion is the embed channel, so its profile
+    // is the second one a `dyn` adapter can feed
+    expect(restDynCapable(REST_PROFILES[RRF_GROUPER])).toBe(true);
     for (const grouper of [RSTEXT_GROUPER, RSFREQ_GROUPER, RSTRANK_GROUPER, RSTT_GROUPER]) {
       expect(restDynCapable(REST_PROFILES[grouper]), grouper).toBe(false);
     }
@@ -571,5 +574,101 @@ describe('the five tag groupers as profiles', () => {
     const map = await restProfileMap(rows, RSTAG_GROUPER, { dyn: true });
     expect(map.size).toBe(1);
     expect(map.get(1)!.tags.length).toBeGreaterThan(0);
+  });
+});
+
+describe('rrf grouper', () => {
+  const site = (tid: number, txt: string, url: string, tags: string[] = []): Da =>
+    ({ tid, ref: url, txt, type: 'tab', dt: new Date(T0), tags, rec: { url } });
+
+  const pin = (txt: string): Da =>
+    ({ tid: -1, ref: 'pin/demo.md', txt, type: 'md', tags: [], rec: {} });
+
+  it('resolves as a built-in whose blocks are exactly rsdt', () => {
+    const rows = [row(1, new Date(T0)), row(2, new Date(T0)), row(3, new Date(T0 + 1000))];
+    expect(isRestGrouperScript(RRF_GROUPER)).toBe(false);
+    expect(restGroupsFor(rows, RRF_GROUPER)).toEqual(groupByDt(rows));
+    expect(isTagGrouper(RRF_GROUPER)).toBe(true);
+    expect(REST_PROFILES[RRF_GROUPER].pipeline).toBe('rrf');
+    // the settings control offers it, so a user can select it without a script row
+    expect(treeCacOpts['restGrouper']).toContain(RRF_GROUPER);
+  });
+
+  it('runs the 3-stage chain through its profile', async () => {
+    const pins = [pin('## reading #react')];
+    const rows = [
+      site(1, 'react hooks guide', 'https://react.dev/learn'),
+      site(2, 'react hooks state', 'https://react.dev/reference'),
+      site(3, 'react hooks docs', 'https://react.dev/docs'),
+    ];
+    const map = await restProfileMap(rows, RRF_GROUPER, undefined, { pins });
+    const report = map.get(1)!;
+    // the profile reads each site as its own working set, on the visit-time window
+    expect(report.dim).toBe('visitTime');
+    const channels = report.tags.flatMap((t) => t.channels.map((c) => c.channel));
+    // the statistical stage reports as `bm25`; this pipeline never runs TF-IDF
+    expect(channels).toContain('bm25');
+    expect(channels).not.toContain('tfidf');
+    // the curated tag arrives through the trie and leads its row's chips
+    expect(report.tags[0].tag).toBe('react');
+    expect(report.tags[0].channels.map((c) => c.channel)).toContain('priority');
+  });
+
+  it('mints a sub-tag for the term its burst shares, anchored to the curated tag', async () => {
+    const pins = [pin('## reading #react')];
+    const rows = [
+      site(1, 'react hooks guide', 'https://react.dev/1'),
+      site(2, 'react hooks state', 'https://react.dev/2'),
+      site(3, 'react hooks docs', 'https://react.dev/3'),
+    ];
+    const map = await restProfileMap(rows, RRF_GROUPER, undefined, { pins });
+    const sub = map.get(1)!.tags.find((t) => t.origin === 'sub');
+    expect(sub, 'no sub-tag minted').toBeDefined();
+    expect(sub!.tag).toMatch(/^react\//);
+  });
+
+  it('folds a tuner override over the profile, and the aim switch off', async () => {
+    const pins = [pin('## reading #react')];
+    const rows = [
+      site(1, 'react hooks guide', 'https://react.dev/1'),
+      site(2, 'react hooks state', 'https://react.dev/2'),
+    ];
+    const raw = await restProfileMap(rows, RRF_GROUPER, { aim: false, weights: { bm25: 0 } }, { pins });
+    expect(raw.get(1)!.tags.some((t) => t.origin === 'sub')).toBe(false);
+    // the weight switch removes the statistical list, so no chip carries it
+    expect(raw.get(1)!.tags.flatMap((t) => t.channels.map((c) => c.channel))).not.toContain('bm25');
+    const tuned = await restProfileMap(rows, RRF_GROUPER, { rrf: { k: 1 } }, { pins });
+    expect(tuned.get(1)!.tags[0].tag).toBe('react');
+  });
+
+  it('scores only the newest rows within the tuner cap', async () => {
+    const rows = Array.from({ length: 12 }, (_, i) =>
+      site(i + 1, `react row ${i}`, `https://s${i}.example.com/${i}`));
+    const map = await restProfileMap(rows, RRF_GROUPER, { limit: 3 }, { pins: [pin('# topic #react')] });
+    expect(map.size).toBe(3);
+    expect(map.has(12)).toBe(true);
+    expect(map.has(3)).toBe(false);
+  });
+
+  it('reads the URL out of the inputs and out of the BM25F fields', () => {
+    const profile = REST_PROFILES[RRF_GROUPER];
+    expect(profile.urls).toBe(false);
+    expect(profile.bm25?.fields?.url ?? 0).toBe(0);
+    // and the pre-processing: the corpus floor, the function words, and the chip cap
+    expect(profile.global?.maxDf).toBeGreaterThan(0);
+    expect(profile.global?.stop).toContain('vs');
+    expect(profile.score.topK).toBe(5);
+  });
+
+  it('never proposes a term the list is itself filtered on', async () => {
+    const pins = [pin('## reading #react')];
+    const rows = [
+      site(1, 'tabs guide chrome', 'https://react.dev/1'),
+      site(2, 'tabs flags chrome', 'https://react.dev/2'),
+    ];
+    const plain = await restProfileMap(rows, RRF_GROUPER, undefined, { pins });
+    expect(plain.get(1)!.tags.map((t) => t.tag)).toContain('tabs');
+    const filtered = await restProfileMap(rows, RRF_GROUPER, undefined, { pins, filters: ['f=tabs'] });
+    expect(filtered.get(1)!.tags.map((t) => t.tag)).not.toContain('tabs');
   });
 });

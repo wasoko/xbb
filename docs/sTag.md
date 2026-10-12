@@ -2,13 +2,15 @@
 
 `sTag` is the tag layer over `db.das`: what a row should be tagged with, which seams
 produce that evidence, and how a decision becomes a `tags[]` write. Moved here from
-`docs/filter_search.md`, which keeps the read path (`f` → `iq` → rows).
+`docs/filter_search.md`, which keeps the read path (`f` → `iq` → rows). The rest list's
+pass and its scoring pipeline are [rstag.md](rstag.md); this document owns the evidence
+those read.
 
 Two methodologies produce the evidence, and they differ in cost and in who can add one:
 
 | | A. Static functions | B. Dynamic scripts |
 |---|---|---|
-| Lives in | `src/srctag.ts` — pure TypeScript, imports only `src/runsrc.ts` | `type='src'` rows, evaluated by `runsrc.runBody` |
+| Lives in | `src/srctag.ts` — pure TypeScript, imports only `src/runsrc.ts` — plus `src/rstag.ts`, the rest-list pass and the 3-stage chain ([rstag.md](rstag.md)) | `type='src'` rows, evaluated by `runsrc.runBody` |
 | Adding one | a source edit: typecheck, tests, build | write the row in the editor, or let the agent chat write it — no build |
 | Reachable by | whoever can ship the bundle | the app itself, a `run_src` tool call in a chat, `seedTagRows` |
 | Cost per call | none: local and deterministic | a provider request, a key, a rate limit, a CORS origin |
@@ -59,6 +61,7 @@ one file serve the webapp, a `run_src` row, and a copy inside the tabext extensi
 | Channel | Source | Default weight |
 |---|---|---|
 | TF-IDF | `txt` tokens plus `urlTokens(ref)` and any Markdown link in `txt`, against the neighbour window | 0.35 |
+| BM25F (`bm25`) | `title`, `url` and the row's own tags as weighted fields, ranked by the `rrf` pipeline's own statistical stage | 0 |
 | Embedding cosine | an injected `EmbedFn` against the neighbour centroid; `hashEmbed` (64-bin character histogram) when none is supplied | 0.35 |
 | TextRank | `textRank()` over the row's own tokens: a weighted co-occurrence graph, normalized by its top rank | 0 |
 | Burst TextRank (`clusterRank`) | the same walk over the neighbour window's pooled tokens, gated on the row's own copy of the term | 0 |
@@ -69,11 +72,14 @@ one file serve the webapp, a `run_src` row, and a copy inside the tabext extensi
 The two TextRank weights are 0 by default, so the default sweep is unchanged and pays
 nothing for the graph: a zero weight skips the walk entirely. `RSTEXT_TAG_SCORE` is the
 preset that turns them on and TF-IDF off, and `rstext` is the read path built on it.
+`bm25` is what the `rrf` pipeline scores with, and it is not a rename of `tfidf`: a
+`tfidf` share is a raw lexical weight times a neighbour cosine, and a `bm25` share is a
+reciprocal-rank term. [rstag.md](rstag.md) owns that pipeline.
 
 `scoreTagsForRow` scores the candidates, `rankTags` filters and cuts. A candidate is
 **only** a token of the row's own text, a keyword-trie match, or a classifier label —
 the priority list cannot introduce a tag on its own, it only lifts one that already
-qualified. `TagParts` keeps the shares apart (`tfidf`, `embed`, `textRank`,
+qualified. `TagParts` keeps the shares apart (`tfidf`, `bm25`, `embed`, `textRank`,
 `clusterRank`, `priority`, `keyword`, `suggest`, plus `group` for a sub-tag the aim pass
 promoted); an entry in the trie sets `priority`
 to `keywordBoost` (1.5) and reports the extra half as `keyword`, which is what
@@ -242,12 +248,13 @@ tag contain one another after normalization while **both** are at least four cha
 The lower-scored of such a pair is the one that goes, which is why `react` beats `reactjs`
 while `ml` and `mlx` coexist: the containment test needs both sides long enough.
 `rankTags` filters below `minScore`, de-duplicates, then slices to `topK` — so a row's
-final list is at most eight tags, each with its explanation still attached.
+final list is at most `topK` tags, 8 under the fused pipeline and 5 under `rrf`, each
+with its explanation still attached.
 
 ### The aim pass: focus and promote
 
 `applyTagAim(results, cfg, minScore)` is the step between `rankTags` and the report, and
-it is what the rest list's five tag groupers run by default. `tagRows` never calls it, so
+it is what the rest list's six tag groupers run by default. `tagRows` never calls it, so
 a raw sweep and a `run_src` row see the scored list unchanged.
 
 **Focus** keeps a suggestion whose `parts.priority > 0` — a trie match, or a tag the
@@ -458,7 +465,14 @@ set`, is the comparison:
 - the dynamic pair, `rstext+embed` and `hybrid+embed+classify`, over a 24-row sample
   because the classifier costs one request per row;
 - `AIM_CASES`, which read one scored table through the aim pass — off, then one knob at a
-  time: `aimMin` 0.2 / 0.4 / 0.7, `promoteMin` 2 / 3 / 4.
+  time: `aimMin` 0.2 / 0.4 / 0.7, `promoteMin` 2 / 3 / 4;
+- `RRF_CASES`, which walk the `rrf` pipeline one stage knob at a time — BM25F's `k1`, `b`
+  and field weights, the fusion's `k`, the global-term floor, the bucket half's threshold
+  and its two `λ`s, and each list switched off — over the newest `SRCTAG_RRF_LIMIT` (600)
+  live rows, because a stage costs O(rows × candidates);
+- a second grid over one *filtered* list, the rows carrying `suffix_GoogleSearch`
+  (`FILTER_CASES`), which is the reading that shows what the URL and a provenance tag do
+  to a list that repeats them on every row.
 
 Every printed table is also written to `test-artifacts/srctag-sweep.md`, with the aim grid
 as `test-artifacts/srctag-sweep.svg`; `SRCTAG_SWEEP_OUT` moves the directory, and a run
@@ -502,6 +516,11 @@ The sweep is the selection step, not the answer. Which cut-off, window, and weig
 right for a user depends on their own table, which is why the numbers are printed per
 hyperparameter rather than frozen into a constant.
 
+The `rrf` pipeline is measured by the same file, in two more grids — one moving a stage
+knob at a time over the newest `SRCTAG_RRF_LIMIT` (600) rows, and one running a single
+*filtered* list through the whole pass. Both tables, the knobs they choose between, and
+the reading they were chosen for are in [rstag.md](rstag.md#measurements).
+
 ## Write path
 
 `planTagUpdates` turns results into `{ tags, rec }`. `add` only adds, `replaceAuto` also
@@ -524,6 +543,7 @@ carrying it merges in.
 | rest-list chips (`rstag`) | `tagRowReports(rows)` via `ui/restGrouper.restProfileMap` (its profile), or `restTagMap` for the aim-free pass | `tid` |
 | rest-list chips (`rstext`) | the same, through its own profile | `visitTime`, bucketed by domain |
 | rest-list chips (`rsfreq`/`rstrank`/`rstt`) | the same, with the pin cards' `#tag` headings as the priority tags and the aim pass on | the tuner's window, `tid` by default |
+| rest-list chips (`rrf`) | the same, through a profile whose `pipeline` is `'rrf'`, scored by `src/rstag.ts` | `visitTime`, bucketed by domain |
 | rule comparison (`run_src`) | `run_src('srctag/suggest.js')` | all four, side by side |
 
 All of them are `tagRows` with defaults; `onlyTids`, `priorityTags`, `synonyms`, `embed`,
@@ -589,7 +609,7 @@ omnibox's suggestion zone and the `rsdt`/`rsid`/`rsess` groupers — which carry
 still call `restTagMap`, and a script or a test can call either without asking for the aim
 pass.
 
-All five chip groupers keep `rsdt`'s blocks under the `chips` reading, so the mode is a
+All six chip groupers keep `rsdt`'s blocks under the `chips` reading, so the mode is a
 decoration layer and the list paints before the tags arrive. `restTagStore` receives
 whichever pass ran, so the userbar omnibox's suggestion zone ranks the same reports either
 way.
@@ -634,7 +654,7 @@ in it, so a CJK title contributes sliding bigrams; nothing here is Latin-only.
 
 ### The tuner (`src/ui/restTuner.tsx`)
 
-Each of the five profiled groupers renders an always-editable strip above its panel:
+Each of the six profiled groupers renders an always-editable strip above its panel:
 `RestTuner`, mounted by `cardTab.tsx` whenever `REST_PROFILES[restGrouper]` exists. Every
 value is component state (`RestHyperState`), so an experiment costs a keystroke and a
 reload restores the grouper's `RestTagProfile`; nothing is written to `db.tree`, and
@@ -646,14 +666,31 @@ parseable keystroke, so a half-typed `0.` is not overwritten by the value it cam
 | `viz` | which reading the panel below draws, and — for `priority` and `themes` — which blocks the list renders; first on the bar because it changes what the list is telling the reader at all |
 | `aim` | whether the aim pass runs; the profile decides by default |
 | `aimMin`, `promote ≥`, `themes ≤` | `TagAimConfig.aimMin` and `promoteMin` / `promoteTop`, shown while aim is on |
-| `dyn` | loads the store's `srctag/*` adapters into the pass; offered only where a dynamic channel carries weight (`restDynCapable`), which is `rstag` |
+| `dyn` | loads the store's `srctag/*` adapters into the pass; offered only where a dynamic channel carries weight (`restDynCapable`), which is `rstag` and `rrf` |
 | `window` | `tid`, `dt`, `visitTime`, or `domain` — the last is `visitTime` restricted to the row's own hostname, the reading `rstext` is fixed on |
-| `urls` | `TagRowsOptions.urls`: whether the row's `ref` and its Markdown links feed the channels |
+| `urls` | `TagRowsOptions.urls`: whether the row's `ref` and its Markdown links feed the token bag the trie and the graph walks read. The URL is out by default for `rrf`, and `w url` is the separate weight of its BM25F field |
 | the profile's knobs | one weight per channel that family scores with |
 | `topK`, `min` | `TagScoreConfig.topK` and `minScore` |
 | `rows` | how many of the newest rows the pass scores |
 | `graph w`, `damp`, `iters`, `tol`, `minLen` | the `TextRankOptions` of both graph channels, on the groupers that use them |
 | `fuzz`, `overlap` | `TrieOptions.distance` and `overlap`, on `rstt` |
+| `k1`, `b`, `w title`/`w url`/`w tags` | `Bm25Config`: the term-frequency curve and the three field weights, on `rrf` |
+| `max df` | `GlobalConfig.maxDf`: the share of the rows a term may sit on before it is dropped as a corpus-wide one, on `rrf` |
+| `stop` | `GlobalConfig.stop`: the function words dropped by name. It shows the shipped list, so a reader can see what is already gone before adding to it |
+| `rrf k` | `RrfConfig.k`, the fusion's rank constant, on `rrf` |
+| `mmr λ`, `graph λ` | `BucketConfig.lambda` and `graph`, shown while aim is on, on `rrf` |
+
+Every control and every reading carries its own hover text, held in `src/ui/restHelp.ts`
+as one line per control key, per channel, per reading, per window mode, and per grouper
+(`TUNER_HELP`, `CHANNEL_HELP`, `VIZ_HELP`, `WINDOW_HELP`, `PROFILE_HELP`). The `viz`
+select and the `window` select also title each of their options, so the open list says
+what each choice reads. The strip names in place what the family on screen does not score:
+`vizCaveat` is why `keyword hits` says the trie only lifts a curated tag under every
+grouper except `rstt`, which is the one that weighs the hit itself. The division of
+decision between the two modules is deliberate — `restGrouper.ts` holds what a knob *is*,
+`restHelp.ts` holds how to say it — and `test/restHelp.test.ts` checks the prose against
+`REST_PROFILES` and the two mode lists, so a renamed ref or a new reading fails rather
+than drifting.
 
 The window switch is the whole difference between `rstrank` and `rstext`: the same
 channels, read against different evidence; `graph w` is the TextRank co-occurrence window,
@@ -662,7 +699,9 @@ covers the fold (a knob the profile does not expose is left alone), the profiles
 reproducing the two read-path passes, the aim defaults and the `dyn` gate, the trie
 carrying a `rstt` row, the pin-card priority tags and their fallback, the URL toggle both
 ways, a `minLen` floor that takes a token out of the graph, and the window switch — the
-last on titles, because the URLs it once read are off.
+last on titles, because the URLs it once read are off. `test/restHelp.test.ts` covers the
+hover text: one line per grouper, reading, window mode and channel, and the `keywords`
+caveat only where the family leaves the `keyword` weight off.
 
 ### The visualization panel (`src/ui/restViz.tsx`)
 
@@ -673,7 +712,7 @@ inline SVG. The body follows the `viz` switch:
 | Reading | Body | Blocks |
 |---|---|---|
 | `chips` | a line saying the tag layer stays beside each row | kept: `rsdt` |
-| `priority` | rows on a curated tag vs none, and bars per kept tag, the priority-backed ones in a second color | replaced by `priority tag kept` / `no tag kept` / `unscored` |
+| `priority` | rows on a curated tag vs none, and bars per kept tag, the priority-backed ones in a second color; only the tags kept by more than one row are drawn, and the line above counts the rest and names the knobs that thin them | replaced by `priority tag kept` / `no tag kept` / `unscored` |
 | `themes` | one line per burst-and-anchor group carrying a shared theme, with its terms | replaced by one block per group |
 | `channels` | one bar per channel, split by its share of the pass's total contribution | kept: `rsdt` |
 | `keywords` | the surface forms the trie matched, with row counts and an example title | kept: `rsdt` |
@@ -685,12 +724,43 @@ Every row lands in exactly one block, and rows the pass's 200-row cap left unsco
 trailing `unscored` block rather than disappearing. A theme is counted by the same rule
 the promote half uses, so the panel shows the signal behind a sub-tag whether or not aim
 minted one, and the `themes` reading is the place to calibrate `promoteMin` and
-`themes ≤`.
+`themes ≤`. The `priority` reading counts *every* kept tag, not only the curated ones, so
+its bars say which tags the table is about and which channels carried the rest: each bar
+names its own channel through `VizPriority.topChannel` (`textrank`, `tfidf`, ...). On a
+list of mostly-distinct titles most kept tags are one row's business, so the panel draws
+only the tags more than one row kept and reports the remainder as `+ N kept by a single
+row`; what thins the drawn bars is `topK`, `stop` and `max df`
+([why](rstag.md#why-the-priority-reading-looks-flooded)). `priorityCoverage` returns the
+map beside the bars rather than on them, because the bars' own fields are asserted
+wholesale in `test/restVizData.test.ts`.
 
 The `rstag` panel also carries the `dyn` flag's status: which adapters the store held, the
 `AdapterSet.errors` lines for the ones it did not, and the vector cache's `primed` and
 `written` counts. A failed adapter degrades the pass to its static channels — a scoring
 call never throws over one — and turning `dyn` off restores the lexical-only reading.
+
+## The `rrf` grouper (3-stage pipeline)
+
+`rrf` is the one grouper that changes pipeline rather than channel weights: candidates from
+an exact matcher, ranked by BM25F, fused by rank rather than by score, then expanded per
+burst — the classical hybrid, since an exact matcher is a recall layer and not a ranking
+one. A pre-processing step in front of the ranking stage removes the terms that look like
+evidence and are not; it reads the same idea as [keyword search](search.md)'s own
+pre-processing.
+
+The pass machinery lives outside the UI layer. `src/rstag.ts` owns `runRestPass`,
+`restTagMap`, `restTextMap`, the caps and `RestPassSpec`; `src/ui/restGrouper.ts` keeps the
+profiles, the tuner's overrides and the `srctag/*` adapters, reaching the engine through
+the spec and its `dyn` hook. The dependency runs one way
+(`ui/restGrouper → rstag → srctag`), which is what lets the engine be tested without Dexie
+and lets the same pass run from a script later.
+
+[rstag.md](rstag.md) owns the rest — the pass and its six steps, the four pre-processing
+rules and why they drop terms from the inputs rather than filter the result, what each
+stage knobs, which knobs actually move a reading, the measurements they were chosen from,
+the plan for `rrf` replacing the weighted sum, and the risks that came out of building it.
+The tuner strip's `k1`, `b`, `w title` / `w url` / `w tags`, `max df`, `stop`, `rrf k` and
+`mmr λ` / `graph λ` rows are that pipeline's controls.
 
 ## Review notes
 
@@ -741,10 +811,34 @@ Findings from moving and re-reading this material, worth knowing before changing
   `npx vitest run test/srctag-cdp.test.ts --reporter=verbose --silent=false`, which reads
   the running app's own IndexedDB over CDP and runs the rows in the page as well as in
   Node. The same file's second describe is the channel and hyperparameter sweep (above).
+- `keyword hits` is offered for every grouper, and the trie is empty for none of them — it
+  is built from the priority tags whatever family is on screen. Only `rstt` weighs the hit
+  itself, so under the other five the reading says where a curated chip came from, not what
+  scored it; `vizCaveat` (`src/ui/restHelp.ts`) states that on the bar the reading is chosen
+  from rather than hiding the option.
+- The `priority` reading counts every kept tag, so under `rstrank` most of its bars are
+  words the TextRank walks carried, and the green ones are only the curated tags. The panel
+  draws the tags more than one row kept, since a one-off tag says what one row is about
+  rather than what the list is. What thins the drawn bars, and why a cut-off cannot do it,
+  is in [rstag.md](rstag.md#risks); each bar's tooltip names the channel that kept it,
+  through `VizPriority.topChannel`.
+- The rest-list pass and the `rrf` chain live in `src/rstag.ts`, not in
+  `src/ui/restGrouper.ts`: the engine holds what a pass *does* (cap, resolve the priority
+  tags, score, aim), the UI holds what a grouper *is* (profiles, tuner overrides, the
+  `srctag/*` adapter rows) and hands the engine a `RestPassSpec`, with `dyn` as a hook so
+  the network side never enters the engine. [rstag.md](rstag.md) owns that split, the stage
+  knobs, the measurements behind them, and the risks this material used to carry: the flat
+  fused score that no cut-off can thin, `minLen` against two-character CJK, dropping terms
+  from the inputs rather than the result, `urls` against `Bm25Config.fields.url`, a
+  frequency floor measured without a corpus, the shared `dev_`/`suffix_`/`ref_` convention,
+  a sub-tag `score` that counts rows, and the `bm25` channel that is not a rename of
+  `tfidf`.
 
 ## Related
 
+- `docs/rstag.md` — the rest-list pass, the `rrf` pipeline, its knobs, measurements and
+  risks.
 - `docs/filter_search.md` — the read path these tags feed.
 - `docs/recr-agloop.md` — `run_src`, the `rwr` gate, and `secret.md`.
-- `src/srctag.ts`, `src/srctagRows.ts`, `src/runsrc.ts`, `src/ui/restGrouper.ts`,
-  `src/ui/tagApply.ts`.
+- `src/srctag.ts`, `src/rstag.ts`, `src/srctagRows.ts`, `src/runsrc.ts`,
+  `src/ui/restGrouper.ts`, `src/ui/restHelp.ts`, `src/ui/tagApply.ts`.

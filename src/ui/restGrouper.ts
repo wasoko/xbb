@@ -5,12 +5,21 @@ import { getStore, runBody } from '../recr';
 import { metaTitle, parseSessionRef, SESSION_PREFIX } from '../sessionTree';
 import { modelVecCache, type VecCache } from '../vecCache';
 import {
-  DEFAULT_TAG_SCORE, DEFAULT_TEXTRANK, DEFAULT_TRIE, embedWithCache, pinPriorityTags, RSTEXT_TAG_SCORE,
-  SRCTAG_EMBED_REF, TAG_DEL, tagRowReports,
+  DEFAULT_BM25, DEFAULT_BUCKETS, DEFAULT_GLOBAL, DEFAULT_RRF, RRF_TAG_SCORE, RSTAG_LIMIT, RSTEXT_LIMIT, runRestPass,
+  type Bm25Config, type BucketConfig, type GlobalConfig, type RestPassSpec, type RestTagOptions, type RrfConfig,
+} from '../rstag';
+import {
+  DEFAULT_TAG_SCORE, DEFAULT_TEXTRANK, DEFAULT_TRIE, embedWithCache, RSTEXT_TAG_SCORE,
+  SRCTAG_EMBED_REF,
   type RowTagReport, type TagAimConfig, type TagDim, type TagParts, type TagRow, type TagRowsOptions,
   type TagScoreConfig, type TextRankOptions, type TrieOptions,
 } from '../srctag';
 import { loadAdapterSet, type AdapterSet } from './srctagSmoke';
+
+/* The pass itself lives in `src/rstag.ts`; these stay exported here because the
+   rest list and its tests reach the passes through this module. */
+export { RSTAG_LIMIT, RSTEXT_LIMIT, restTagMap, restTextMap } from '../rstag';
+export type { RestPassSpec, RestTagOptions } from '../rstag';
 
 export { dtMs };
 
@@ -88,11 +97,18 @@ export const RSTRANK_GROUPER = 'rstrank';
  */
 export const RSTT_GROUPER = 'rstt';
 
-/** Rows {@link restTagMap} scores; the rest list can hold hundreds of rows. */
-export const RSTAG_LIMIT = 200;
-
-/** Rows {@link restTextMap} scores. */
-export const RSTEXT_LIMIT = 200;
+/**
+ * `treeCac['restGrouper']` value: the same blocks and chips, scored by the
+ * 3-stage chain of `src/rstag.ts` — the TurboText candidates ranked by BM25F,
+ * fused with the semantic and lexical lists by reciprocal rank, and expanded
+ * into sub-tags by c-TF-IDF over each burst.
+ *
+ * The exact matcher is the recall layer here rather than the decision: it
+ * proposes candidates, BM25F ranks them by field-weighted relevance, and the
+ * fusion combines that with the embedding cosine by rank, so neither list needs
+ * calibrating against the other.
+ */
+export const RRF_GROUPER = 'rrf';
 
 /**
  * Ordering and bucketing a rest pass reads a row in. `domain` is the visit-time
@@ -170,21 +186,36 @@ export interface RestTagProfile {
   pinsPriority: boolean;
   /** Whether the aim pass (`srctag.applyTagAim`) runs over the pass's rows. */
   aim: boolean;
+  /**
+   * Which scoring pipeline the pass runs: `srctag`'s weighted channel sum (the
+   * default) or `rstag`'s 3-stage chain. The three algorithm groupers and the
+   * two read paths are all the same fusion; `rrf` is the one that is not.
+   */
+  pipeline?: 'fusion' | 'rrf';
   /** Mode the panel starts on; unset means {@link REST_VIZ_DEFAULT}. */
   viz?: RestVizMode;
   /** TextRank knobs the tuner offers, for the families that walk the graph. */
   rank?: TextRankOptions;
   /** Trie knobs the tuner offers, for `rstt`. */
   trie?: TrieOptions;
+  /** BM25F knobs the tuner offers, for `rrf`. */
+  bm25?: Bm25Config;
+  /** Fusion knobs the tuner offers, for `rrf`. */
+  rrf?: RrfConfig;
+  /** Sub-tag discovery knobs the tuner offers, for `rrf`. */
+  buckets?: BucketConfig;
+  /** Pre-processing knobs the tuner offers, for `rrf`: the corpus frequency floor. */
+  global?: GlobalConfig;
 }
 
 /**
- * The five tag groupers' presets. The three algorithm groupers isolate one family
+ * The six tag groupers' presets. The three algorithm groupers isolate one family
  * as the scorer — TF-IDF for `rsfreq`, the two TextRank walks for `rstrank`, the
  * TurboText trie for `rstt` — while the priority channel stays on in all three,
  * because the pin cards' `#tag` headings are the curated half of what they
  * propose. The two read paths, `rstag` and `rstext`, keep the fused default and
- * the TextRank preset.
+ * the TextRank preset. `rrf` is the one that changes pipeline rather than
+ * channel weights: BM25F and the fusion are stages, not weights.
  *
  * The three algorithm defaults are starting points, not answers; the tuner is
  * there to move them against a real table.
@@ -247,6 +278,26 @@ export const REST_PROFILES: Record<string, RestTagProfile> = {
     aim: true,
     trie: DEFAULT_TRIE,
   },
+  [RRF_GROUPER]: {
+    score: RRF_TAG_SCORE,
+    knobs: ['bm25', 'embed', 'textRank', 'clusterRank', 'priority'],
+    mode: 'domain',
+    limit: RSTAG_LIMIT,
+    /* The URL is out: under a list of one site's pages the hostname and the
+       browser in the query string are on every row, so they say nothing about
+       any one of them. `urls` keeps them out of the token bag and the BM25F `url`
+       field is weighted 0, which is the same decision twice — and `w url` on the
+       tuner is the one box that puts it back. */
+    urls: false,
+    pinsPriority: true,
+    aim: true,
+    rank: DEFAULT_TEXTRANK,
+    pipeline: 'rrf',
+    bm25: { ...DEFAULT_BM25, fields: { ...DEFAULT_BM25.fields, url: 0 } },
+    rrf: DEFAULT_RRF,
+    buckets: DEFAULT_BUCKETS,
+    global: DEFAULT_GLOBAL,
+  },
 };
 
 /**
@@ -282,6 +333,14 @@ export interface RestHyper {
   rank?: TextRankOptions;
   /** Trie overrides: fuzzy budget and overlap resolution. */
   trie?: TrieOptions;
+  /** BM25F overrides: the field weights and the two saturating knobs. */
+  bm25?: Partial<Bm25Config> & { fields?: Record<string, number> };
+  /** Fusion override: the rank constant. */
+  rrf?: Partial<RrfConfig>;
+  /** Sub-tag discovery overrides: the MMR trade-off and the graph share. */
+  buckets?: Partial<BucketConfig>;
+  /** Pre-processing override: the corpus frequency floor. */
+  global?: Partial<GlobalConfig>;
 }
 
 /** One {@link RestHyper} per grouper ref, as the tuner holds it in component state. */
@@ -593,10 +652,11 @@ const BUILT_IN_GROUPERS = new Map<string, (das: Da[]) => RestGroup[]>([
   // the tag chips are a decoration layer, so the blocks are `rsdt` itself
   [RSTAG_GROUPER, groupByDt],
   [RSTEXT_GROUPER, groupByDt],
-  // the three algorithm groupers add their own chips to the same rsdt blocks
+  // the algorithm groupers add their own chips to the same rsdt blocks
   [RSFREQ_GROUPER, groupByDt],
   [RSTRANK_GROUPER, groupByDt],
   [RSTT_GROUPER, groupByDt],
+  [RRF_GROUPER, groupByDt],
 ]);
 
 /**
@@ -611,129 +671,12 @@ export const isTagGrouper = (grouper: string | undefined): boolean =>
   !!grouper
   && (grouper === RSTAG_GROUPER || grouper === RSTEXT_GROUPER || grouper in REST_PROFILES);
 
-/** Options for {@link restTagMap}, {@link restTextMap} and {@link restProfileMap}. */
-export interface RestTagOptions {
-  /** Priority tags for the keyword trie; defaults to the pin cards', then to the scored rows' own tags. */
-  priorityTags?: string[];
-  /** Pin `md` cards whose `#tag` headings supply the priority tags of an algorithm pass. */
-  pins?: TagRow[];
-  /** Rows scored, newest `tid` first; defaults to the pass's own cap. */
-  limit?: number;
-  /** Extra channels, e.g. an API `embed`/`classify`, and weight overrides. Omitted leaves the local lexical channels only. */
-  tag?: TagRowsOptions;
-}
-
-/** Priority tags of a rest pass: the tags the scored rows themselves carry. */
-const restPriorityTags = (rows: Da[]): string[] =>
-  [...new Set(rows.flatMap((d) => d.tags ?? []))].filter((t) => t !== 'pin' && t !== TAG_DEL);
-
-/**
- * Key one pass's reports by `tid`, dropping any tag the row already carries so
- * the chips only ever show what `srctag` would add.
- *
- * @param rows rows the pass scored
- * @param reports reports the pass returned
- * @returns one report per scored row, keyed by `tid`
+/*
+ * The rest-list pass — its caps, its priority-tag resolution, `runRestPass`, and
+ * the two read-path presets — lives in `src/rstag.ts`. What stays here is what
+ * the list itself owns: the profiles, the tuner's overrides, and the adapter
+ * rows the store holds.
  */
-function ownTagLess(rows: Da[], reports: RowTagReport[]): Map<number, RowTagReport> {
-  const held = new Map(rows.map((d) => [d.tid, new Set(d.tags ?? [])]));
-  const out = new Map<number, RowTagReport>();
-  for (const r of reports) {
-    if (typeof r.tid !== 'number') continue;
-    const own = held.get(r.tid);
-    out.set(r.tid, own ? { ...r, tags: r.tags.filter((t) => !own.has(t.tag)) } : r);
-  }
-  return out;
-}
-
-/**
- * The fixed half of a rest pass: what it reads on, what it weighs, and where its
- * priority tags come from. The caller's {@link RestTagOptions} override the cap
- * and add channels.
- */
-interface RestPassSpec {
-  dim: TagDim;
-  bucket?: 'domain';
-  score: Partial<TagScoreConfig>;
-  limit: number;
-  /** Read the priority tags from the pin cards rather than from the scored rows. */
-  pinsPriority: boolean;
-  /** Aim knobs, or `false` to leave the raw scores; see `srctag.applyTagAim`. */
-  aim: Partial<TagAimConfig> | false;
-  /** Score with the store's `srctag/*` adapters as well as the lexical channels. */
-  dyn: boolean;
-}
-
-/**
- * Shared body of the rest-list tag passes: cap the rows, resolve the priority
- * tags, score, drop what the rows already carry, and run the aim pass.
- *
- * @param das rows below the pin cards.
- * @param spec the pass's dimension, weights, cap, priority source, aim, and adapters.
- * @param opts the caller's priority tags, pin cards, row cap, and channel overrides.
- * @returns one report per scored row, keyed by `tid`.
- */
-async function runRestPass(
-  das: Da[], spec: RestPassSpec, opts: RestTagOptions,
-): Promise<Map<number, RowTagReport>> {
-  const rows = byTidDesc(das).slice(0, opts.limit ?? spec.limit);
-  /* The pin cards' `#tag` headings are the curated half of an algorithm pass; a
-     table with no pin card falls back to the rows' own tags, so the trie the
-     priority channel builds is never empty. */
-  const pinTags = spec.pinsPriority ? pinPriorityTags(opts.pins ?? []) : [];
-  const priorityTags = opts.priorityTags ?? (pinTags.length > 0 ? pinTags : restPriorityTags(rows));
-  /* A dynamic adapter is a network call, so only a pass that asked for one makes
-     it; the aim pass reads the same priority list the fusion did. */
-  const dyn = spec.dyn ? await restDynTag(priorityTags) : {};
-  const reports = await tagRowReports(rows as TagRow[], {
-    ...opts.tag,
-    ...dyn,
-    ...(spec.bucket ? { bucket: spec.bucket } : {}),
-    score: { ...spec.score, ...opts.tag?.score },
-    window: { dim: spec.dim, ...opts.tag?.window },
-    priorityTags,
-    aim: spec.aim === false ? false : { ...spec.aim },
-  });
-  return ownTagLess(rows, reports);
-}
-
-/**
- * Run `srctag` over the rest rows and key its reports by `tid`, for the `rstag`
- * grouper's chips. Only the newest {@link RSTAG_LIMIT} rows are scored, a tag a
- * row already carries is dropped, and nothing is written back.
- *
- * @param das rows below the pin cards
- * @param opts priority tags, row cap, and channel overrides
- * @returns one report per scored row, keyed by `tid`
- */
-export async function restTagMap(das: Da[], opts: RestTagOptions = {}): Promise<Map<number, RowTagReport>> {
-  return runRestPass(das, {
-    dim: 'tid', score: {}, limit: RSTAG_LIMIT, pinsPriority: false, aim: false, dyn: false,
-  }, opts);
-}
-
-/**
- * The `rstext` pass: score each site's rows as their own working set, on the
- * visit-time dimension, with TF-IDF suppressed and TextRank carrying the score.
- *
- * Bucketing by hostname is what the neighbour window cannot do on its own — a
- * burst of sibling links from one search page shares its vocabulary, so a row's
- * nearest neighbours are the wrong evidence for what it is about, while its
- * site's other rows are the right one. Within a bucket the window is the
- * visit-time one, so the rows a user opened together still pool their terms.
- *
- * Nothing is written back; the caller renders the reports as chips.
- *
- * @param das rows below the pin cards
- * @param opts priority tags, row cap, and channel overrides
- * @returns one report per scored row, keyed by `tid`
- */
-export async function restTextMap(das: Da[], opts: RestTagOptions = {}): Promise<Map<number, RowTagReport>> {
-  return runRestPass(das, {
-    dim: 'visitTime', bucket: 'domain', score: RSTEXT_TAG_SCORE,
-    limit: RSTEXT_LIMIT, pinsPriority: false, aim: false, dyn: false,
-  }, opts);
-}
 
 /**
  * A profile pass: the family's channels score the rows, the priority tags come
@@ -768,7 +711,18 @@ export async function restProfileMap(
     score: restHyperScore(profile, hyper),
     limit: hyper?.limit ?? profile.limit,
     aim: restAim(profile, hyper),
-    dyn: restDynCapable(profile) && hyper?.dyn === true,
+    ...(profile.pipeline ? { pipeline: profile.pipeline } : {}),
+    ...(profile.bm25 || hyper?.bm25
+      ? { bm25: { ...profile.bm25, ...hyper?.bm25 } } : {}),
+    ...(profile.rrf || hyper?.rrf
+      ? { rrf: { ...profile.rrf, ...hyper?.rrf } } : {}),
+    ...(profile.buckets || hyper?.buckets
+      ? { buckets: { ...profile.buckets, ...hyper?.buckets } } : {}),
+    ...(profile.global || hyper?.global
+      ? { global: { ...profile.global, ...hyper?.global } } : {}),
+    /* Only a pass that asked for the adapters makes the call, and it makes it
+       with the priority tags the pass actually resolved. */
+    ...(restDynCapable(profile) && hyper?.dyn === true ? { dyn: restDynTag } : {}),
   }, { ...opts, tag });
 }
 

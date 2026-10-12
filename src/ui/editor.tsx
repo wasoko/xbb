@@ -99,12 +99,17 @@ function Versions({ source, rec, txt, onPick, onDiscard }: {
   onDiscard: (stamp: string) => void;
 }) {
   const hist = (rec[source] ?? {}) as VerHist;
-  const stamps = Object.keys(hist);
-  if (stamps.length === 0) return null;
+  /** Newest first: a `ver` entry is dated by its own server `dt`, a `cr` entry by the local
+   *  stamp its key carries (a `cr` snapshot's `dt` is the row's, not the discard's). The same
+   *  time labels the row, so the order and the printed date cannot disagree. */
+  const rows = Object.entries(hist).map(([stamp, entry]) => ({
+    stamp, at: source === 'ver' && entry.dt ? new Date(entry.dt).getTime() : stampTime(stamp),
+  })).sort((a, b) => b.at - a.at);
+  if (rows.length === 0) return null;
   return (
     <div className="dropdown-field" style={{ display: 'block', fontSize: 11 }}>
-      <div style={{ opacity: 0.75 }}>{source} ({stamps.length})</div>
-      {stamps.map(stamp => (
+      <div style={{ opacity: 0.75 }}>{source} ({rows.length})</div>
+      {rows.map(({ stamp, at }) => (
         <div key={stamp} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <button
             onClick={() => onPick(stamp)}
@@ -113,7 +118,7 @@ function Versions({ source, rec, txt, onPick, onDiscard }: {
               , textOverflow: 'ellipsis', textAlign: 'left', fontSize: 11
               , padding: '2px 4px', cursor: 'pointer', opacity: 0.9 }}
           >
-            {new Date(stampTime(stamp)).toLocaleString()} · {(hist[stamp].txt ?? '').slice(0, 40)}
+            {new Date(at).toLocaleString()} · {(hist[stamp].txt ?? '').slice(0, 40)}
           </button>
           <VerStat version={hist[stamp].txt ?? ''} row={txt} />
           <button
@@ -673,14 +678,18 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
             <div className="dropdown-meta">
               <TagMeta ref={dropdownTab} sync={syncState} />
             </div>
-            <Versions source="ver" rec={dropdownRec} txt={dropdownTxt}
-              onPick={stamp => { setDropdownTab(null)
-                ; popDiff({ ref: dropdownTab!, source: 'ver', stamp }) }}
-              onDiscard={stamp => { void discardEntry('ver', stamp) }} />
-            <Versions source="cr" rec={dropdownRec} txt={dropdownTxt}
-              onPick={stamp => { setDropdownTab(null)
-                ; popDiff({ ref: dropdownTab!, source: 'cr', stamp }) }}
-              onDiscard={stamp => { void discardEntry('cr', stamp) }} />
+            {/* discarded edits first: they are the ones a human looks for, and the panel
+                crops the whole list so a long history cannot walk off the window */}
+            <div className="dropdown-versions">
+              <Versions source="cr" rec={dropdownRec} txt={dropdownTxt}
+                onPick={stamp => { setDropdownTab(null)
+                  ; popDiff({ ref: dropdownTab!, source: 'cr', stamp }) }}
+                onDiscard={stamp => { void discardEntry('cr', stamp) }} />
+              <Versions source="ver" rec={dropdownRec} txt={dropdownTxt}
+                onPick={stamp => { setDropdownTab(null)
+                  ; popDiff({ ref: dropdownTab!, source: 'ver', stamp }) }}
+                onDiscard={stamp => { void discardEntry('ver', stamp) }} />
+            </div>
             <div className="dropdown-actions">
               <button onClick={() => setDropdownTab(null)}>Cancel</button>
               <button onClick={saveTagMetadata} className="btn-save">Save</button>
@@ -1245,20 +1254,26 @@ export function EditorSplitPane({ openTabs, activeTab, sessionId, nodeId
   const [dragging, setDragging] = useState(false);
   const paneRef = useRef<HTMLDivElement | null>(null);
 
+  /** The handle captures the pointer, so the release arrives even outside the window: a
+   *  stranded `dragging-row` would hold the up-down cursor over every element. */
   useEffect(() => {
     if (!dragging) return;
-    const onMove = (e: MouseEvent) => {
+    document.body.classList.add('dragging-row');
+    const onMove = (e: PointerEvent) => {
       const box = paneRef.current?.getBoundingClientRect();
       if (!box || box.height === 0) return;
       const pct = ((e.clientY - box.top) / box.height) * 100;
       setEditorPct(Math.min(85, Math.max(20, pct)));
     };
     const stop = () => setDragging(false);
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', stop);
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
     return () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', stop);
+      document.body.classList.remove('dragging-row');
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
     };
   }, [dragging]);
 
@@ -1279,9 +1294,13 @@ export function EditorSplitPane({ openTabs, activeTab, sessionId, nodeId
             /></LocalErrorBoundary>
           </div>
           <div
-            className="resize-handle"
-            style={{ flex: '0 0 auto', width: '100%', height: 6, cursor: 'row-resize' }}
-            onMouseDown={(e) => { e.preventDefault(); setDragging(true); }}
+            className="resize-handle row"
+            style={{ flex: '0 0 auto', cursor: 'row-resize' }}
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.currentTarget.setPointerCapture(e.pointerId);
+              setDragging(true);
+            }}
           />
         </>
       )}

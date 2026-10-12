@@ -35,15 +35,28 @@
       .split-container { display: flex; width: 100%; height: 100%; position: relative; }
       .left-panel { overflow: auto; background: rgba(30, 30, 40, 0.9); border-right: 1px solid rgba(255, 255, 255, 0.1); }
       .right-panel { overflow: auto; }
-      .resize-handle { width: 4px; background: rgba(255, 255, 255, 0.2); cursor: col-resize; transition: background 0.2s; }
+      /* Split handle: a thin bar with an invisible grab zone 3px wider on each side, so the pointer
+         lands on the handle instead of the panel scrollbar or a list chip beside it. The cursor is
+         set on the element itself (tabs.tsx / editor.tsx), beside the drag that owns it. */
+      .resize-handle { position: relative; width: 4px; background: rgba(255, 255, 255, 0.2); transition: background 0.2s; }
+      .resize-handle::after { content: ''; position: absolute; top: 0; bottom: 0; left: -3px; right: -3px; }
       .resize-handle:hover { background: #3b82f6; }
+      /* Column split (editor above chat): the divider runs the other way, so its grab zone does too. */
+      .resize-handle.row { width: 100%; height: 6px; }
+      .resize-handle.row::after { top: -3px; bottom: -3px; left: 0; right: 0; }
+      /* The pointer leaves the thin handle while dragging; hold one cursor for the whole drag. */
+      body.dragging-col, body.dragging-col * { cursor: col-resize !important; }
+      body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
+      body.dragging-col, body.dragging-row { user-select: none; }
 
       /* --- Navigation & Bars --- */
       .user-menu-container { position: relative; pointer-events: auto; }
       .user-avatar { width: 40px; height: 40px; margin: 11px; border-radius: 50%; overflow: hidden; background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.2); color: white; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.2s; font-size: 20px; }
       .avatar-img { width: 100%; height: 100%; object-fit: cover; }
       .user-avatar:hover { background: rgba(255, 255, 255, 0.2); transform: scale(1.05); }
-      .user-dropdown { position: absolute; top: 77px; right: 0; background: rgba(0, 0, 0, 0.8); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 12px; padding: 8px; display: flex; flex-direction: column; gap: 4px; min-width: 222px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); max-height: calc(100vh - 100px); overflow-y: auto; }
+      /* right-anchored: the panel hangs off the screen's right edge, 555px wide, top edge kept under the bar (36px + 77px);
+         a screen narrower than 555px crops the panel's left edge, its own scroll handles the overflow */
+      .user-dropdown { position: fixed; top: calc(36px + 77px); right: 0; left: auto; width: 555px; min-width: 222px; max-width: 95vw; background: rgba(0, 0, 0, 0.8); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 12px; padding: 8px; display: flex; flex-direction: column; gap: 4px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); max-height: calc(100vh - 36px - 77px); overflow: auto; }
       .user-dropdown-item { padding: 8px 12px; color: white; text-decoration: none; font-size: 13px; border-radius: 6px; cursor: pointer; transition: background 0.2s; border: none; background: none; text-align: left; width: 100%; }
       .user-dropdown-item:hover { background: rgba(255, 255, 255, 0.1); }
       .signin-btn { pointer-events: auto; background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(10px); color: white; border: 1px solid rgba(255, 255, 255, 0.2); padding: 6px 16px; border-radius: 20px; cursor: pointer; font-size: 14px; transition: all 0.2s; }
@@ -97,11 +110,13 @@
 
       /* --- Dropdowns & Portals --- */
       .tab-dropdown-portal { position: absolute; top: 35px; z-index: 1000; pointer-events: auto; }
-      .tab-dropdown-content { background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-width: 200px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); color: white; }
+      .tab-dropdown-content { background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-width: 200px; max-width: min(380px, calc(100vw - 24px)); box-shadow: 0 8px 24px rgba(0,0,0,0.6); color: white; }
       .dropdown-field { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
       .dropdown-field label { color: #aaa; }
-      .dropdown-field input, .dropdown-field select { background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 4px; color: white; padding: 2px 6px; font-size: 12px; }
+      .dropdown-field input, .dropdown-field select { background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 4px; color: white; padding: 2px 6px; font-size: 12px; min-width: 0; }
       .dropdown-meta { border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 8px; margin-top: 4px; }
+      /* cropped to a window height: a row with many versions scrolls instead of growing the panel */
+      .dropdown-versions { display: flex; flex-direction: column; gap: 10px; overflow-y: auto; overflow-x: hidden; max-height: 45vh; }
       .meta-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; font-size: 12px; }
       .meta-item span:first-child { color: #888; }
       .dropdown-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
@@ -127,15 +142,21 @@
       .mobile-drilldown-hint { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); background: rgba(0, 0, 0, 0.8); padding: 5px 10px; border-radius: 20px; font-size: 12px; color: white; pointer-events: none; z-index: 3; }
       @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
+      /* --- crop-scroll: the cropped-row window shared by the cs1 matches, the cs2 da rows and the rest-tag chip strips --- */
+      /* Content wider than the window scrolls sideways instead of wrapping, so a long title never widens the list.
+         The width is `treeCac['cropWidth']`, written to `--crop-w` by `src/ui/cropWidth.ts`; with the variable unset
+         the fallback holds. The bar is a 1px hairline rather than the 8px global scrollbar; `scrollbar-width` stays
+         unset, or Chromium would drop these rules. */
+      .crop-scroll { display: inline-block; max-width: var(--crop-w, max(33.33%, 222px)); overflow-x: auto; overflow-y: hidden; white-space: nowrap; vertical-align: bottom; }
+      .crop-scroll::-webkit-scrollbar { height: 1px; width: 1px; }
+      .crop-scroll::-webkit-scrollbar-track { background: transparent; }
+      .crop-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.35); border-radius: 1px; }
+      .crop-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.5); }
+
       /* --- cs1 card renderer --- */
-      .cs1-match { color: var(--bt-color); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; text-decoration: none; display: inline-block; max-width: max(33.33%, 222px); overflow-x: auto; overflow-y: hidden; white-space: nowrap; vertical-align: bottom; }
+      .cs1-match { color: var(--bt-color); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; text-decoration: none; }
       button.cs1-match { background: rgba(255,255,255,0.05); border: 1px solid var(--bt-color); }
       a.cs1-match:hover { text-decoration: underline; }
-      /* Hairline WebKit scrollbar under an overflowing match row. */
-      .cs1-match::-webkit-scrollbar { height: 1px; width: 1px; }
-      .cs1-match::-webkit-scrollbar-track { background: transparent; }
-      .cs1-match::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.35); border-radius: 1px; }
-      .cs1-match::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.5); }
 
       /* --- hover preview (dark panel, same family as .tab-dropdown-content) --- */
       .tip > * > :first-child { margin-top: 0; }

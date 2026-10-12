@@ -23,7 +23,7 @@ flowchart TD
 
 ## View switch
 
-`treeCac['tabSeer']` selects the view, `treeCac['cardSeer']` the pin-row renderer, and `treeCac['restGrouper']` how the rows below the pins are grouped (`src/sdb.ts:61-70`).
+`treeCac['tabSeer']` selects the view, `treeCac['cardSeer']` the pin-row renderer, `treeCac['restGrouper']` how the rows below the pins are grouped (`src/sdb.ts:61-70`), and `treeCac['cropWidth']` how wide a cropped row may grow before it scrolls.
 
 | Setting | Value | View |
 |---|---|---|
@@ -35,19 +35,32 @@ flowchart TD
 | `restGrouper` | `'rsid'` | `rsdt` plus one visit-time subgroup per exact `rec.visitTime` inside each date block; rows without a visit time stay under the date heading |
 | `restGrouper` | `'rstag'` / `'rstext'` | the `rsdt` blocks unchanged, plus each row's `srctag` suggestions as dotted-outline chips in a cropped, scrollable strip (solid and italic for a promoted `parent/theme` sub-tag); hovering a chip names the channels that produced it and every scored row proposing it ([sTag.md](sTag.md#read-only-chips-restgrouper-rstag)) |
 | `restGrouper` | `'rsfreq'` / `'rstrank'` / `'rstt'` | the same blocks and chips scored by one channel family instead of the fused mix — TF-IDF, the two TextRank walks, or the TurboText trie — with the pin cards' `#tag` headings as the priority tags, the aim pass on, and a visualization switch plus hyperparameters above the blocks ([sTag.md](sTag.md#algorithm-groupers-rsfreq-rstrank-rstt)) |
+| `restGrouper` | `'rrf'` | the same blocks and chips scored by the 3-stage chain of `src/rstag.ts` — TurboText candidates, BM25F over the title and the row's tags, then a rank fusion of that with the semantic and TextRank lists — with the pin cards' headings as the priority tags, sub-tags discovered per burst by c-TF-IDF, and the URL plus any provenance tag or filter term dropped before scoring ([rstag.md](rstag.md)) |
 | `restGrouper` | `'none'` or empty | rest rows render flat, without headings |
 | `restGrouper` | any other ref | the `type='src'` row of that ref returns the blocks; a block carries `items`, `subgroups`, or both. A missing row, a throwing body, or a result that is not an array of blocks falls back to flat |
+| `cropWidth` | any CSS width | the cap every `.crop-scroll` row scrolls past; default `max(33.33%, 222px)` |
 
 Every built-in sorts the rows by `tid` descending before grouping, so each block
 reads in insertion order (`iq` already returns that order).
 
-`cardSeer` and `restGrouper` apply without a reload: both are read through
-`useTreeCac` (`src/ui/useTreeCac.ts`), which subscribes to the `tree` row the
-settings menu writes. `tabSeer` still reads `treeCac` directly at render.
+`cardSeer`, `restGrouper` and `cropWidth` apply without a reload: all three are
+read through `useTreeCac` (`src/ui/useTreeCac.ts`), which subscribes to the `tree`
+row the settings menu writes. `tabSeer` still reads `treeCac` directly at render.
 
-Rest rows always render the cropped preview row: the whole `txt` stays in
-the DOM, clipped to `22ch` by CSS (`src/ui/cardTab.tsx:21`), so browser
-find-in-page still matches the clipped tail.
+## Row cropping
+
+One rule crops every row that can outgrow its column — a cs1 match
+(`.cs1-match`), a cs2 `da-row` in either card tab, and a rest-tag chip strip
+(`.rest-tag-chips`): `.crop-scroll` in `index.html` caps the width, scrolls
+sideways, and draws a 1px WebKit hairline bar instead of the 8px global
+scrollbar. The whole text stays in the DOM and is clipped rather than sliced, so
+browser find-in-page still matches the hidden tail; `scrollbar-width` stays
+unset, because specifying it would make Chromium drop the `::-webkit-scrollbar`
+rules.
+
+The width is one setting: `src/ui/cropWidth.ts` writes `treeCac['cropWidth']` to
+`--crop-w` on `documentElement`, and the rule falls back to `max(33.33%, 222px)`
+while no row has read it.
 
 ## CardTab vs BadCardTab
 
@@ -68,7 +81,7 @@ Same call and same arguments at the same `limit`: CardTab never returns rows Bad
 |---|---|
 | Pins occupy a fixed 66vh, each row squeezed to `66/pinCount vh` with its own `overflow: auto` | `src/ui/cardTab.tsx:124`, `:129` |
 | `.rest-das` has no height, so `.left-panel` scrolls the whole view instead | `src/ui/cardTab.tsx:145`, `index.html:36` |
-| `card-tab`, `pin-cards`, `pin-card-row`, `rest-das`, `rest-group`, `rest-group-head`, `da-row`, `end-message` have no rule in `index.html` or `src/tw4.css` | inline styles only |
+| `card-tab`, `pin-cards`, `pin-card-row`, `rest-das`, `rest-group`, `rest-group-head`, `end-message` have no rule in `index.html` or `src/tw4.css` | inline styles only |
 | a short page ends the window early and reports "No more data" without a count | `src/sdb.ts:123`, `src/ui/cardTab.tsx:112` |
 
 ## Crumb cache
@@ -81,7 +94,8 @@ How a row's `tags[]` are scored and written is documented in [sTag.md](sTag.md),
 methodology: the static channels in `src/srctag.ts` (TF-IDF, TextRank, the TurboText
 keyword automaton, `hashEmbed`, the priority and classifier shares) and the dynamic
 `type='src'` rows `run_src` evaluates (`srctag/embed.js`, `srctag/classify.js`,
-`srctag/suggest.js`, `srctag/suggest-ds.js`).
+`srctag/suggest.js`, `srctag/suggest-ds.js`). The rest list's own pass and the `rrf`
+grouper's pipeline are [rstag.md](rstag.md).
 
 This document keeps what the read path needs: `rstag` and `rstext` in the View switch
 above render those suggestions as chips, and the hover preview prints the per-channel

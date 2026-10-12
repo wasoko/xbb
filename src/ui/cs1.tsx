@@ -90,7 +90,7 @@ function MatchedDas({
           return (
             <button
               key={d.ref}
-              className="cs1-match"
+              className="cs1-match crop-scroll"
               onClick={() => onSelectTag(d.ref)}
               {...{ [TIP_ATTR]: '' }}
               ref={(el) => setTip(el, d)}
@@ -102,7 +102,7 @@ function MatchedDas({
         return (
           <Link
             key={d.ref}
-            className="cs1-match"
+            className="cs1-match crop-scroll"
             to={d.ref}
             onClick={() => onSelectTag(d.ref)}
             {...{ [TIP_ATTR]: '' }}

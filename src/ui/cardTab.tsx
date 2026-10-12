@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { fmtAgo, getColorChar11, sideLog } from '../fc';
-import { iqWithCrumbs, type Da } from '../sdb';
+import { IQ_CNT, iqWithCrumbs, type Da } from '../sdb';
 import { RECR_TYPE } from '../recrConst';
 import { recrRowLabel, recrTargetOf, type RecrTarget } from '../sessionTree';
 import { cardDoubleClick, Cs1Renderer, matchedRefsByPins } from './cs1';
@@ -16,22 +16,15 @@ import { explanationText, type RowTagReport } from '../srctag';
 import { useTreeCac } from './useTreeCac';
 
 /** Rows read per page; the sentinel widens the read window by this much. */
-const PAGE = 555;
+const PAGE = IQ_CNT;
 
 const SELECTED_BG = 'rgba(59, 130, 246, 0.3)';
 
-/**
- * Preview-row caption width. The whole `txt` stays in the DOM and is cropped by
- * clipping instead of `slice`, so browser find-in-page can still reach the
- * hidden tail; `33ch` is the character budget the rows used to slice to.
- */
-const PREVIEW_CROP: React.CSSProperties = {
-  display: 'inline-block',
-  maxWidth: '22ch',
-  whiteSpace: 'nowrap',
-  overflow: 'auto',
-  // scrollbarColor: '#bbb transparent', 
-};
+/* Row cropping — the fixed width, the sideways scroll and the hairline bar —
+   lives in the shared `.crop-scroll` rule of `index.html`, so a `.da-row` and a
+   `.cs1-match` crop at the same `treeCac['cropWidth']`-driven width. The whole
+   `txt` stays in the DOM and is cropped by clipping instead of `slice`, so
+   browser find-in-page can still reach the hidden tail. */
 
 const isPinCardRow = (da: Da) =>
   da.type === 'md' && typeof da.ref === 'string' && da.ref.startsWith('pin');
@@ -146,7 +139,7 @@ export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, ren
   const profile = REST_PROFILES[restGrouper];
   const restTags = useLiveQuery(
     async () => (profile
-      ? restProfileMap(listedRest, restGrouper, hyper, { pins: pinRows })
+      ? restProfileMap(listedRest, restGrouper, hyper, { pins: pinRows, filters: filtersStable })
       : restTagMap(listedRest)),
     [restTagKey, restGrouper, hyperKey, profile !== undefined],
     new Map<number, RowTagReport>(),
@@ -225,7 +218,7 @@ export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, ren
           )}
           {viz && (
             <RestViz grouper={restGrouper} mode={viz} rows={listedRest} reports={restTags}
-              dyn={hyper?.dyn === true} />
+              hyper={hyper} dyn={hyper?.dyn === true} />
           )}
           {(vizGroups ?? restGroups).map((g) => (
             <div key={g.key} className="rest-group">
@@ -277,8 +270,8 @@ function RestGroupHead({ label, level = 1 }: { label: string; level?: 1 | 2 }) {
 
 /**
  * Preview row: `http(s)` refs open in a new tab, `md` refs open the editor,
- * any other ref navigates; the caption is `txt` cropped to a fixed
- * {@link PREVIEW_CROP} width by CSS, so the clip does not remove text from find.
+ * any other ref navigates; the caption is `txt` cropped by the shared
+ * `.crop-scroll` rule, so the clip does not remove text from find.
  *
  * @param props.da - Row to render.
  * @param props.onSelectTag - Opens the row's ref in the editor pane.
@@ -308,7 +301,6 @@ function Cs2Renderer({
 
   const rowStyle: React.CSSProperties = {
     cursor: 'pointer',
-    ...PREVIEW_CROP,
     ...(selectedRef === da.ref ? { background: SELECTED_BG } : {}),
     textDecoration: isHovered ? 'underline' : 'none',
   };
@@ -320,7 +312,7 @@ function Cs2Renderer({
   if (da.type === RECR_TYPE) {
     /* A recr row opens the chat at its session or node, or opens a config row as a tab. */
     return (
-      <button className="da-row" onClick={() => onJump(recrTargetOf(da.ref))}
+      <button className="da-row crop-scroll" onClick={() => onJump(recrTargetOf(da.ref))}
         title={tip ? undefined : da.ref}
         {...(tip ? { [TIP_ATTR]: '', ref: (el: HTMLButtonElement | null) => setTip(el, da) } : {})}
         style={rowStyle} {...hover}>
@@ -330,7 +322,7 @@ function Cs2Renderer({
   }
   if (isUrl) {
     return (
-      <a className="da-row" href={da.ref} target="_blank" rel="noreferrer"
+      <a className="da-row crop-scroll" href={da.ref} target="_blank" rel="noreferrer"
         title={tip ? undefined : title}
         {...(tip ? { [TIP_ATTR]: '', ref: (el: HTMLAnchorElement | null) => setTip(el, da) } : {})}
         style={rowStyle} {...hover}>
@@ -340,7 +332,7 @@ function Cs2Renderer({
   }
   if (da.type === 'md') {
     return (
-      <button className="da-row" onClick={() => onSelectTag(da.ref)}
+      <button className="da-row crop-scroll" onClick={() => onSelectTag(da.ref)}
         title={tip ? undefined : title}
         {...(tip ? { [TIP_ATTR]: '', ref: (el: HTMLButtonElement | null) => setTip(el, da) } : {})}
         style={rowStyle} {...hover}>
@@ -349,7 +341,7 @@ function Cs2Renderer({
     );
   }
   return (
-    <Link className="da-row" to={da.ref} onClick={() => onSelectTag(da.ref)}
+    <Link className="da-row crop-scroll" to={da.ref} onClick={() => onSelectTag(da.ref)}
       title={tip ? undefined : title}
       {...(tip ? { [TIP_ATTR]: '', ref: (el: HTMLAnchorElement | null) => setTip(el, da) } : {})}
       style={rowStyle} {...hover}>
@@ -373,7 +365,8 @@ const tagCue = (tag: string): string =>
  * persisted tags render as. Border longhands rather than the `border` shorthand,
  * because the last chip of a strip unsets its right side. The native title
  * carries the channel breakdown and the rows that proposed the tag, so a chip
- * holds no state.
+ * holds no state. The `help` cursor matches that: hovering explains, a chip has
+ * nothing to click.
  */
 const DYNAMIC_CHIP: React.CSSProperties = {
   display: 'inline-block',
@@ -389,16 +382,10 @@ const DYNAMIC_CHIP: React.CSSProperties = {
 };
 
 /**
- * Chip strip: cropped to a fixed width and scrolled, the way a preview row is, so
- * a row with many suggestions cannot widen the list.
+ * Chip strip: the shared `.crop-scroll` window, so a row with many suggestions
+ * cannot widen the list.
  */
 const CHIP_STRIP: React.CSSProperties = {
-  display: 'inline-block',
-  maxWidth: 'max(33.33%, 222px)',
-  overflowX: 'auto',
-  overflowY: 'hidden',
-  whiteSpace: 'nowrap',
-  verticalAlign: 'bottom',
   marginRight: 2,
 };
 
@@ -428,7 +415,7 @@ function DynamicTagChips({ report, contributors }: {
   contributors?: Map<string, Da[]>;
 }) {
   return (
-    <span className="rest-tag-chips" style={CHIP_STRIP}>
+    <span className="rest-tag-chips crop-scroll" style={CHIP_STRIP}>
       {report.tags.map((t, i) => {
         const rows = contributors?.get(t.tag) ?? [];
         const title = [

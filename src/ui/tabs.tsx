@@ -12,6 +12,7 @@ import { Cs1Renderer } from './cs1';
 import { CardTab, type CardTabProps } from './cardTab';
 import { setTip, TipHost, TIP_ATTR } from './Tip';
 import { useTreeCac } from './useTreeCac';
+import { useCropWidth } from './cropWidth';
 import { subscribeNav } from './navStore';
 
 /* ─────────────────────────────────────────────────────────────
@@ -128,7 +129,7 @@ function Cs2Renderer({ da, onSelectTag, onJump, tip = false }: {
     /* A recr row jumps into the chat pane rather than opening as a file. */
     return (
       <button
-        className="da-row"
+        className="da-row crop-scroll"
         onClick={() => onJump?.(recrTargetOf(da.ref))}
         style={rowStyle}
         title={da.ref}
@@ -142,7 +143,7 @@ function Cs2Renderer({ da, onSelectTag, onJump, tip = false }: {
   if (isUrl) {
     return (
       <a 
-        className="da-row" 
+        className="da-row crop-scroll" 
         href={da.ref} 
         target="_blank" 
         rel="noreferrer" 
@@ -158,7 +159,7 @@ function Cs2Renderer({ da, onSelectTag, onJump, tip = false }: {
   if (da.type === 'md') {
     return (
       <button 
-        className="da-row" 
+        className="da-row crop-scroll" 
         onClick={() => onSelectTag(da.ref)} 
         style={rowStyle}
         title={tip ? undefined : tooltip}
@@ -172,7 +173,7 @@ function Cs2Renderer({ da, onSelectTag, onJump, tip = false }: {
   }
   return (
     <Link 
-      className="da-row" 
+      className="da-row crop-scroll" 
       to={da.ref} 
       onClick={() => onSelectTag(da.ref)} 
       style={rowStyle}
@@ -192,6 +193,8 @@ function Cs2Renderer({ da, onSelectTag, onJump, tip = false }: {
 
 export function VbCard() {
   const [searchParams, setSearchParams] = useSearchParams();
+  /* One root variable every `.crop-scroll` window reads; see `useCropWidth`. */
+  useCropWidth();
   const [splitWidth, setSplitWidth] = useState(600);
   const [isDragging, setIsDragging] = useState(false);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -268,22 +271,31 @@ export function VbCard() {
   }, [updateUrl]);
 
   /* Desktop resize drag */
-  const handleMouseMove = useCallback((e: MouseEvent) => {
+  const handlePointerMove = useCallback((e: PointerEvent) => {
     if (!isDragging) return;
     const newWidth = e.clientX;
     if (newWidth > 300 && newWidth < window.innerWidth - 300) setSplitWidth(newWidth);
   }, [isDragging]);
 
+  /**
+   * The handle captures the pointer, so the release arrives even when the button comes up
+   * outside the window. Without that, `dragging-col` — which holds one cursor for the whole
+   * drag — stays on the body and keeps clamping the cursor of every element.
+   */
   useEffect(() => {
     if (!isDragging) return;
-    const up = () => setIsDragging(false);
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', up);
+    document.body.classList.add('dragging-col');
+    const stop = () => setIsDragging(false);
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
     return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', up);
+      document.body.classList.remove('dragging-col');
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
     };
-  }, [isDragging, handleMouseMove]);
+  }, [isDragging, handlePointerMove]);
 
   const listProps: Omit<CardTabProps, 'renderer'> = {
     filters,
@@ -351,7 +363,15 @@ export function VbCard() {
           {mainView}
         </div>
 
-        <div className="resize-handle" onMouseDown={() => setIsDragging(true)} />
+        <div
+          className="resize-handle"
+          style={{ cursor: 'col-resize' }}
+          onPointerDown={(e) => {
+            e.preventDefault();
+            e.currentTarget.setPointerCapture(e.pointerId);
+            setIsDragging(true);
+          }}
+        />
 
         <div className="right-panel" style={{ flex: 1, height: '100%' }}>
           {editorPane}

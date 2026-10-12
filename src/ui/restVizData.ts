@@ -103,6 +103,12 @@ export interface VizPriority {
   unscored: Da[];
   /** Kept tags by rows keeping them, most widespread first. */
   bars: VizTagBar[];
+  /**
+   * Channel with the largest contribution for one kept tag, so the panel can name
+   * what carried a bar the priority half did not. A tag two channels carried
+   * equally reads as the first of the explanation's descending order.
+   */
+  topChannel: Map<string, keyof TagParts>;
 }
 
 /**
@@ -123,6 +129,7 @@ export function priorityCoverage(rows: Da[], reports: VizReports): VizPriority {
   const unscored: Da[] = [];
   const counts = new Map<string, number>();
   const curated = new Set<string>();
+  const topChannel = new Map<string, keyof TagParts>();
   let scored = 0;
 
   for (const row of rows) {
@@ -135,6 +142,7 @@ export function priorityCoverage(rows: Da[], reports: VizReports): VizPriority {
     let kept = 0;
     for (const t of report.tags) {
       counts.set(t.tag, (counts.get(t.tag) ?? 0) + 1);
+      if (t.top) topChannel.set(t.tag, t.top);
       if (isPriorityTag(t)) {
         curated.add(t.tag);
         kept++;
@@ -147,6 +155,7 @@ export function priorityCoverage(rows: Da[], reports: VizReports): VizPriority {
     tagged,
     untagged,
     unscored,
+    topChannel,
     bars: [...counts.entries()]
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([label, value]) => ({

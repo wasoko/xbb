@@ -26,9 +26,13 @@ import { SRCTAG_ROW_SEEDS, SRCTAG_SUGGEST_BODY, SRCTAG_SUGGEST_DS_BODY, SRCTAG_R
 import {
   DEFAULT_TAG_AIM, RSTEXT_TAG_SCORE, applyTagAim, embedBatch, installSrctagGlobal, loadAdaptersFromStore,
   mergeTagScore, pinPriorityTags, rowSources, summarizeTagAim, summarizeTagRun, tagRows, tokenize, urlTokens,
-  type ClassifyFn, type EmbedFn, type TagAimConfig, type TagDim, type TagRow, type TagRowResult,
+  type ClassifyFn, type EmbedFn, type TagAimConfig, type TagDim, type TagParts, type TagRow, type TagRowResult,
   type TagScoreConfig, type TagWindowConfig, type TextRankOptions,
 } from '../src/srctag';
+import {
+  DEFAULT_BM25, DEFAULT_BUCKETS, DEFAULT_GLOBAL, DEFAULT_RRF, RRF_TAG_SCORE, applyRrfBuckets,
+  rrfScore, rrfTagRows, runRestPass, type GlobalConfig, type RrfRowsOptions,
+} from '../src/rstag';
 
 /** IndexedDB the app opens, and the table its rows live in. */
 const DB_NAME = 'tagDB_0';
@@ -642,6 +646,201 @@ function printAimTable(cases: AimCase[], title: string): void {
   AIM_ROWS.splice(0, AIM_ROWS.length, ...cases);
 }
 
+// ─── The rrf pipeline, stage by stage ──────────────────────────────────────
+
+/**
+ * One `rrf` case: the stage its knob belongs to, and the options it moves. The
+ * anchor is the grouper's own preset; every other case names one knob, so a
+ * printed row says what that knob alone did to the live table.
+ */
+interface RrfCase {
+  key: string;
+  stage: 'anchor' | 'bm25f' | 'fusion' | 'buckets' | 'signals' | 'global';
+  opts: RrfRowsOptions;
+}
+
+/** The per-stage grid: BM25F's curve and fields, the fusion's rank constant, the bucket half, the pre-processing step, and each list switched off. */
+const RRF_CASES: RrfCase[] = [
+  { key: 'preset', stage: 'anchor', opts: {} },
+  { key: 'urls on', stage: 'bm25f', opts: { urls: true, bm25: { fields: { title: 3, url: 1, tags: 2 } } } },
+  { key: 'k1 0.5', stage: 'bm25f', opts: { bm25: { k1: 0.5 } } },
+  { key: 'k1 3', stage: 'bm25f', opts: { bm25: { k1: 3 } } },
+  { key: 'b 0', stage: 'bm25f', opts: { bm25: { b: 0 } } },
+  { key: 'b 1', stage: 'bm25f', opts: { bm25: { b: 1 } } },
+  { key: 'title only', stage: 'bm25f', opts: { bm25: { fields: { title: 1, url: 0, tags: 0 } } } },
+  { key: 'tags only', stage: 'bm25f', opts: { bm25: { fields: { title: 0, url: 0, tags: 2 } } } },
+  { key: 'url field back', stage: 'bm25f', opts: { bm25: { fields: { title: 3, url: 1, tags: 2 } } } },
+  { key: 'k 1', stage: 'fusion', opts: { rrf: { k: 1 } } },
+  { key: 'k 10', stage: 'fusion', opts: { rrf: { k: 10 } } },
+  { key: 'k 200', stage: 'fusion', opts: { rrf: { k: 200 } } },
+  { key: 'maxDf 1 (floor off)', stage: 'global', opts: { global: { maxDf: 1 } } },
+  { key: 'maxDf 0.2', stage: 'global', opts: { global: { maxDf: 0.2 } } },
+  { key: 'stop off', stage: 'global', opts: { global: { stop: [] } } },
+  { key: 'stop + maxDf 1', stage: 'global', opts: { global: { maxDf: 1, stop: [] } } },
+  { key: 'no bm25', stage: 'signals', opts: { score: { bm25: 0 } } },
+  { key: 'no priority', stage: 'signals', opts: { score: { priority: 0 } } },
+  { key: 'no graph', stage: 'signals', opts: { score: { textRank: 0, clusterRank: 0 } } },
+  { key: 'no buckets', stage: 'buckets', opts: { aim: false } },
+  { key: 'mmr λ 0', stage: 'buckets', opts: { buckets: { lambda: 0 } } },
+  { key: 'mmr λ 1', stage: 'buckets', opts: { buckets: { lambda: 1 } } },
+  { key: 'graph λ 0', stage: 'buckets', opts: { buckets: { graph: 0 } } },
+  { key: 'promote ≥ 2', stage: 'buckets', opts: { aim: { promoteMin: 2 } } },
+  { key: 'promote ≥ 5', stage: 'buckets', opts: { aim: { promoteMin: 5 } } },
+  { key: 'themes ≤ 1', stage: 'buckets', opts: { aim: { promoteTop: 1 } } },
+];
+
+/**
+ * One case of the filtered-list run: the URL switch, the BM25F fields it reads,
+ * the pre-processing knobs, and whether the list's own filter value is named.
+ */
+interface FilteredCase {
+  key: string;
+  urls: boolean;
+  /** BM25F field weights; the shipped default is the title and the row's own tags. */
+  fields?: Record<string, number>;
+  global: Partial<GlobalConfig>;
+  filters?: string[];
+}
+
+/** The readings of one filtered list, from the URL-included one to the shipped defaults. */
+const FILTER_CASES: FilteredCase[] = [
+  { key: 'urls on, w url 1', urls: true, fields: { url: 1 }, global: { maxDf: 1 } },
+  { key: 'urls off, w url 1', urls: false, fields: { url: 1 }, global: { maxDf: 1 } },
+  { key: 'urls off, w url 0', urls: false, global: { maxDf: 1 } },
+  { key: 'urls off, w url 0, floor on', urls: false, global: DEFAULT_GLOBAL },
+  { key: 'urls off, w url 0, floor on, f= named', urls: false, global: DEFAULT_GLOBAL, filters: ['suffix_GoogleSearch'] },
+];
+
+/**
+ * Rows the `rrf` grid scores. Its stages cost O(rows × candidates) plus a graph
+ * walk per bucket, so the grid runs on the newest N live rows; the channel sweep
+ * above is what carries the whole table.
+ */
+const RRF_ROWS = Number(process.env.SRCTAG_RRF_LIMIT ?? 600);
+
+/** One `rrf` case's statistics, exactly as printed. */
+interface RrfResult {
+  key: string;
+  stage: string;
+  rows: number;
+  scored: number;
+  empty: number;
+  suggested: number;
+  distinct: number;
+  mean: number;
+  max: number;
+  /** Rows carrying a promoted sub-tag. */
+  subRows: number;
+  subTags: number;
+  /** Channels that carried at least one chip, so a switched-off list is visible. */
+  channels: string;
+  /** The most repeated chip roots, which is where a pattern on every row shows up. */
+  roots: string;
+  jaccard: number;
+  ms: number;
+}
+
+/** The chip roots that repeat most, `gx 22 · google 22 · ...`; a long tail is a clean reading. */
+function topRoots(tags: string[], n = 6): string {
+  const counts = new Map<string, number>();
+  for (const tag of tags) {
+    const root = tag.split('/')[0];
+    counts.set(root, (counts.get(root) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, n).map(([root, count]) => `${root} ${count}`).join(' · ');
+}
+
+/**
+ * Score the live rows through the 3-stage chain under one case's knobs, then read
+ * the result through the bucket half unless the case turned the aim pass off.
+ *
+ * @param c the case's stage knobs
+ * @param set rows this case scores
+ * @param priorityTags tags the trie treats as priorities
+ * @returns the statistics and the tags the run proposed
+ */
+async function runRrfCase(
+  c: RrfCase, set: LiveRow[], priorityTags: string[],
+): Promise<{ result: RrfResult; tags: Set<string> }> {
+  /* The grouper's profile is the anchor: BM25F and the trie carry weight, the
+     walk is on, and the site is the bucket, so a case that names one knob moves
+     only that knob away from it. */
+  const opts: RrfRowsOptions = {
+    /* The profile's anchor: URLs out of the token bag and out of the BM25F fields. */
+    urls: false,
+    bm25: { ...DEFAULT_BM25, fields: { ...DEFAULT_BM25.fields, url: 0 } },
+    ...c.opts,
+    score: { ...RRF_TAG_SCORE, ...c.opts.score },
+    priorityTags,
+    bucket: 'domain',
+    window: { dim: 'visitTime', ...c.opts.window },
+  };
+  const started = performance.now();
+  const scored = await rrfTagRows(set as TagRow[], opts);
+  const list = c.opts.aim === false ? scored : applyRrfBuckets(
+    scored, { ...(c.opts.aim ?? {}), priorityTags },
+    { ...DEFAULT_BUCKETS, ...c.opts.buckets }, rrfScore(opts).minScore,
+  );
+  const ms = Math.round(performance.now() - started);
+
+  const flat = list.flatMap((r) => r.suggestions);
+  const tags = new Set(flat.map((s) => s.tag));
+  const sub = flat.filter((s) => s.parts.group > 0);
+  const channels = new Set(list.flatMap((r) => r.suggestions.flatMap((s) =>
+    (Object.keys(s.parts) as (keyof TagParts)[]).filter((k) => s.parts[k] > 0))));
+  const empty = list.filter((r) => r.suggestions.length === 0).length;
+
+  return {
+    result: {
+      key: c.key,
+      stage: c.stage,
+      rows: list.length,
+      scored: list.length - empty,
+      empty,
+      suggested: flat.length,
+      distinct: tags.size,
+      mean: flat.length > 0 ? flat.reduce((n, s) => n + s.score, 0) / flat.length : 0,
+      max: flat.reduce((m, s) => Math.max(m, s.score), 0),
+      subRows: list.filter((r) => r.suggestions.some((s) => s.parts.group > 0)).length,
+      subTags: new Set(sub.map((s) => s.tag)).size,
+      channels: [...channels].sort().join(','),
+      roots: topRoots(flat.map((s) => s.tag)),
+      jaccard: 0,
+      ms,
+    },
+    tags,
+  };
+}
+
+/** The printed `rrf` columns, one header and one row format. */
+const RRF_COLUMNS: [string, number, boolean][] = [
+  ['case', 16, false], ['stage', 9, false], ['rows', 5, true], ['scored', 6, true],
+  ['empty', 5, true], ['sugg', 5, true], ['dist', 5, true], ['mean', 7, true],
+  ['max', 7, true], ['sub rows', 8, true], ['sub tags', 8, true], ['jaccard', 7, true],
+  ['ms', 7, true],
+];
+/** One line per `rrf` case, so `test.log` carries the whole grid. */
+function printRrfTable(results: RrfResult[], title: string): void {
+  console.info(`[srctag-sweep] ${title}`);
+  console.info('[rrf-sweep] ' + RRF_COLUMNS
+    .map(([name, width, right]) => (right ? padL(name, width) : pad(name, width))).join(' '));
+  const rows: string[][] = [];
+  for (const r of results) {
+    const cells = [
+      r.key, r.stage, String(r.rows), String(r.scored), String(r.empty), String(r.suggested),
+      String(r.distinct), r.mean.toFixed(3), r.max.toFixed(3), String(r.subRows), String(r.subTags),
+      r.jaccard.toFixed(3), `${r.ms}ms`,
+    ];
+    console.info('[rrf-sweep] ' + RRF_COLUMNS
+      .map(([, width, right], i) => (right ? padL(cells[i], width) : pad(cells[i], width))).join(' '));
+    console.info(`[rrf-sweep]   ${r.key} channels: ${r.channels}`);
+    console.info(`[rrf-sweep]   ${r.key} roots: ${r.roots}`);
+    rows.push([...cells, r.channels, r.roots]);
+  }
+  SECTIONS.push({ title, headers: [...RRF_COLUMNS.map(([name]) => name), 'channels', 'roots'], rows });
+}
+
 // ─── Artifacts ─────────────────────────────────────────────────────────────
 
 /** One printed table, kept so a run can also write it to disk. */
@@ -955,6 +1154,134 @@ describe('hybrid sweep over the live working set', () => {
     expect(at('promoteMin 2').subTags).toBeGreaterThanOrEqual(at('promoteMin 4').subTags);
     expect(at('promoteMin 2').subRows).toBeGreaterThanOrEqual(at('promoteMin 4').subRows);
   }, 300_000);
+
+  it('sweeps the rrf stages one knob at a time over the live table', async ({ skip }) => {
+    if (down) {
+      console.warn(`[srctag-sweep] skipped: ${down}`);
+      skip();
+    }
+    expect(priorityTags.length).toBeGreaterThan(0);
+    const set = sweepRows.slice(0, RRF_ROWS);
+
+    const results: RrfResult[] = [];
+    let anchor: Set<string> | undefined;
+    for (const c of RRF_CASES) {
+      const { result, tags } = await runRrfCase(c, set, priorityTags);
+      if (c.stage === 'anchor') anchor = tags;
+      result.jaccard = anchor === undefined ? 1 : jaccard(tags, anchor);
+      results.push(result);
+    }
+    printRrfTable(
+      results,
+      `rrf stages over the newest ${set.length} of ${sweepRows.length} live rows · priority from ${prioritySource} (${priorityTags.length} tags)`,
+    );
+
+    for (const r of results) expect(r.scored + r.empty, r.key).toBe(r.rows);
+    const at = (key: string) => results.find((r) => r.key === key)!;
+    // the anchor runs all three stages: the BM25F list and the trie both carry
+    // chips, the burst mints sub-tags, and TF-IDF is never a channel here
+    expect(at('preset').channels).toContain('bm25');
+    expect(at('preset').channels).toContain('priority');
+    expect(at('preset').channels).not.toContain('tfidf');
+    // a knob that switches a list off removes it from the explanations, and
+    // dropping a whole list changes the outcome, which is what makes it evidence
+    expect(at('no bm25').channels).not.toContain('bm25');
+    expect(at('no bm25').jaccard).toBeLessThan(1);
+    expect(at('no priority').channels).not.toContain('priority');
+    expect(at('no graph').channels).not.toContain('textRank');
+    expect(at('no graph').channels).not.toContain('clusterRank');
+    // the bucket half is the promote stage: with the aim pass off nothing is minted
+    expect(at('no buckets').channels).not.toContain('group');
+    expect(at('no buckets').subTags).toBe(0);
+    // a lower promote threshold cannot mint fewer sub-tags, and the cap bounds them
+    expect(at('promote ≥ 2').subTags).toBeGreaterThanOrEqual(at('promote ≥ 5').subTags);
+    expect(at('themes ≤ 1').subTags).toBeLessThanOrEqual(at('preset').subTags);
+    // the rank constant changes the fusion, which is what makes it a parameter
+    expect(at('k 1').jaccard).toBeLessThan(1);
+  }, 600_000);
+
+  it('drops the pattern a filtered list repeats on every one of its rows', async ({ skip }) => {
+    if (down) {
+      console.warn(`[srctag-sweep] skipped: ${down}`);
+      skip();
+    }
+    const filtered = rows.filter((r) => r.tags.includes('suffix_GoogleSearch'));
+    if (filtered.length < 20) {
+      console.warn(`[srctag-sweep] skipped: the live table holds ${filtered.length} suffix_GoogleSearch rows`);
+      skip();
+    }
+    const set = filtered.slice(0, RRF_ROWS);
+    const base = {
+      dim: 'visitTime' as TagDim,
+      bucket: 'domain' as const,
+      score: RRF_TAG_SCORE,
+      limit: RRF_ROWS,
+      pinsPriority: false,
+      aim: {},
+      pipeline: 'rrf' as const,
+      rrf: DEFAULT_RRF,
+      buckets: DEFAULT_BUCKETS,
+    };
+
+    const results: RrfResult[] = [];
+    let anchor: Set<string> | undefined;
+    for (const c of FILTER_CASES) {
+      const started = performance.now();
+      /* The pass is reached the way the list reaches it, so this exercises the
+         `filters` wiring rather than a hand-built exclusion list. */
+      const spec = {
+        ...base,
+        global: c.global,
+        bm25: { ...DEFAULT_BM25, fields: { ...DEFAULT_BM25.fields, url: 0, ...c.fields } },
+      };
+      const map = await runRestPass(set as TagRow[], spec, {
+        filters: c.filters, tag: { urls: c.urls },
+      });
+      const reports = [...map.values()];
+      const scores = reports.flatMap((r) => r.tags.map((t) => t.score));
+      const tags = reports.flatMap((r) => r.tags.map((t) => t.tag));
+      const sub = reports.flatMap((r) => r.tags.filter((t) => t.origin === 'sub'));
+      const channels = new Set(reports.flatMap((r) => r.tags.flatMap((t) => t.channels.map((ch) => ch.channel))));
+      const empty = reports.filter((r) => r.tags.length === 0).length;
+      anchor ??= new Set(tags);
+      results.push({
+        key: c.key,
+        stage: 'filtered',
+        rows: reports.length,
+        scored: reports.length - empty,
+        empty,
+        suggested: tags.length,
+        distinct: new Set(tags).size,
+        mean: scores.length > 0 ? scores.reduce((n, s) => n + s, 0) / scores.length : 0,
+        max: scores.reduce((m, s) => Math.max(m, s), 0),
+        subRows: reports.filter((r) => r.tags.some((t) => t.origin === 'sub')).length,
+        subTags: new Set(sub.map((t) => t.tag)).size,
+        channels: [...channels].sort().join(','),
+        roots: topRoots(tags),
+        jaccard: jaccard(new Set(tags), anchor),
+        ms: Math.round(performance.now() - started),
+      });
+    }
+
+    printRrfTable(
+      results,
+      `rrf over the ${set.length} live rows carrying suffix_GoogleSearch · the pattern every row of the list repeats`,
+    );
+    const at = (key: string) => results.find((r) => r.key === key)!;
+    // the URL is the pattern: read as text, the hostname and the browser in its
+    // query string are the most repeated chips the list has, and they are what
+    // drives the theme groups a reader sees as `../google` and `gx/..`
+    expect(at('urls on, w url 1').roots).toMatch(/google|opera|utf/);
+    expect(at('urls on, w url 1').subTags).toBeGreaterThan(at('urls off, w url 0').subTags);
+    // the provenance tags are dropped whatever the reading, so their terms never
+    // reach a chip; the three later readings stop being the URL-included one
+    for (const c of FILTER_CASES.slice(2)) {
+      for (const term of ['saopera', 'googlesearch', 'suffix']) {
+        expect(at(c.key).roots, `${c.key} ${term}`).not.toContain(term);
+      }
+      expect(at(c.key).jaccard, c.key).toBeLessThan(0.75);
+    }
+  }, 600_000);
 
   it('reports what each dynamic path did, without failing when it cannot reach a provider', async ({ skip }) => {
     if (down) {

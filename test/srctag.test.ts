@@ -307,7 +307,7 @@ describe('fusion', () => {
   ];
   const cfg = defaultWindow('tid', { window: 1, minWindow: 1, maxWindow: 1 });
   const scoreCfg = {
-    tfidf: 0.35, embed: 0.35, textRank: 0, clusterRank: 0,
+    tfidf: 0.35, bm25: 0, embed: 0.35, textRank: 0, clusterRank: 0,
     priority: 0.2, suggest: 0.1, keyword: 0, keywordBoost: 1.5, topK: 8, minScore: 0.01,
   };
 
@@ -627,7 +627,7 @@ describe('score explanations', () => {
   const suggestion = (score: number, parts: Partial<TagParts>) => ({
     tag: 'react', score,
     parts: {
-      tfidf: 0, embed: 0, textRank: 0, clusterRank: 0,
+      tfidf: 0, bm25: 0, embed: 0, textRank: 0, clusterRank: 0,
       priority: 0, keyword: 0, suggest: 0, ...parts,
     },
   });

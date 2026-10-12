@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import * as li from 'lucide-react'
 import { useSearchParams } from 'react-router-dom';
 import { Drag } from './drag';
-import { iqWithCrumbs, fmtCrumbs } from '../sdb';
+import { iqWithCrumbs, fmtCrumbs, IQ_CNT } from '../sdb';
 import { useAvailableFilters } from './filterStore';
 
 interface FilterBarProps {
@@ -52,7 +52,7 @@ export function FilterBar({
           activeFilters,
           undefined,
           tidLoc ? Number(tidLoc) : undefined,
-          555
+          IQ_CNT
         );
         
         // Only update if the sequence has actually changed to avoid infinite loops

@@ -85,6 +85,8 @@ export const treeCac:{[key:string]: unknown} = {
   'tabSeer': 'cardtab',
   'cardSeer': 'cs1',
   'restGrouper': 'rsdt',
+  // CSS width every `.crop-scroll` window is capped to: the cs1 matches, the cs2 rows and the rest-tag chips.
+  'cropWidth': 'max(33.33%, 222px)',
   // , "emb_model-HF":HF_OR[0]
 }
 export let treeCacOpts: Record<string, string[]> = {
@@ -92,8 +94,9 @@ export let treeCacOpts: Record<string, string[]> = {
   'cardSeer': ['cs1', 'cs2'],
   // `snap_pin` options are the recent CDN snapshots, cached here by the settings menu.
   'snap_pin': [],
-  // `rsdt`/`rsid`/`rsess`/`rstag`/`rstext`/`rsfreq`/`rstrank`/`rstt` are built in; `restGroupers/...` refs are appended from `db.das` at render.
-  'restGrouper': ['rsdt', 'rsid', 'rsess', 'rstag', 'rstext', 'rsfreq', 'rstrank', 'rstt', 'none'],
+  // `rsdt`/`rsid`/`rsess`/`rstag`/`rstext`/`rsfreq`/`rstrank`/`rstt`/`rrf` are built in; `restGroupers/...` refs are appended from `db.das` at render.
+  'restGrouper': ['rsdt', 'rsid', 'rsess', 'rstag', 'rstext', 'rsfreq', 'rstrank', 'rstt', 'rrf', 'none'],
+  'cropWidth': ['max(33.33%, 222px)', 'max(33.33%, 155px)', '22ch', 'none'],
   'provider-model': ['Default'],
 };
 
@@ -116,6 +119,7 @@ export async function getRowsAroundTid(tid: number, n: number) {
   return [...af.reverse(), eq , ...b4] .filter(t=> t!==undefined);
 }
 
+export const IQ_CNT = 555
 /** Minimal query: filter by tags via MultiEntry index, or anchor on tid */
 export async function iq(filters: string[], search?: string, tidNum?: number, limit?: number): Promise<Da[]> {
   if (tidNum) {
@@ -137,7 +141,7 @@ export async function iq(filters: string[], search?: string, tidNum?: number, li
   if (extra.length)
     col = col.filter(row => extra.every(f => row.tags?.includes(f)));
 
-  const arr = await col.reverse().limit(limit ?? 555).toArray()
+  const arr = await col.reverse().limit(limit ?? IQ_CNT).toArray()
   // filter out deleted rows
   const active = arr.filter(r => !r.tags?.includes(DEL_TAG))
   if (search) return active.filter(s=> s.txt.toLocaleLowerCase()

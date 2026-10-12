@@ -296,7 +296,7 @@ function SearchOmnibox({ onOpen }: { onOpen: (ref: string) => void }) {
     <div ref={rootRef} className="user-menu-container" style={{ alignSelf: 'center', marginLeft: 11, flex: '0 1 auto', minWidth: 0 }}>
       <div style={{
         display: 'flex', alignItems: 'center', gap: 6, height: 40, padding: '0 12px',
-        width: 198, maxWidth: '100%', minWidth: 0, boxSizing: 'border-box',
+        width: 111, maxWidth: '100%', minWidth: 0, boxSizing: 'border-box',
         borderRadius: 20, background: 'transparent', border: '1px solid rgba(255,255,255,0.2)',
         backdropFilter: 'blur(10px)', transition: 'all 0.2s',
       }}>
@@ -314,8 +314,9 @@ function SearchOmnibox({ onOpen }: { onOpen: (ref: string) => void }) {
           style={{ flex: '1 1 auto', minWidth: 0, margin: 0, padding: 0, background: 'transparent', border: 'none', outline: 'none', color: 'white', fontSize: 13 }}
         />
       </div>
+      {/* same panel, its own top edge: bar at 36px, the box centred in the 62px cell (11px) */}
       {open && (debounced.length > 0 || hints.length > 0 || recentTags.length > 0) && (
-        <div className="user-dropdown" style={{ left: 0, right: 'auto', top: 48, minWidth: '100%', width: 'max(100%, 300px)', maxWidth: 'calc(100vw - 30px)' }}>
+        <div className="user-dropdown" style={{ top: 'calc(36px + 11px + 48px)', maxHeight: 'calc(100vh - 36px - 11px - 48px)' }}>
           {debounced.length === 0 && hints.length > 0 && (
             <div className="user-dropdown-item" style={{ opacity: 0.5, fontSize: 11 }}>suggested</div>
           )}

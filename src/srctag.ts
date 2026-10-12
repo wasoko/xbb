@@ -10,6 +10,10 @@
  *   - TextRank centrality of the row's own tokens, weighted 0
  *   - TextRank centrality of the neighbour burst's pooled tokens, weighted 0
  *
+ * A seventh channel, `bm25`, carries the BM25F list of the reciprocal-rank
+ * fusion `src/rstag.ts` runs; its weight is 0 here, so the fusion above is the
+ * whole story for every caller that does not name it.
+ *
  * TF-IDF needs an IDF table, so its score folds in how rare a term is across the
  * working set; that table is what misreads a burst of sibling links, where every
  * row shares the same few terms. TextRank needs no corpus: it ranks a token by
@@ -61,6 +65,12 @@ export type TagDim = 'tid' | 'dt' | 'visitTime';
 export interface TagParts {
   /** Normalized TF-IDF weight times the neighbour similarity. */
   tfidf: number;
+  /**
+   * The `rrf` pipeline's statistical stage: the BM25F ranking's reciprocal-rank
+   * term for this tag, 0 whenever the tag is absent from that list and 0 on
+   * every pass that does not run the `rrf` pipeline.
+   */
+  bm25: number;
   /** Normalized TF-IDF weight times the embedding similarity; 0 without embeddings. */
   embed: number;
   /** TextRank centrality of the token in the row's own text, normalized by the row's top rank. */
@@ -90,6 +100,12 @@ export interface TagSuggestion {
 /** Weights and cut-offs of the fusion step. */
 export interface TagScoreConfig {
   tfidf: number;
+  /**
+   * Weight of the `rrf` pipeline's BM25F list in the reciprocal-rank fusion.
+   * 0 (the default) leaves the list out, so every preset that does not name it
+   * scores exactly as it did before the channel existed.
+   */
+  bm25: number;
   embed: number;
   /** Weight of the row's own TextRank centrality; 0 leaves the channel out. */
   textRank: number;
@@ -171,7 +187,7 @@ export interface TagRowResult {
  * computation entirely, so the default path pays nothing for them.
  */
 export const DEFAULT_TAG_SCORE: TagScoreConfig = {
-  tfidf: 0.35, embed: 0.35, textRank: 0, clusterRank: 0, priority: 0.2, suggest: 0.1,
+  tfidf: 0.35, bm25: 0, embed: 0.35, textRank: 0, clusterRank: 0, priority: 0.2, suggest: 0.1,
   keyword: 0, keywordBoost: 1.5, topK: 8, minScore: 0.05,
 };
 
@@ -1370,6 +1386,7 @@ export function scoreTagsForRow(ctx: RowContext): TagSuggestion[] {
       : (prioritySet.has(tag) ? 1 : 0);
     const parts: TagParts = {
       tfidf: tfNorm * tfidfSim,
+      bm25: 0,
       embed: tfNorm * embedSim,
       textRank: ownRank ? (ownRank[tag] ?? 0) : 0,
       clusterRank: poolRank && (own[tag] ?? 0) > 0 ? (poolRank[tag] ?? 0) : 0,
@@ -1378,7 +1395,7 @@ export function scoreTagsForRow(ctx: RowContext): TagSuggestion[] {
       suggest: suggestMap.get(tag) ?? 0,
       group: 0,
     };
-    const score = cfg.tfidf * parts.tfidf + cfg.embed * parts.embed
+    const score = cfg.tfidf * parts.tfidf + cfg.bm25 * parts.bm25 + cfg.embed * parts.embed
       + cfg.textRank * parts.textRank + cfg.clusterRank * parts.clusterRank
       + cfg.priority * parts.priority + cfg.keyword * parts.keyword
       + cfg.suggest * parts.suggest;
@@ -1468,7 +1485,7 @@ export interface TagExplanation {
 
 /** Display names for the channels, so a tooltip reads `turbotext` rather than `keyword`. */
 export const TAG_CHANNEL_LABEL: Record<keyof TagParts, string> = {
-  tfidf: 'tfidf', embed: 'embed', textRank: 'textrank', clusterRank: 'clusterrank',
+  tfidf: 'tfidf', bm25: 'bm25', embed: 'embed', textRank: 'textrank', clusterRank: 'clusterrank',
   priority: 'priority', keyword: 'turbotext', suggest: 'classify', group: 'theme',
 };
 
@@ -1497,6 +1514,7 @@ export function explainTag(s: TagSuggestion, cfg: TagScoreConfig = DEFAULT_TAG_S
   const keywordWeight = cfg.priority * boost + cfg.keyword * p.keyword;
   const all: TagChannelStat[] = [
     { channel: 'tfidf', weight: cfg.tfidf, value: p.tfidf, contribution: cfg.tfidf * p.tfidf },
+    { channel: 'bm25', weight: cfg.bm25, value: p.bm25, contribution: cfg.bm25 * p.bm25 },
     { channel: 'embed', weight: cfg.embed, value: p.embed, contribution: cfg.embed * p.embed },
     { channel: 'textRank', weight: cfg.textRank, value: p.textRank, contribution: cfg.textRank * p.textRank },
     { channel: 'clusterRank', weight: cfg.clusterRank, value: p.clusterRank, contribution: cfg.clusterRank * p.clusterRank },
@@ -1588,7 +1606,7 @@ export const DEFAULT_TAG_AIM: TagAimConfig = {
 
 /** The channel breakdown of a promoted sub-tag: nothing but its group size. */
 const groupParts = (n: number): TagParts => ({
-  tfidf: 0, embed: 0, textRank: 0, clusterRank: 0, priority: 0, keyword: 0, suggest: 0,
+  tfidf: 0, bm25: 0, embed: 0, textRank: 0, clusterRank: 0, priority: 0, keyword: 0, suggest: 0,
   group: n,
 });
 

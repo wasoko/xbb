@@ -178,6 +178,18 @@ import React, { useState, useEffect } from 'react';
 // type NoticeHistory = Record<string, NoticeGroup>;
 
 
+/** Dot colour per notice level; `status` and `info` share the neutral blue. */
+const LEVEL_DOT: Record<NoticeGroup['level'], string> = {
+  error: '#ef4444', warning: '#f59e0b', status: '#3b82f6', info: '#3b82f6',
+};
+
+/** A folded row keeps the first two lines of its newest message. */
+const CLAMP2: React.CSSProperties = {
+  display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+};
+
+/** The bell menu: one row per topic (`level:scope`), newest topic first. A row shows that
+ *  topic's newest message and, folded open, the older ones of the same topic. */
 export function NotificationDropdown() {
   const [history, setHistory] = useState<NoticeHistory>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -191,8 +203,7 @@ export function NotificationDropdown() {
     }
   }, []);
 
-  const toggleGroup = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const toggleGroup = (id: string) => {
     setExpanded(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
@@ -204,94 +215,65 @@ export function NotificationDropdown() {
   const groups = Object.values(history).sort((a, b) => b.lastSeen - a.lastSeen);
 
   if (groups.length === 0) {
-    return (
-      <div className="w-[320px] bg-gray-100/80 backdrop-blur-md rounded-xl p-4 shadow-lg border border-gray-200/50">
-        <div className="text-center opacity-50 cursor-default text-sm py-4">        No notifications</div>
-      </div>
-    );
+    return <div className="user-dropdown-item" style={{ opacity: 0.6, cursor: 'default' }}>no notifications</div>;
   }
 
   return (
-    <div className="w-[340px] max-h-[500px] overflow-y-auto bg-gray-100/90 backdrop-blur-xl rounded-xl shadow-2xl border border-gray-200/50 flex flex-col">
-      {/* Header */}
-      <div className="sticky top-0 z-10 flex justify-between items-center px-4 py-3 bg-gray-100/90 backdrop-blur-xl border-b border-gray-200/50">
-      <span className="text-sm font-semibold tracking-wide text-gray-800">Notification Center</span>
-        <button 
-          className="text-xs font-medium text-blue-600 hover:text-blue-800 transition-colors bg-blue-50 hover:bg-blue-100 px-2 py-1 rounded-full" 
-onClick={clearHistory}
->
-        Clear All
-      </button>
-</div>
-
-{/* Notifications List */}
-      <div className="p-2 flex flex-col gap-2">
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 12px'
+        , fontSize: 11, opacity: 0.6 }}>
+        <span style={{ flex: '1 1 auto' }}>Notification Center</span>
+        <button className="user-dropdown-item" style={{ flex: '0 0 auto', width: 'auto'
+          , padding: '2px 6px', fontSize: 11 }} onClick={clearHistory}>Clear All</button>
+      </div>
       {groups.map(group => {
-// Fallback safely if items are empty
+        // Fallback safely if items are empty
         const latestItem = group.items[0];
         if (!latestItem) return null;
-
-        const isExpanded = expanded[group.id];
-
-          // Determine status color
-        const colorClass =
-          group.level === 'error' ? 'bg-red-500' :
-          group.level === 'warning' ? 'bg-yellow-500' :                                       'bg-blue-500';
+        const isOpen = expanded[group.id];
 
         return (
-          <div
+          <button
             key={group.id}
-            className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-sm overflow-hidden transition-all duration-200 border border-white/40 cursor-pointer hover:bg-white"
-            onClick={(e) => toggleGroup(group.id, e)}
+            className="user-dropdown-item"
+            title="fold or unfold this topic"
+            onClick={() => toggleGroup(group.id)}
           >
-{/* Card Header & Latest Message (Always visible) */}
-              <div className="p-3.5">
-            <div className="flex justify-between items-center mb-1.5">
-              <div className="flex items-center gap-1.5">
-                <div className={`w-2 h-2 rounded-full ${colorClass}`} />
-                <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-                  {group.title || group.scope}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ flex: '0 0 auto', width: 6, height: 6, borderRadius: '50%'
+                , background: LEVEL_DOT[group.level] }} />
+              <span style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden'
+                , textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11, opacity: 0.6 }}
+              >{group.scope}</span>
+              {group.count > 1 && (
+                <span style={{ flex: '0 0 auto', fontSize: 11, opacity: 0.5 }}>
+                  {isOpen ? '\u25be' : '\u25b8'} {group.count}
                 </span>
-              </div>
-              <span className="text-[11px] text-gray-400 font-medium">
+              )}
+              <span style={{ flex: '0 0 auto', fontSize: 11, opacity: 0.45 }}>
                 {fmtAgo(latestItem.timestamp)}
               </span>
             </div>
-
-            <div className={`text-sm text-gray-800 ${!isExpanded && 'line-clamp-2'} leading-snug`}>
-              {latestItem.message}
-            </div>
-
-{/* Collapsed Hint */}
-            {group.count > 1 && !isExpanded && (
-              <div className="text-[12px] text-gray-400 mt-1.5 font-medium">
-                {group.count - 1} more notification{group.count > 2 ? 's' : ''}
-              </div>
-            )}
-</div>
-
-{/* Expanded History List */}
-            {isExpanded && group.count > 1 && (
-              <div className="bg-gray-50/80 border-t border-gray-100 divide-y divide-gray-100/80">
-{/* Skip the first item since it's already shown in the card body */}
+            <div style={isOpen ? undefined : CLAMP2}>{latestItem.message}</div>
+            {/* cropped to a window height: a topic with many notices scrolls inside its own row
+                instead of growing the panel past the screen */}
+            {isOpen && group.count > 1 && (
+              <div style={{ maxHeight: '45vh', overflowY: 'auto', overflowX: 'hidden' }}>
                 {group.items.slice(1).map((item, i) => (
-                  <div key={i} className="p-3.5 pl-4 flex flex-col gap-1 hover:bg-gray-100/50 transition-colors">
-                      <div className="flex justify-between items-start gap-3">
-                    <span className="text-sm text-gray-600 leading-snug break-words">
-{item.message}
-</span>
-                    <span className="text-[10px] text-gray-400 whitespace-nowrap mt-0.5">
+                  <div key={i} style={{ display: 'flex', gap: 6, marginTop: 4, paddingLeft: 8
+                    , borderLeft: '1px solid rgba(255, 255, 255, 0.15)' }}>
+                    <span style={{ flex: '1 1 auto', minWidth: 0, opacity: 0.7, whiteSpace: 'pre-wrap' }}
+                    >{item.message}</span>
+                    <span style={{ flex: '0 0 auto', fontSize: 10, opacity: 0.45, whiteSpace: 'nowrap' }}>
                       {fmtAgo(item.timestamp)}
                     </span>
-</div>
                   </div>
                 ))}
               </div>
             )}
-          </div>
+          </button>
         );
       })}
-</div>
-    </div>
+    </>
   );
 }
