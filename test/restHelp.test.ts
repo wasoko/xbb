@@ -13,7 +13,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { TAG_CHANNEL_LABEL, type TagParts } from '../src/srctag';
-import { REST_PROFILES, RRF_GROUPER, REST_VIZ_MODES, REST_WINDOW_MODES, RSFREQ_GROUPER, RSTT_GROUPER } from '../src/ui/restGrouper';
+import { REST_PROFILES, RRF_GROUPER, REST_VIZ_MODES, REST_WINDOW_MODES, RSFREQ_GROUPER, RSTAG_GROUPER, RSTAG_LIMIT, RSTT_GROUPER } from '../src/ui/restGrouper';
 import {
   CHANNEL_HELP, knobHelp, knobLabel, PROFILE_HELP, TUNER_HELP, VIZ_HELP, vizCaveat, WINDOW_HELP,
 } from '../src/ui/restHelp';
@@ -46,7 +46,7 @@ describe('restHelp', () => {
     expect(vizCaveat('keywords', { keyword: 0 })).toMatch(/keyword/);
     expect(vizCaveat('keywords', { keyword: 1 })).toBeUndefined();
     // only the reading that needs the weight carries the note
-    for (const mode of ['chips', 'priority', 'themes', 'channels'] as const) {
+    for (const mode of ['chips', 'clusters', 'priority', 'themes', 'channels'] as const) {
       expect(vizCaveat(mode, { keyword: 0 }), mode).toBeUndefined();
     }
   });
@@ -87,6 +87,31 @@ describe('restHelp in the UI', () => {
     }));
     expect(panel(RSFREQ_GROUPER)).toContain('leaves the `keyword` weight off');
     expect(panel(RSTT_GROUPER)).not.toContain('leaves the `keyword` weight off');
+  });
+
+  it('renders the uncapped rows box empty, and a cap as its number', () => {
+    const rrf = markup(React.createElement(RestTuner, { grouper: RRF_GROUPER, onChange: () => {} }));
+    expect(rrf).toContain('placeholder="all"');
+    const capped = markup(React.createElement(RestTuner, {
+      grouper: RRF_GROUPER, hyper: { limit: 50 }, onChange: () => {},
+    }));
+    expect(capped).toContain('value="50"');
+    expect(capped).not.toContain('placeholder="all"');
+    // a family that ships a cap keeps rendering it as the number it is
+    const readPath = markup(React.createElement(RestTuner, { grouper: RSTAG_GROUPER, onChange: () => {} }));
+    expect(readPath).toContain(`value="${RSTAG_LIMIT}"`);
+  });
+
+  it('hosts the blocks of a reading that replaced them, after its own chrome', () => {
+    const html = markup(React.createElement(RestViz, {
+      grouper: RRF_GROUPER, mode: 'clusters', rows: [], reports: new Map(),
+    }, React.createElement('div', { className: 'rest-group' }, '#react')));
+    expect(html).toContain('class="rest-viz"');
+    expect(html).toContain('class="rest-viz-chrome"');
+    // one region: the reading's rows come after the counts, inside the panel box
+    expect(html.indexOf('rest-group')).toBeGreaterThan(html.indexOf('rest-viz-chrome'));
+    // and the panel's small type stays on its chrome, so the rows keep the list's size
+    expect(html.indexOf('rest-group')).toBeGreaterThan(html.indexOf('font-size:0.75em'));
   });
 
   it('strips the rrf grouper with its per-stage knobs and its own profile line', () => {

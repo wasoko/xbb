@@ -286,6 +286,12 @@ export async function dl_merge (tab: Table, curSnap='', testOld=false
  */
 export async function upSnap() {
   let st = performance.now()
+  // the snapshot is what carries a merge to other clients (it drops `ver`, never `cr`), so the
+  // duplicates are collapsed before the file is written and before the count names it
+  const cleaned = await sdb.clean()
+  if (cleaned.keys > 0 || cleaned.filled > 0)
+    stts(`clean: ${cleaned.keys} dup key(s), ${cleaned.filed} filed,`
+      + ` ${cleaned.dropped} row(s) dropped`, 'greet')
   // const { data: { user } } = await sbg.auth.getUser() 
   // if (!user) return stts("err Not logged in")
   let oName = `da.${await sdb.db.das.count()}.cbor.pako`;

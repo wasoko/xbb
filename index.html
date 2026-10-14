@@ -47,7 +47,9 @@
       /* The pointer leaves the thin handle while dragging; hold one cursor for the whole drag. */
       body.dragging-col, body.dragging-col * { cursor: col-resize !important; }
       body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
-      body.dragging-col, body.dragging-row { user-select: none; }
+      /* The bar handle moves up or down as well, so no single axis cursor describes it. */
+      body.dragging-bar, body.dragging-bar * { cursor: move !important; }
+      body.dragging-col, body.dragging-row, body.dragging-bar { user-select: none; }
 
       /* --- Navigation & Bars --- */
       .user-menu-container { position: relative; pointer-events: auto; }
@@ -55,10 +57,20 @@
       .avatar-img { width: 100%; height: 100%; object-fit: cover; }
       .user-avatar:hover { background: rgba(255, 255, 255, 0.2); transform: scale(1.05); }
       /* right-anchored: the panel hangs off the screen's right edge, 555px wide, top edge kept under the bar (36px + 77px);
-         a screen narrower than 555px crops the panel's left edge, its own scroll handles the overflow */
+         a screen narrower than 555px crops the panel's left edge, its own scroll handles the overflow.
+         The top and right here are the resting position only: `UserBar` places each panel inline, so
+         it travels with the bar's drag handle. */
       .user-dropdown { position: fixed; top: calc(36px + 77px); right: 0; left: auto; width: 555px; min-width: 222px; max-width: 95vw; background: rgba(0, 0, 0, 0.8); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 12px; padding: 8px; display: flex; flex-direction: column; gap: 4px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); max-height: calc(100vh - 36px - 77px); overflow: auto; }
       .user-dropdown-item { padding: 8px 12px; color: white; text-decoration: none; font-size: 13px; border-radius: 6px; cursor: pointer; transition: background 0.2s; border: none; background: none; text-align: left; width: 100%; }
       .user-dropdown-item:hover { background: rgba(255, 255, 255, 0.1); }
+      /* Settings rows: the arrow is the control's only affordance, so the native datalist
+         indicator is kept but stretched invisible across the whole row (a tap anywhere opens
+         the list) and a larger ▼ is drawn over it; the text keeps clear of the arrow. */
+      .picker-container { position: relative; display: inline-flex; align-items: center; flex: 1 1 auto; min-width: 0; }
+      .picker-container input { width: 100%; min-height: 32px; padding-right: 26px; }
+      .picker-container input::-webkit-calendar-picker-indicator { position: absolute; left: 0; right: 0; top: 0; bottom: 0; width: auto; height: auto; opacity: 0; cursor: pointer; }
+      .picker-container::after { content: "▼"; position: absolute; right: 4px; font-size: 18px; line-height: 1; color: var(--bt-color, #666); pointer-events: none; }
+      .picker-container:has(input:disabled)::after { opacity: .35; }
       .signin-btn { pointer-events: auto; background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(10px); color: white; border: 1px solid rgba(255, 255, 255, 0.2); padding: 6px 16px; border-radius: 20px; cursor: pointer; font-size: 14px; transition: all 0.2s; }
       .signin-btn:hover { background: rgba(255, 255, 255, 0.2); transform: scale(1.05); }
       .filter-bar { z-index: 2; position: fixed; display: flex; bottom: 77px; left: 0; right: 0; align-items: flex-end; }

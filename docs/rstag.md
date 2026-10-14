@@ -96,6 +96,17 @@ version of this step — TextRank's keyword pre-processing and YAKE's stop list 
 them, and a hybrid retriever's document-frequency filter is the same idea. All four are
 removed from the *inputs*, before stage 2.
 
+```mermaid
+flowchart TB
+  S["rowSources: the title, the URLs, the row's own tags"] --> DROP["dropped before stage 2"]
+  ST["stop: GlobalConfig.stop<br/>the tokenizer's own list is shared with the other<br/>pipelines, so the engine carries its own"] --> DROP
+  DF["globalTerms: df over title, URL and own tags<br/>a term above maxDf holds too much of the corpus"] -->|"only once the pass holds minRows (8)"| DROP
+  NM["named: filterTerms(RestTagOptions.filters)<br/>split on separators, then on camelCase"] --> DROP
+  PV["provenance: suffix_ · dev_ · ref_"] -->|"per row, not per pass"| DROP
+  DROP --> X["no token bag, no graph walk and no trie hit carries it"]
+  X --> Y["the pass-wide three are resolved once in excludedTerms;<br/>the provenance terms join per row, before it is tokenized"]
+```
+
 - **A function word**, from `GlobalConfig.stop` (`DEFAULT_STOP_WORDS`). The tokenizer's
   `STOP_WORDS` is shared with every other pipeline and cannot grow without moving them, so
   the engine carries its own list of the English words that one leaves out: a short
@@ -128,6 +139,28 @@ per row before that row is tokenized.
 ## The 3-stage chain
 
 The chain exists because an exact matcher is a recall layer, not a ranking one.
+
+```mermaid
+flowchart TB
+  A["das rows below the pins"] --> B["runRestPass: cap to the newest tids,<br/>resolve priorityTags, call dyn(priorityTags)"]
+  B --> C["excludedTerms: the corpus floor, the named filters<br/>and the stop list, resolved once per pass"]
+  C --> D{"bucket: 'domain'?"}
+  D -->|"yes — a BM25F corpus and a cluster set per hostname"| E["rrfRowsInSet, once per working set"]
+  D -->|"no — the whole window is one working set"| E
+  E --> F["per row: its provenance terms join the drop set,<br/>then title, urls and tags are tokenized into fields"]
+  F --> G["pass one: trie hits over keywordEntries(priorityTags), the row's<br/>own tokens, and — once dyn is on — the classifier's labels"]
+  G --> H["one batched embed call over the row texts and the candidates"]
+  H --> I["pass two, per row: stage 2 bm25fScores over the fields,<br/>then stage 3a — one ranked list per enabled channel"]
+  I --> J["rankTags: the minScore cut, dedupe, then topK"]
+  J --> K["stage 3b, over the whole set at once: applyRrfBuckets"]
+  K --> L["rrfTagReports returns one result per row"]
+  L --> M["runRestPass: ownTagLess drops what the row already carries"]
+  M --> N["Map&lt;tid, RowTagReport&gt; → chips, the clusters reading, restTagStore"]
+  K --> O["focus keeps what the priority half carried or what clears<br/>aimMin; promote mints anchor/theme for a term a burst shares"]
+```
+
+The knobs each of those stages reads, and the values `rrf` ships, are mapped in
+[the parameter map](#the-knobs).
 
 | Stage | What runs | Where |
 |---|---|---|
@@ -167,6 +200,22 @@ classifier's labels, and — when a `dyn` adapter supplies an embedder, which
 `restDynCapable` offers because `RRF_TAG_SCORE` names the `embed` weight — a semantic list
 ordering candidates by cosine against the row. Rows and candidate terms go into one batched
 `embed` call, so a semantic list costs a request per pass rather than per term.
+
+```mermaid
+flowchart TB
+  B["bm25 — weight above 0, and it always has terms"] --> N["rrfExplainCfg: best = Σ enabled weights / (k + 1),<br/>then every enabled weight divided by best"]
+  T["textrank — weight above 0: the walk over the row's own tokens"] --> N
+  C["clusterrank — weight above 0, and only terms the row itself carries"] --> N
+  P["priority — weight above 0, and the trie matched the row's text"] --> N
+  S["classify — weight above 0, and a classifier adapter answered"] --> N
+  E["embed — weight above 0, and a dyn embedder returned vectors"] --> N
+  N --> F["Σ cfg[channel] × 1 / (k + rank) over the lists holding the term"]
+  F --> R["rankTags: the minScore cut, dedupe, then topK"]
+  R --> O["1 reads as the top of every list this pass ran"]
+  C2["a burst can lift a word the row carries, never introduce one"] -.-> C
+  E2["the only list that costs a request: rows and candidate terms<br/>go into one batched call, not one request per term"] -.-> E
+  N2["a list that is off, or has nothing to say, is never built —<br/>and only an enabled list counts towards the normalization"] -.-> N
+```
 
 The fused score is normalized by the best the enabled lists could jointly give one term, so
 1 means "the top of every list this pass ran". `rrfExplainCfg` divides the *weights* rather
@@ -208,6 +257,21 @@ tuner strip, its label and its hover text are documented in
 `src/ui/restHelp.ts`. What matters here is which of them actually move a result, measured
 on the user's own table rather than assumed:
 
+The map below is the whole pipeline read as controls: one node per stage, in order, with
+the tuner's own label first and the field the profile or the pass reads in parentheses.
+
+```mermaid
+flowchart LR
+  W["working set<br/>REST_PROFILES.rrf, pipeline rrf<br/>window domain (RestPassSpec.dim + bucket)<br/>rows all (RestPassSpec.limit)<br/>urls off (TagRowsOptions.urls)"] --> P
+  P["pre-processing<br/>stop (GlobalConfig.stop)<br/>max df 0.6 (GlobalConfig.maxDf)<br/>minRows 8 — no box<br/>filters → exclude"] --> S1
+  S1["stage 1 candidates<br/>priorityTags: pin #tag headings, provenance skipped<br/>fuzz 0 · overlap greedy (TrieOptions; not a box on rrf)"] --> S2
+  S2["stage 2 BM25F<br/>k1 1.2 · b 0.75 (Bm25Config)<br/>w title 3 · w tags 2 · w url 0 (Bm25Config.fields)<br/>a field at 0 is not read at all"] --> S3
+  S3["stage 3a fusion<br/>rrf k 60 (RrfConfig.k)<br/>bm25 1 · textrank 0.6 · clusterrank 0.4 · priority 1 · embed 1<br/>classify 0.5 · tfidf 0 · turbotext 0 (TagScoreConfig; only the<br/>first five are boxes on the strip)<br/>topK 5 · min 0.12 (TagScoreConfig)"] --> S4
+  S4["stage 3b and the aim pass<br/>aim on (RestPassSpec.aim) · aimMin 0.4<br/>promote ≥ 3 (TagAimConfig.promoteMin)<br/>themes ≤ 2 (TagAimConfig.promoteTop)<br/>mmr λ 0.7 (BucketConfig.lambda)<br/>graph λ 0.5 (BucketConfig.graph) · sep / → anchor/theme"]
+  G["graph walks, both textRank lists<br/>graph w 4 · damp 0.85 · iters 30<br/>tol 1e-4 · minLen 0 (TextRankOptions)"] -.-> S3
+  DYN["dynamic<br/>dyn off by default (RestPassSpec.dyn)<br/>the lists it adds on: embed and classify"] -.-> S3
+```
+
 | Knob | What it does to the `rrf` reading |
 |---|---|
 | `topK` | the only control that shortens a row's chip list |
@@ -217,7 +281,113 @@ on the user's own table rather than assumed:
 | `minLen` | removes short words from both graph walks — and every CJK bigram with them |
 | `k1`, `b`, `w title`/`w tags` | a few percent on a rank-fused list |
 | `promote ≥`, `themes ≤`, `mmr λ`, `graph λ` | whether a burst mints a sub-tag, and which words it picks |
-| `rows` | how much of the list is scored at all; everything the panel counts is over these rows |
+| `rows` | how much of the list is scored at all; everything the panel counts is over these rows. `rrf` ships it empty (the box reads `all`), so a fresh mount scores the whole window |
+
+### The clustered reading
+
+`rrf` is the one grouper that renders its pass rather than decorating the date blocks: its
+profile starts on `viz: 'clusters'`, where `vizBlocks` files every row under the tag it
+kept and the list draws one block per tag. Every row appears once, which is what makes the
+reading a partition rather than a second chip layer; `chips` stays one keystroke away, and
+[sTag.md](sTag.md#the-clustered-reading) owns the layout and the head chip's hover text.
+
+That reading is why `rows` ships uncapped: a tag cluster is a statement about the whole
+window, so a prefix of it would make the heads depend on where the reader is scrolled. The
+cost is paid per pass, so a widened window is what to watch — the [risk](#risks) below
+carries the numbers.
+
+The three subsections below read the live table once (2026-10-14: the newest 600 rows, 599
+of them scored — the pin card is not one — with one `pin` card whose 22 `#tag` headings
+are the priority list, `dyn` off, ~200ms a pass), taken through the same CDP scan the
+[measurements](#measurements) use and filed with `tagClusters`.
+
+#### How a row gets its head
+
+`headTag` is one line: the first tag in a report's score order whose explanation carries a
+`priority` channel, else `report.tags[0]`. That is the same test the focus half applies,
+so a head is by construction a word a pin card's `#tag` heading or a trie entry proposed —
+and the priority half can only lift a word the row's own text already carries, never
+introduce one. A curated tag is a head however few rows it reaches, because the pin card
+named it; any other tag needs `CLUSTER_MIN_ROWS` (3) rows before it is one.
+
+```mermaid
+flowchart TB
+  R["one scored row"] --> P{"first tag in score order<br/>carrying a priority channel?"}
+  P -->|"yes"| C["that tag is the row's head"]
+  P -->|"no"| T["the row's top-ranked tag is its head"]
+  C --> W{"rows filed under that head"}
+  T --> W
+  W -->|"the head came from a priority channel"| B["a block, at any width"]
+  W -->|"else, 3 rows or more"| B
+  W -->|"else, 1-2 rows"| S["(tags kept by 1-2 rows),<br/>the row keeps its own chips"]
+```
+
+The headings therefore lead the list, but a heading is not a block: it is a lift on a word,
+and a block is what happens when that lift wins the row. Measured over those 599 rows:
+
+| Heading | rows whose text matched it | rows whose chips keep it | rows filed under it |
+|---|---|---|---|
+| `deepseek` `md` `risk` `quant` `tag` `awesome` | 13 · 11 · 5 · 3 · 2 · 2 | 13 · 11 · 5 · 3 · 2 · 1 | 13 · 11 · 5 · 3 · 2 · 1 — a block each |
+| `harness` | 5 | 5 | 0 |
+| `AI` | 69 | 0 | 0 |
+| `LLM` `Agent_Incentives` | 6 · 2 | 0 · 0 | 0 |
+| the remaining 12 | 0 | 0 | 0 |
+
+Three ways a heading draws nothing, all in that table. Twelve matched no text at all, so
+the trie never proposed them. `harness` is kept by five rows and still heads none: each of
+them keeps `deepseek` too, which outscores it, so the row is filed under the heading that
+won — `harness` emerges as a *chip* under `#deepseek`, and stage 3b mints
+`deepseek/harness`, which 13 rows of that block carry. `AI` is the other way round: the
+trie proposes the heading's own form while the tokenizer and BM25F read the lowercase
+token, so no lexical list carries it, it scores the priority list's top (0.33) and the
+five chips `topK` keeps all beat it — while its lowercase token `ai` heads 31 rows with no
+priority lift at all. So the reading is not a pin card's tag list drawn as blocks; it is
+the part of that vocabulary the rows' own evidence out-scored under.
+
+#### One cluster, top to bottom
+
+Three of the thirteen rows of `#deepseek`, as `chips` prints them (score order; `+` the
+sub-tags stage 3b appended after the `topK` cut):
+
+| Row | chips |
+|---|---|
+| `ZSeven-W/dsh-ios: DeepSeek Harness (DSH) plugin …` | `deepseek` 0.931 · `harness` 0.914 · `dsh` 0.612 · `simulator` 0.605 · `conversation` 0.589 + `deepseek/harness` 5.000 · `deepseek/dsh` 3.000 |
+| `DeepSeek` (chat.deepseek.com) | `deepseek` 0.867 + the same two sub-tags |
+| `梁文锋署名，DeepSeek发新论文，剑指大规模Agent训练` | `deepseek` 0.802 · `大规` 0.523 · `剑指` 0.521 · `发新` 0.513 · `指大` 0.508 + the same two sub-tags |
+
+The three positions are the three answers a reader can want. **First** is the head — on
+the first row `deepseek` 0.931 is `priority 0.333 + bm25 0.282 + textRank 0.182 +
+clusterRank 0.133`, a pin heading carried by every list the pass ran — so the row files
+under the word the pin card already gave it. **Middle** is the row's own vocabulary, which
+is what makes a chip list worth reading and what never becomes a block: `harness` 0.914 on
+that row (`priority 0.328 + bm25 0.279 + textRank 0.177 + clusterRank 0.131`) is a pin
+heading in its own right and heads nothing, because `deepseek` outranks it on the row.
+**Last** is the `topK` cut: `conversation` 0.589 is the fifth chip and a sixth candidate
+is dropped without reaching the report, so a chip list is the top of a ranking rather than
+everything the pass found — and the `AI` row of the table above is what that looks like
+when the heading is the candidate that misses. A sub-tag's `group` is the count of rows
+that proposed it (5 and 3 here), so a theme reads as a refinement of the head over it
+rather than as a tag of its own.
+
+#### Why the one- and two-row tags are still shown
+
+That same read files 599 rows into 32 blocks: 30 heads holding 168 rows, one `(tags kept
+by 1-2 rows)` holding 422, and one `(no suggestion)` holding 9. The tail is the pass's own
+shape rather than an artifact of the threshold — of the 1630 distinct tags it kept, 1297
+are kept by exactly one row and 211 by exactly two, so 375 of the 405 tags that head some
+row reach fewer than `CLUSTER_MIN_ROWS` rows. Drawn, those would be 375 blocks of one or
+two rows: a tag per row rather than a tag index of the window.
+
+They are still shown, as one block, for three reasons. The reading is a partition, so a
+row has to land somewhere. A row's chips stay with it there, because a word one row keeps
+still says what that row is about — `#complexities` and `#hierarchical` are two of the
+375, and the chip list one of them opens (`complexities 0.527 · high 0.518 · engineering
+0.516 · euv 0.513 · na 0.510`) is the same top-of-a-ranking shape every other block's rows
+carry. And the count is evidence: 422 rows against 168 under the heads is the reading
+saying how thin the support below those heads is, which a list that quietly dropped its
+tail could not say. The `priority` panel draws the same line at a lower threshold — its
+bars are the tags kept by more than one row, and the rest is a `+ N kept by a single row`
+note — so a tag needs two rows to draw a bar and three to head a block.
 
 ## Measurements
 
@@ -375,7 +545,8 @@ missed. `guarded` means a mechanism or a test holds the risk today.
 | A sub-tag's `score` is a row count, not a fused score | any aggregate that sums scores mixes two scales — the sweep's `mean` and `max` do | guarded: `parts.group` and `origin: 'sub'` mark it, and the tooltip names the channel |
 | `Σ contributions == score` depends on dividing the weights | `rrfExplainCfg` divides the weights rather than the result; dividing the result instead breaks the invariant behind every chip tooltip | guarded: `test/rstag.test.ts` asserts it per report |
 | The engine is not reachable from a script | `srctagApi()` lives in `srctag.ts`; importing `rstag` there would make a cycle (`srctag → rstag → srctag`) | open: no `run_src` row can drive the chain today. The retirement step is where this resolves — the API moves, the cycle disappears |
-| Cost grows with `rows` | a BM25F corpus per bucket, one TextRank walk per row and one per window; 600 rows ≈ 150ms and the app caps at 200 | watch: raising `rows` on a large table |
+| A pin heading read as one block | a heading is a lift on a word, not a promise of a block: `#harness` is kept by 5 rows and heads none because `deepseek` outranks it, and `#AI` matched 69 rows' text and headed none because no lexical list carries the heading's own form | open: 6 of 22 headings headed a block on the 2026-10-14 read; a heading that wins nothing is simply absent from the list, and `chips` is where its word still shows |
+| Cost grows with `rows` | a BM25F corpus per bucket, one TextRank walk per row and one per window; 600 rows ≈ 150ms, the two read paths cap at 200 and `rrf` ships uncapped | watch: raising `rows` on a large table, and a window widened past the 555-row page |
 | The committed sweep artifact is easy to truncate | `vitest run … -t <name>` writes only the sections that ran over the committed file | guarded: the test file's header and [sTag.md](sTag.md) both say to re-run the whole file |
 
 ## Related
@@ -383,6 +554,6 @@ missed. `guarded` means a mechanism or a test holds the risk today.
 - `docs/sTag.md` — the tag layer: what the evidence is, `srctag`'s channels, the dynamic
   `type='src'` rows, the write path, and the tuner and panel the knobs render in.
 - `docs/filter_search.md` — the read path the chips feed.
-- `src/rstag.ts`, `src/srctag.ts`, `src/ui/restGrouper.ts`, `src/ui/restTuner.tsx`,
-  `src/ui/restViz.tsx`, `src/ui/restHelp.ts`.
+- `src/rstag.ts`, `src/srctag.ts`, `src/ui/restGrouper.ts`, `src/ui/restVizData.ts`,
+  `src/ui/restTuner.tsx`, `src/ui/restViz.tsx`, `src/ui/restHelp.ts`.
 - `test/rstag.test.ts`, `test/restGrouper.test.ts`, `test/srctag-cdp.test.ts`.

@@ -609,10 +609,11 @@ omnibox's suggestion zone and the `rsdt`/`rsid`/`rsess` groupers — which carry
 still call `restTagMap`, and a script or a test can call either without asking for the aim
 pass.
 
-All six chip groupers keep `rsdt`'s blocks under the `chips` reading, so the mode is a
-decoration layer and the list paints before the tags arrive. `restTagStore` receives
-whichever pass ran, so the userbar omnibox's suggestion zone ranks the same reports either
-way.
+Five of the six chip groupers keep `rsdt`'s blocks under the `chips` reading, so the mode is
+a decoration layer and the list paints before the tags arrive; `rrf` starts on the clustered
+reading instead (see [The clustered reading](#the-clustered-reading)). `restTagStore`
+receives whichever pass ran, so the userbar omnibox's suggestion zone ranks the same reports
+either way.
 
 ## Algorithm groupers (`rsfreq`, `rstrank`, `rstt`)
 
@@ -663,7 +664,7 @@ parseable keystroke, so a half-typed `0.` is not overwritten by the value it cam
 
 | Control | What it moves |
 |---|---|
-| `viz` | which reading the panel below draws, and — for `priority` and `themes` — which blocks the list renders; first on the bar because it changes what the list is telling the reader at all |
+| `viz` | which reading the panel below draws, and — for `clusters`, `priority` and `themes` — which blocks the list renders; first on the bar because it changes what the list is telling the reader at all |
 | `aim` | whether the aim pass runs; the profile decides by default |
 | `aimMin`, `promote ≥`, `themes ≤` | `TagAimConfig.aimMin` and `promoteMin` / `promoteTop`, shown while aim is on |
 | `dyn` | loads the store's `srctag/*` adapters into the pass; offered only where a dynamic channel carries weight (`restDynCapable`), which is `rstag` and `rrf` |
@@ -671,7 +672,7 @@ parseable keystroke, so a half-typed `0.` is not overwritten by the value it cam
 | `urls` | `TagRowsOptions.urls`: whether the row's `ref` and its Markdown links feed the token bag the trie and the graph walks read. The URL is out by default for `rrf`, and `w url` is the separate weight of its BM25F field |
 | the profile's knobs | one weight per channel that family scores with |
 | `topK`, `min` | `TagScoreConfig.topK` and `minScore` |
-| `rows` | how many of the newest rows the pass scores |
+| `rows` | how many of the newest rows the pass scores. `rrf` ships it empty — the box reads `all` — and scores the whole window; a cleared box commits that back rather than a number |
 | `graph w`, `damp`, `iters`, `tol`, `minLen` | the `TextRankOptions` of both graph channels, on the groupers that use them |
 | `fuzz`, `overlap` | `TrieOptions.distance` and `overlap`, on `rstt` |
 | `k1`, `b`, `w title`/`w url`/`w tags` | `Bm25Config`: the term-frequency curve and the three field weights, on `rrf` |
@@ -707,21 +708,26 @@ caveat only where the family leaves the `keyword` weight off.
 
 Between the tuner and the blocks sits a panel whose header is the same in every reading:
 rows, rows scored, rows that kept nothing, and the tags-per-title histogram, drawn as
-inline SVG. The body follows the `viz` switch:
+inline SVG. A reading that replaces the `rsdt` blocks also draws them **inside this panel
+box**, so one reading is one region: the counts, then the rows they are about. The readings
+that keep the `rsdt` blocks leave the list below the panel, and either way `cardTab.tsx`
+keeps growing the window by `PAGE` (`IQ_CNT`, 555) at its own sentinel under the list. The
+body follows the `viz` switch:
 
 | Reading | Body | Blocks |
 |---|---|---|
 | `chips` | a line saying the tag layer stays beside each row | kept: `rsdt` |
+| `clusters` | the reading's own line and its counts, and no bars: each head explains itself in its hover text | replaced by one block per kept tag the threshold draws, headed by the tag itself |
 | `priority` | rows on a curated tag vs none, and bars per kept tag, the priority-backed ones in a second color; only the tags kept by more than one row are drawn, and the line above counts the rest and names the knobs that thin them | replaced by `priority tag kept` / `no tag kept` / `unscored` |
 | `themes` | one line per burst-and-anchor group carrying a shared theme, with its terms | replaced by one block per group |
 | `channels` | one bar per channel, split by its share of the pass's total contribution | kept: `rsdt` |
 | `keywords` | the surface forms the trie matched, with row counts and an example title | kept: `rsdt` |
 
 `src/ui/restVizData.ts` holds the readings as pure functions over the rows and the pass's
-reports — `tagsPerTitle`, `priorityCoverage`, `themeGroups`, `channelShares`,
-`keywordHits`, plus `vizBlocks`, which turns the two partitioning readings into blocks.
-Every row lands in exactly one block, and rows the pass's 200-row cap left unscored get a
-trailing `unscored` block rather than disappearing. A theme is counted by the same rule
+reports — `tagsPerTitle`, `priorityCoverage`, `tagClusters`, `themeGroups`, `channelShares`,
+`keywordHits`, plus `vizBlocks`, which turns the three partitioning readings into blocks.
+Every row lands in exactly one block, and rows the pass's cap left unscored get a trailing
+`unscored` block rather than disappearing. A theme is counted by the same rule
 the promote half uses, so the panel shows the signal behind a sub-tag whether or not aim
 minted one, and the `themes` reading is the place to calibrate `promoteMin` and
 `themes ≤`. The `priority` reading counts *every* kept tag, not only the curated ones, so
@@ -738,6 +744,39 @@ The `rstag` panel also carries the `dyn` flag's status: which adapters the store
 `AdapterSet.errors` lines for the ones it did not, and the vector cache's `primed` and
 `written` counts. A failed adapter degrades the pass to its static channels — a scoring
 call never throws over one — and turning `dyn` off restores the lexical-only reading.
+
+### The clustered reading
+
+`clusters` is the one reading that is a layout rather than a panel: `cardTab.tsx` renders
+the blocks `tagClusters` returned, so the rest list reads as a tag index of the window.
+
+- A block is headed by its tag as an outline chip in the tag's own hue — the same box a
+  per-row chip uses, with its right border dropped as well, so the chip opens onto the rows
+  it leads instead of closing them off.
+- Blocks carry no spacing of their own and a 1px dotted rule is what separates one from the
+  next; the first block opens the list and carries none.
+- The per-row chip strip is off inside a tagged block, because the head already is that
+  row's tag.
+- A tag fewer than three rows keep is not a cluster, so its rows keep their own chip strip
+  in the `(tags kept by 1-2 rows)` block — the rule the panel's bars already draw by. A
+  curated tag is a head however few rows it reaches, because the pin card named it.
+- The head chip's hover text is where a cluster is explained: the channels the pass scored
+  the tag on, the number of rows the cluster holds, and the rows themselves. The panel
+  draws no bars for this reading, because a bar per tag would say the same thing twice.
+- Curated tags lead, then the wider clusters, and the two trailing blocks —
+  `(no suggestion)` for a scored row that kept nothing and `unscored` for a row the cap left
+  out — carry no chip at all.
+
+`tagClusters` files a row under the highest-scored tag the priority half carried, or under
+its top-ranked tag otherwise, so a row appears once however many tags it kept; the panel's
+counts above and the heads below are over the same pass. `tagTopExplanations` is what backs
+a head's hover text: the highest-scored explanation of each tag, with the report that
+carried it, which is the dimension and window `explainTag` prints the channels against.
+`rrf` is the profile that starts here, and the reading is why its `rows` box ships empty: a
+cluster is a statement about the whole window, so the tuner renders `ROWS_ALL` as an empty
+box with an `all` placeholder rather than as a number. On a table of mostly-distinct titles
+most tags are kept by one or two rows, so the threshold is what keeps the list a cluster
+list rather than a tag per row.
 
 ## The `rrf` grouper (3-stage pipeline)
 

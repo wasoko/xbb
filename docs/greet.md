@@ -231,12 +231,14 @@ flowchart LR
   text survives there for the diff tab; `daStale` (the row carries a `cr` log) and the
   tab's ⚠ both point at it.
 
-`rec.ver[dt]` and `rec.cr[devAgent_modAt]` each hold `row` minus `rec` (history cannot
+`rec.ver[dt]` and `rec.cr[devAgent_stamp]` each hold `row` minus `rec` (history cannot
 nest itself), keyed by `sdb.stamp` for `ver` and `sdb.crStamp` for `cr`. Neither history
 is pruned.
 
 **Writers.** `pullPush` records each version the server accepts (`ver[server_now]`),
 and `deepMerge` records the adopted server version plus any discarded local edit.
+`sdb.clean` files every duplicate row it collapses under the keeper's `cr` (§7 *R3*), and
+`fileDiscardedCr` files a buffer edit the editor could not place on the text the row holds.
 `sdb.daEdit(row, txt)` shelves the base: the first edit of a clean row stores the row
 under its own `dt`, so the ancestor exists without the writer knowing about it. The editor's
 buffer write (`saveToDb`) and the agent store (`IRecrStore.put`/`writeFile`) behave alike;
@@ -397,8 +399,14 @@ change the row is skipped.
   so the server row's `stuff.tid` differs from a downloader's local tid.
   `merge()` looks up displaced rows by `pk(serverStuff)`; a mismatched tid means
   the stale dirty local row is neither moved nor removed → **duplicate uniq rows
-  locally** (sync.md §5 `ref(uniqs)` dup). No test covers naturally-different
-  tids for the same uniq.
+  locally** (sync.md §5 `ref(uniqs)` dup). `test/ver.test.ts` covers the collapse of
+  such a pair — the newest-`dt` row keeps the key and the other row's text moves to its
+  `cr` — but no live round with naturally-different tids does. `sdb.clean()` runs that
+  collapse, and `upSnap` calls it before it writes a snapshot, so the CDN copy carries the
+  merged `tags` and the `cr` log rather than the pair. It never deletes the server's own
+  row for the uniq, which the client cannot download back either: that row carries the `dt`
+  one of the two was accepted at, so the local `last_dt` is never behind it and the
+  `newer` branch cannot select it.
 - **R4 – `last_dt` is global max(dt).** A toMerge'd row whose dt is older than
   another local row's dt can be rejected repeatedly; the loop caps at 5 rounds
   and leaves it dirty (recovered on next `greet()`).
@@ -411,8 +419,9 @@ change the row is skipped.
   is pushed like any other row; a round the server rejects (R1, R4), or a peer still pushing
   its older copy of the row, leaves the entry to return. The `FIXMEchange_rejected` tag is
   derived from the same log, so it follows it.
-- **`cr` growth.** Neither `ver` nor `cr` is pruned, and a `cr` entry holds a full row
-  snapshot. `modrwCheck`'s `rec` size log is the only signal; a cap belongs in `treeCac`.
+- **`cr` growth.** Neither `ver` nor `cr` is pruned, a `cr` entry holds a full row
+  snapshot, and every collapsed duplicate adds one (§7 *R3*). `modrwCheck`'s `rec` size log
+  is the only signal; a cap belongs in `treeCac`.
 - **Minor:** `toBackup` grows unbounded across `pullPush`; `merge()` calls `meta()`
   = `metaSet` (tid=-1 stat row), not a dl merge as its comment claims; test
   fixtures still use legacy `sts` field while `patchMod` reads `tags`; the stat row

@@ -13,8 +13,9 @@ import { describe, expect, it } from 'vitest';
 import type { Da } from '../src/sdb';
 import type { KeywordMatch, RowTagReport, TagChannelStat, TagExplanation, TagParts } from '../src/srctag';
 import {
-  channelShares, keywordHits, priorityCoverage, reportOf, tagsPerTitle, themeGroups, vizBlocks,
-  VIZ_UNSCORED_LABEL, type VizReports,
+  channelShares, keywordHits, priorityCoverage, reportOf, tagClusters, tagTopExplanations, tagsPerTitle,
+  themeGroups, vizBlocks,
+  VIZ_SMALL_LABEL, VIZ_UNCLUSTERED_LABEL, VIZ_UNSCORED_LABEL, type VizReports,
 } from '../src/ui/restVizData';
 
 /** A row with the fields the list reads. */
@@ -92,6 +93,70 @@ describe('priorityCoverage', () => {
       { label: 'hooks', value: 2, share: 0.667, priority: false },
       { label: 'react', value: 2, share: 0.667, priority: true },
     ]);
+  });
+});
+
+describe('tagClusters', () => {
+  const rows = [row(1, 'a'), row(2, 'b'), row(3, 'c'), row(4, 'd'), row(5, 'e'), row(6, 'f'), row(7, 'g'), row(8, 'h'), row(9, 'i')];
+  const map = reports(
+    // row 1 keeps the curated tag second in its own list: the head still comes
+    // from the priority half, whatever the row's top tag is
+    report(1, [kept('hooks', channel('tfidf', 0.5)), kept('react', channel('priority', 1))]),
+    report(2, [kept('react', channel('priority', 1))]),
+    // a curated tag is a head however few rows it reaches: the pin card named it
+    report(3, [kept('vue', channel('priority', 1))]),
+    report(4, [kept('hooks', channel('tfidf', 0.5))]),
+    report(5, [kept('hooks', channel('tfidf', 0.5))]),
+    report(6, [kept('hooks', channel('tfidf', 0.5))]),
+    report(7, [kept('rust', channel('tfidf', 0.5))]),
+    report(8, []),
+  );
+
+  it('files each row under the tag its priority half carried, curated tags leading', () => {
+    const blocks = tagClusters(rows, map);
+    expect(blocks.map((b) => [b.tag ?? b.label, b.items.map((r) => r.tid)])).toEqual([
+      // the curated tags lead, and among them the wider one first
+      ['react', [1, 2]],
+      ['vue', [3]],
+      ['hooks', [4, 5, 6]],
+      // a tag one row keeps is no cluster, so its row trails with its own chips
+      [VIZ_SMALL_LABEL, [7]],
+      [VIZ_UNCLUSTERED_LABEL, [8]],
+      [VIZ_UNSCORED_LABEL, [9]],
+    ]);
+  });
+
+  it('needs a third row before a tag earns a head', () => {
+    const two = [row(1, 'a'), row(2, 'b'), row(3, 'c')];
+    const twice = reports(
+      report(1, [kept('rust', channel('tfidf', 0.5))]),
+      report(2, [kept('rust', channel('tfidf', 0.5))]),
+    );
+    expect(tagClusters(two, twice).map((b) => b.tag ?? b.label))
+      .toEqual([VIZ_SMALL_LABEL, VIZ_UNSCORED_LABEL]);
+  });
+
+  it('lists every row of the list exactly once, and in its own order inside a block', () => {
+    const blocks = tagClusters(rows, map);
+    const items = blocks.flatMap((b) => b.items);
+    expect(items).toHaveLength(rows.length);
+    expect(new Set(items.map((r) => r.tid))).toEqual(new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]));
+    expect(blocks[2].items.map((r) => r.tid)).toEqual([4, 5, 6]);
+  });
+});
+
+describe('tagTopExplanations', () => {
+  it('keeps the highest-scored explanation of a tag with the report that carried it', () => {
+    const rows = [row(1, 'a'), row(2, 'b')];
+    const map = reports(
+      report(1, [kept('react', channel('priority', 0.2))]),
+      report(2, [kept('react', channel('priority', 0.9))], { dim: 'visitTime' }),
+    );
+    const details = tagTopExplanations(rows, map);
+    expect(details.get('react')!.explanation.score).toBe(0.9);
+    expect(details.get('react')!.report.dim).toBe('visitTime');
+    // the rows the pass never scored contribute nothing
+    expect(tagTopExplanations([row(9, 'z')], map).size).toBe(0);
   });
 });
 
@@ -181,6 +246,16 @@ describe('vizBlocks', () => {
     for (const mode of ['chips', 'channels', 'keywords'] as const) {
       expect(vizBlocks(mode, rows, map)).toBeUndefined();
     }
+  });
+
+  it('partitions the clustered reading by the tag each row is filed under', () => {
+    const blocks = vizBlocks('clusters', rows, map)!;
+    expect(blocks.map((b) => [b.tag ?? b.label, b.items.map((r) => r.tid)])).toEqual([
+      ['react', [1, 3]],
+      // `hooks` is kept by one row and no pin card named it, so it is no head
+      [VIZ_SMALL_LABEL, [2]],
+      [VIZ_UNSCORED_LABEL, [4]],
+    ]);
   });
 
   it('partitions the priority reading so every row appears exactly once', () => {

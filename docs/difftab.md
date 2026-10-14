@@ -10,7 +10,7 @@ how that text is offered back.
 | source | key | written by |
 |:--|:--|:--|
 | `ver` | server `dt` (ISO) | `pullPush` on accept, `deepMerge` on adoption or union, `daEdit` on the base an edit is made from |
-| `cr` | `devAgent` + local `modAt` (ISO) | `deepMerge` when the server copy wins, `fileDiscardedCr` when the editor's buffer merge cannot place a hunk (`docs/greet.md` §2 *Persist*) |
+| `cr` | `devAgent` + the stamp of the row that was dropped: its `modAt` (ISO), or its server `dt` for a clean row | `deepMerge` when the server copy wins, `fileDiscardedCr` when the editor's buffer merge cannot place a hunk (`docs/greet.md` §2 *Persist*), `clean` when it collapses duplicate rows of one uniq (`docs/greet.md` §7 *R3*) |
 
 Both hold `row` minus `rec`, so a version cannot nest history (`sdb.putVer` /
 `putCr`). The `cr` key names the client that discarded the edit, so the log merges by key
@@ -18,6 +18,12 @@ and travels: the RPC payload carries it, `deepMerge` unions both sides, and `wit
 carries it onto the row that replaces a local one in a snap merge or a PK relocation. A
 row holding a `cr` entry carries `FIXMEchange_rejected` in `tags[]`, so the tag UI can
 list it for cleanup. Snapshots drop `rec.ver` (`sdb.withoutVer`), never `cr`.
+
+`sdb.clean` is a `cr` writer too: a `daUniq` key that holds duplicate rows keeps its
+newest-`dt` row, and every other row is filed under that keeper's `cr` and counted by the
+`FIXME_dup_ref` tag it adds. Rows whose `txt` is the keeper's own are folded into it
+instead — `tags` and `rec` merge, `FIXED_dup_merged` is added, and no entry is filed,
+because identical text leaves nothing to recover.
 
 ## 2. The tab
 
@@ -79,4 +85,4 @@ trashing one drops it without a push.
 - `docs/greet.md` — the merge that writes `cr`, and the tab's other conflict surfaces
 - `src/ui/diffTab.tsx`, `src/ui/diff.ts`, `src/ui/editor.tsx` — tab, pure diff, plumbing
 - `test/diff.test.ts` — hunk and change splitting, ANSI runs, line deltas, apply
-- `test/ver.test.ts` — `ver`/`cr` helpers, including `dropHistEntry`
+- `test/ver.test.ts` — `ver`/`cr` helpers, `dropHistEntry`, and `clean`'s duplicate collapse

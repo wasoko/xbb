@@ -7,10 +7,11 @@
  * tags with their channel shares, the burst each row sits in, and the trie hits
  * the keyword channel read.
  *
- * Two of the readings are partitions rather than summaries: `priority` splits
- * the rows by whether they kept a curated tag, and `themes` by burst and anchor
- * tag. {@link vizBlocks} turns those into the blocks that replace the `rsdt`
- * ones, so every row lands in exactly one block and nothing is listed twice.
+ * Three of the readings are partitions rather than summaries: `clusters` splits
+ * the rows by the tag they are filed under, `priority` by whether they kept a
+ * curated tag, and `themes` by burst and anchor tag. {@link vizBlocks} turns
+ * those into the blocks that replace the `rsdt` ones, so every row lands in
+ * exactly one block and nothing is listed twice.
  *
  * A row the pass's cap left unscored is reported like that rather than dropped:
  * the cap is 200 rows, and a table is usually longer.
@@ -39,6 +40,23 @@ export interface VizTagBar extends VizBar {
 
 /** Heading of the trailing block holding rows the pass's cap left unscored. */
 export const VIZ_UNSCORED_LABEL = 'unscored';
+
+/** Heading of the trailing block holding scored rows that kept no tag at all. */
+export const VIZ_UNCLUSTERED_LABEL = '(no suggestion)';
+
+/**
+ * Rows a tag needs before it is worth a cluster head. A tag one or two rows keep
+ * says what those rows are about, not what the list is, which is the same rule
+ * the panel's bars draw by. A curated tag is a head however few rows it reaches,
+ * because a pin card named it.
+ */
+export const CLUSTER_MIN_ROWS = 3;
+
+/**
+ * Heading of the trailing block holding the rows of the clusters that were not
+ * worth a head. Those rows keep their own chip strip where they land.
+ */
+export const VIZ_SMALL_LABEL = '(tags kept by 1-2 rows)';
 
 /** Thousandths keep a printed share stable. */
 const share = (n: number, total: number): number =>
@@ -162,6 +180,103 @@ export function priorityCoverage(rows: Da[], reports: VizReports): VizPriority {
         label, value, share: share(value, scored), priority: curated.has(label),
       })),
   };
+}
+
+/**
+ * The tag that heads a row's cluster: the highest-scored curated tag it kept, so
+ * a pin card's own word leads, or its top-ranked tag when none carried it.
+ *
+ * @param report one row's report
+ * @returns the tag whose cluster the row joins
+ */
+const headTag = (report: RowTagReport): TagExplanation =>
+  report.tags.find(isPriorityTag) ?? report.tags[0];
+
+/** One tag's best explanation, with the report that carried it. */
+export interface VizTagDetail {
+  explanation: TagExplanation;
+  report: RowTagReport;
+}
+
+/**
+ * The explanation a tag is best described by: the highest-scored one any scored
+ * row returned, with the report it came from — `explainTag` prints the channels
+ * against that report's dimension and window.
+ *
+ * A cluster head is a chip like any other, so its hover text is what says why
+ * the pass proposed the tag; the panel draws no bar for it.
+ *
+ * @param rows rows the list is showing
+ * @param reports one report per scored row
+ * @returns tag -> its best explanation, in first-suggestion order
+ */
+export function tagTopExplanations(rows: Da[], reports: VizReports): Map<string, VizTagDetail> {
+  const out = new Map<string, VizTagDetail>();
+  for (const row of rows) {
+    const report = reportOf(reports, row);
+    if (!report) continue;
+    for (const t of report.tags) {
+      const held = out.get(t.tag);
+      if (!held || t.score > held.explanation.score) out.set(t.tag, { explanation: t, report });
+    }
+  }
+  return out;
+}
+
+/**
+ * The clustered reading: one block per kept tag, keyed by the tag itself, with
+ * the rows that kept it under it.
+ *
+ * A row joins the cluster of {@link headTag}, so a pin card's curated `#tag`
+ * heads the list the way it heads a pass. Curated tags come first, then the
+ * widest clusters; a tag fewer than {@link CLUSTER_MIN_ROWS} rows keep is not a
+ * cluster and its rows trail under {@link VIZ_SMALL_LABEL} instead, which is the
+ * same rule the panel draws its bars by. A scored row that kept nothing and a row
+ * the cap left unscored trail after that.
+ *
+ * @param rows rows the list is showing
+ * @param reports one report per scored row
+ * @returns one block per tag worth a head, then the three trailing blocks
+ */
+export function tagClusters(rows: Da[], reports: VizReports): RestGroup[] {
+  const clusters = new Map<string, { tag: string; priority: boolean; items: Da[] }>();
+  const unclustered: Da[] = [];
+  const unscored: Da[] = [];
+
+  for (const row of rows) {
+    const report = reportOf(reports, row);
+    if (!report) { unscored.push(row); continue; }
+    if (report.tags.length === 0) { unclustered.push(row); continue; }
+    const head = headTag(report);
+    const held = clusters.get(head.tag);
+    if (held) held.items.push(row);
+    else clusters.set(head.tag, { tag: head.tag, priority: isPriorityTag(head), items: [row] });
+  }
+
+  /* A curated tag is kept as a head however few rows it reaches, because the pin
+     card named it; any other tag needs a third row to be a cluster at all. */
+  const all = [...clusters.values()];
+  const folded = new Set(all
+    .filter((c) => !c.priority && c.items.length < CLUSTER_MIN_ROWS)
+    .map((c) => c.tag));
+  const singles = folded.size === 0 ? [] : rows.filter((row) => {
+    const report = reportOf(reports, row);
+    return !!report && report.tags.length > 0 && folded.has(headTag(report).tag);
+  });
+  const heads = all
+    .filter((c) => !folded.has(c.tag))
+    .sort((a, b) => Number(b.priority) - Number(a.priority)
+      || b.items.length - a.items.length || a.tag.localeCompare(b.tag));
+
+  return [
+    ...heads.map((c) => ({ key: `tag:${c.tag}`, label: c.tag, tag: c.tag, items: c.items })),
+    ...(singles.length > 0
+      ? [{ key: 'singletons', label: VIZ_SMALL_LABEL, items: singles }] : []),
+    ...(unclustered.length > 0
+      ? [{ key: 'unclustered', label: VIZ_UNCLUSTERED_LABEL, items: unclustered }] : []),
+    ...(unscored.length > 0
+      ? [{ key: VIZ_UNSCORED_LABEL, label: VIZ_UNSCORED_LABEL, items: unscored }] : []),
+  ];
 }
 
 /** One burst-and-anchor group of the theme reading. */
@@ -313,10 +428,11 @@ export function keywordHits(rows: Da[], reports: VizReports, examples = 3): VizK
 /**
  * The blocks a reading replaces the `rsdt` blocks with.
  *
- * `priority` splits by whether a row kept a curated tag and `themes` by burst and
- * anchor; both end with the rows the pass's cap left unscored, so every row the
- * list holds appears exactly once. Every other mode keeps the blocks it already
- * had.
+ * `clusters` groups by the tag a row is filed under, `priority` splits by
+ * whether a row kept a curated tag, and `themes` by burst and anchor; all three
+ * end with the rows the pass's cap left unscored, so every row the list holds
+ * appears exactly once. Every other mode keeps the blocks it already had. Rows a
+ * `clusters` block does not head keep their own chip strip.
  *
  * @param mode reading the panel is on
  * @param rows rows the list is showing
@@ -324,6 +440,7 @@ export function keywordHits(rows: Da[], reports: VizReports, examples = 3): VizK
  * @returns the blocks to render, or undefined when the mode keeps the existing ones
  */
 export function vizBlocks(mode: RestVizMode, rows: Da[], reports: VizReports): RestGroup[] | undefined {
+  if (mode === 'clusters') return tagClusters(rows, reports);
   if (mode === 'priority') {
     const { tagged, untagged, unscored } = priorityCoverage(rows, reports);
     return [

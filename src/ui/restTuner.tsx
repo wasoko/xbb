@@ -3,8 +3,8 @@ import React, { useState } from 'react';
 import { DEFAULT_BM25, DEFAULT_BUCKETS, DEFAULT_GLOBAL, DEFAULT_RRF } from '../rstag';
 import { DEFAULT_TAG_AIM, DEFAULT_TEXTRANK, DEFAULT_TRIE, TAG_CHANNEL_LABEL } from '../srctag';
 import {
-  REST_PROFILES, REST_VIZ_MODES, REST_WINDOW_MODES, restAim, restDynCapable, restHyperScore, restVizMode,
-  type RestHyper, type RestTagProfile,
+  REST_PROFILES, REST_VIZ_MODES, REST_WINDOW_MODES, ROWS_ALL, restAim, restDynCapable, restHyperScore,
+  restVizMode, type RestHyper, type RestTagProfile,
 } from './restGrouper';
 import { knobHelp, PROFILE_HELP, TUNER_HELP, VIZ_HELP, vizCaveat, WINDOW_HELP } from './restHelp';
 
@@ -46,20 +46,33 @@ const BUTTON: React.CSSProperties = {
  * a half-typed `0.` is not overwritten by the committed value; anything that
  * already parses is committed on the keystroke, which is what makes the list
  * re-score as the knob moves.
+ *
+ * A knob that accepts "all" renders its sentinel as an empty box and commits
+ * that value back when the box is cleared, so a cap is lifted by erasing it
+ * rather than by typing a number large enough to cover the table.
  */
-function Num({ label, value, onCommit, help }: {
+function Num({ label, value, onCommit, help, emptyValue }: {
   label: string; value: number; onCommit: (n: number) => void; help?: string;
+  /** Value the box renders as empty, and commits again when it is cleared. */
+  emptyValue?: number;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
+  const blank = emptyValue !== undefined && value === emptyValue;
   return (
     <label style={ROW} title={help}>
       <span style={LABEL}>{label}</span>
       <input
-        type="text" inputMode="decimal" value={draft ?? String(value)}
+        type="text" inputMode="decimal" value={draft ?? (blank ? '' : String(value))}
+        placeholder={blank ? 'all' : undefined}
         onChange={(e) => {
-          setDraft(e.target.value);
-          const n = Number(e.target.value);
-          if (e.target.value.trim() !== '' && Number.isFinite(n)) onCommit(n);
+          const text = e.target.value;
+          setDraft(text);
+          if (text.trim() === '') {
+            if (emptyValue !== undefined) onCommit(emptyValue);
+            return;
+          }
+          const n = Number(text);
+          if (Number.isFinite(n)) onCommit(n);
         }}
         onBlur={() => setDraft(null)}
         style={FIELD}
@@ -217,6 +230,7 @@ export function RestTuner({ grouper, hyper, onChange }: RestTunerProps) {
       <Num label="min" value={effective.minScore ?? 0} help={TUNER_HELP.minScore}
         onCommit={(n) => patch({ minScore: n })} />
       <Num label="rows" value={hyper?.limit ?? profile.limit} help={TUNER_HELP.rows}
+        emptyValue={profile.limit === ROWS_ALL ? ROWS_ALL : undefined}
         onCommit={(n) => patch({ limit: n })} />
       {(profile.rank || hyper?.rank) && (
         <>

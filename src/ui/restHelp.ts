@@ -44,7 +44,7 @@ export const CHANNEL_HELP: Record<keyof TagParts, string> = {
 
 /** One line per tuner control, keyed by the control rather than by its rendered label. */
 export const TUNER_HELP: Record<string, string> = {
-  viz: 'which reading the panel draws below. `chips` is the tag layer beside the rows; the other four replace the blocks with what one algorithm is actually about, which is how to read whether a knob helped',
+  viz: 'which reading the panel draws below, and which of them replace the blocks: `chips` leaves the tag layer beside each row, `clusters` files every row under the tag each one kept, `priority` splits the rows by whether a curated tag was kept, and `themes` by burst and anchor. `channels` and `keywords` add a bar or a term list and leave the blocks alone',
   aim: 'run the aim pass over the scored set: focus drops a suggestion neither a curated tag nor the `aimMin` cut-off carried, and promote mints `parent/theme` for a term a burst shares. On `rrf` over short titles the cut-off barely bites — every candidate sits in the first ranks of every list — so `topK` and the pre-processing are what decide the chip list',
   aimMin: 'the score a suggestion the priority half did not carry must clear, on a fused scale where 1 is the top of every list the pass ran. Inert on a TextRank-scored family (a normalized centrality puts most words near 1) and on `rrf` over short titles; raise it to keep only what several signals agree on',
   promoteMin: 'rows of one burst that must propose a word before the aim pass mints it as a sub-tag. A burst is a cluster of the window on screen, so the `window` switch decides whether this knob is reachable at all',
@@ -54,7 +54,7 @@ export const TUNER_HELP: Record<string, string> = {
   urls: 'let the row\'s `ref` and its Markdown links feed the token bag the trie, both graph walks and the semantic list read. Hostname labels (`dev`, `docs`) are the noisiest evidence a link row has, and on a list of one site\'s pages they are on every row — which is why `rrf` ships them out',
   topK: 'most tags one row keeps. On `rrf` this is the knob that decides the chip list: the fused score is flat over ranks, so the cut-off and the aim pass keep nearly everything and only this cap shortens it',
   minScore: 'cut-off — a suggestion below this is dropped. On a fused `rrf` score the scale is flat (every candidate sits in the first ranks), so moving it changes little; use `topK` to shorten the list and the pre-processing to improve it',
-  rows: 'newest rows the pass scores. Everything the panel counts is over these rows alone, so a longer list shows the rest as unscored',
+  rows: 'newest rows the pass scores. Everything the panel counts is over these rows alone, so a shorter window reads the rest as unscored. `rrf` ships it empty — the box says `all` — because its clusters are a reading of the whole window; typing a number caps it again',
   graphWindow: 'the token distance at which two words join the TextRank graph. Wider links more words and flattens the walk',
   damping: 'damping of that walk: the share of its weight a word passes on rather than keeps',
   iterations: 'iteration cap of the walk, which also stops early at `tol`',
@@ -76,6 +76,7 @@ export const TUNER_HELP: Record<string, string> = {
 /** One line per panel reading. */
 export const VIZ_HELP: Record<RestVizMode, string> = {
   chips: 'the tag layer beside each row, and nothing replaced',
+  clusters: 'one block per tag the rows kept, headed by the tag itself with its right border dropped so the box opens onto its rows. A row joins the highest-scored tag the priority half carried, or its top-ranked tag when nothing curated carried it; the pin cards\' tags lead, then the widest clusters. A tag fewer than three rows keep is no cluster: those rows trail with their own chips, then a row that kept nothing under `(no suggestion)`. This reading draws no bars — hover a head for the channels behind it and the rows it holds',
   priority: 'rows on a curated tag vs none, then one bar per tag kept by more than one row — the priority-backed ones in green, with the count of one-off tags beside them. `topK` shortens the list and the pre-processing (`stop`, `max df`) cleans it; a generic word a graph channel lifted leaves through `minLen`',
   themes: 'one line per burst-and-anchor group sharing a word: the evidence behind a promoted sub-tag. Calibrate with `promote ≥` and `themes ≤`',
   channels: 'one bar per channel, sized by its share of the pass\'s total contribution',

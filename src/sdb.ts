@@ -15,13 +15,66 @@ export const daPk = (t: Da) => t.tid
 export const daNoPk = ({tid:_, ...rest}:any) => rest 
 export const tags2str=(t:Da) => JSON.stringify([t.ref, t.txt, t.type, t.tags ?? []])
 export const tid_last = async ()=>await db.das.orderBy(':id').last()
-export async function clean() {
+
+/** What one `clean()` pass did. */
+export interface CleanSummary {
+  /** Rows that carried no server `dt` and were stamped with the pass time. */
+  filled: number
+  /** `daUniq` keys that held more than one row. */
+  keys: number
+  /** Rows of identical text folded into a keeper, nothing lost. */
+  sameTxt: number
+  /** Duplicate rows filed under a keeper's `rec.cr`. */
+  filed: number
+  /** Duplicate rows dropped unfiled: their `cr` key was taken by a different text, or the row
+   *  carried no stamp to name one. */
+  clash: number
+  /** Rows deleted, each one archived in `db.bins` first. */
+  dropped: number
+}
+
+/** Maintenance pass over `db.das`: stamp the rows that never reached the server, then collapse
+ *  the duplicate rows one `daUniq` key may hold (a PK relocation leaves a second live row, which
+ *  the tab state reports as `diverged`).
+ *
+ *  Two rules per key, in this order: rows sharing a keeper's `txt` fold into it with `tags` and
+ *  `rec` merged (`DUP_MERGED_TAG`), and every remaining row is filed whole under the keeper's
+ *  `rec.cr` (`DUP_REF_TAG`), the log the diff tab offers back, while its `tags` and its `rec`
+ *  fields move to the keeper.
+ *
+ *  The keeper is left clean (`modAt` unset). Pushing one whose `dt` is newer than the server copy
+ *  of its uniq would meet that copy as `toMerge`, and `deepMerge` without a held `ver` ancestor
+ *  lets the older server text win; the merged `tags` and `cr` travel in the CDN snapshot instead,
+ *  which `upSnap` uploads right after this pass and which drops only `rec.ver`.
+ *
+ *  @param rows the rows to inspect; read from `db.das` when omitted
+ *  @returns what the pass did */
+export async function clean(rows?: Da[]): Promise<CleanSummary> {
   const now = new Date()
-  const null_dt = await db.das.filter(t=> t.dt===undefined).toArray()
-  let updates = null_dt.map(t=> ({key:t.tid, changes:{dt: now}}))
-  if (updates.length >0) return await db.das.bulkUpdate(updates)
-  
-  return 0
+  const all = rows ?? await db.das.toArray()
+  const undated = all.filter(t => t.dt === undefined)
+  const stamped = undated.length === 0
+    ? all
+    : all.map(t => (t.dt === undefined ? { ...t, dt: now } : t))
+  const merges = dupGroups(stamped).map(planDupMerge)
+  const summary: CleanSummary = {
+    filled: undated.length,
+    keys: merges.length,
+    sameTxt: merges.reduce((n, m) => n + m.sameTxt, 0),
+    filed: merges.reduce((n, m) => n + m.filed, 0),
+    clash: merges.reduce((n, m) => n + m.clash, 0),
+    dropped: merges.reduce((n, m) => n + m.doomed.length, 0),
+  }
+  if (undated.length + merges.length === 0) return summary
+  await db.transaction('rw', db.das, db.bins, async () => {
+    if (undated.length > 0)
+      await db.das.bulkUpdate(undated.map(t => ({ key: t.tid, changes: { dt: now } })))
+    if (merges.length === 0) return
+    await binPut(`das-clean-${now.toISOString()}`, merges.flatMap(m => m.doomed))
+    await db.das.bulkPut(merges.map(m => m.keeper))
+    await db.das.bulkDelete(merges.flatMap(m => m.doomed.map(r => r.tid!)))
+  })
+  return summary
 }
 /** Archive one value under `key` in `db.bins`, gzipped+cbor.
  * @param key archive name
@@ -140,13 +193,15 @@ export async function iq(filters: string[], search?: string, tidNum?: number, li
   const extra = recrMode ? [] : filters.slice(1);
   if (extra.length)
     col = col.filter(row => extra.every(f => row.tags?.includes(f)));
+  /* Tombstones drop before the limit, so a page holds `limit` live rows: the card list
+     reads a short page as the end of the table, and rows dropping out after the limit
+     would end its window early. */
+  col = col.filter(row => !row.tags?.includes(DEL_TAG));
 
   const arr = await col.reverse().limit(limit ?? IQ_CNT).toArray()
-  // filter out deleted rows
-  const active = arr.filter(r => !r.tags?.includes(DEL_TAG))
-  if (search) return active.filter(s=> s.txt.toLocaleLowerCase()
+  if (search) return arr.filter(s=> s.txt.toLocaleLowerCase()
     .includes(search?.toLocaleLowerCase()));// FIXME beyond limit full search
-  return active
+  return arr
 }
 
 
@@ -299,6 +354,12 @@ export const DEL_TAG = '[del]'
 /** Marks a row whose local edit a server-wins merge discarded, so the tag UI can list and
  *  clean the rows that still carry a `rec.cr` log. */
 export const CHG_REJ_TAG = 'FIXMEchange_rejected'
+/** Marks the row that absorbed duplicate rows of its `daUniq` key, whose text waits in the row's
+ *  `rec.cr` log for the diff tab. Goes with the last entry, as `CHG_REJ_TAG` does. */
+export const DUP_REF_TAG = 'FIXME_dup_ref'
+/** Marks a row that absorbed duplicate rows carrying its own `ref` and `txt`: nothing was lost,
+ *  so `tags` and `rec` merged and no `cr` entry was filed. */
+export const DUP_MERGED_TAG = 'FIXED_dup_merged'
 
 /** Rows the tag UI owns. recr keeps its session, settings, and tool rows in the same table. */
 export const isUiTag = (r: Da) => r.type !== RECR_TYPE
@@ -598,8 +659,8 @@ export function withCr<R extends { rec?: Record<string, unknown>; tags?: string[
   return on ? { ...row, rec: { ...(row.rec ?? {}), cr } } : row
 }
 
-/** Drop one `cr` entry and, with the last one, the marker tag. The caller writes the returned
- *  update spec, so an apply retires the version and the tag in one write.
+/** Drop one `cr` entry and, with the last one, the marker tags. The caller writes the returned
+ *  update spec, so an apply retires the version and the tags in one write.
  *  @param row the row the entry came from
  *  @param key the `cr` key to drop
  *  @returns the Dexie update spec for the row */
@@ -607,7 +668,8 @@ export function dropCrEntry(row: Da, key: string) {
   const { [key]: _consume, ...rest } = (row.rec?.cr ?? {}) as VerHist
   const remaining = Object.keys(rest).length
   const { cr: _drop, ...rec } = row.rec ?? {}
-  const tags = remaining > 0 ? row.tags : withChgTag(row, false).tags
+  const tags = remaining > 0 ? row.tags
+    : withChgTag(row, false).tags?.filter(t => t !== DUP_REF_TAG)
   const next = remaining > 0 ? { ...rec, cr: rest } : rec
   return tags === row.tags ? { rec: next } : { rec: next, tags }
 }
@@ -635,6 +697,130 @@ export function withoutVer<R extends { rec?: Record<string, unknown> }>(row: R):
   if (!row.rec?.ver) return row
   const { ver:_, ...rec } = row.rec
   return { ...row, rec } as R
+}
+
+/** Rows of one `daUniq` key, for the keys that hold more than one. `daUniq` (`type`+`ref`) is the
+ *  unit the `[ref+type]` index, the tag read path (`daWin`) and the server's `ups_same_base`
+ *  resolve, so a `tab` and a `bookmark` row for one URL are two different keys.
+ *  @param rows rows to group
+ *  @returns one group per key holding two or more rows */
+export function dupGroups(rows: Da[]): Da[][] {
+  const byKey = new Map<string, Da[]>()
+  for (const row of rows) byKey.set(daUniq(row), [...(byKey.get(daUniq(row)) ?? []), row])
+  return [...byKey.values()].filter(group => group.length > 1)
+}
+
+/** Epoch milliseconds of a stamp, `-Infinity` when the row carries none. */
+const stampMs = (d?: Date|string|null) => (d ? new Date(d).getTime() : -Infinity)
+
+/** The row a set of rows keeps: the newest server `dt`, then the newer `modAt`, then the higher
+ *  `tid`, so the choice is total over the rows a client holds.
+ *  @param rows a non-empty set of rows of one `daUniq` key
+ *  @returns the row the set keeps */
+export function dupKeeper(rows: Da[]): Da {
+  return rows.reduce((a, b) =>
+    stampMs(a.dt) !== stampMs(b.dt) ? (stampMs(a.dt) > stampMs(b.dt) ? a : b)
+      : stampMs(a.modAt) !== stampMs(b.modAt) ? (stampMs(a.modAt) > stampMs(b.modAt) ? a : b)
+        : (a.tid ?? 0) > (b.tid ?? 0) ? a : b)
+}
+
+/** A `rec` without its histories, which the duplicate merge handles on their own. */
+function recRest(rec: Record<string,unknown>|undefined): Record<string,unknown> {
+  const { ver: _ver, cr: _cr, ...rest } = rec ?? {}
+  return rest
+}
+
+/** Union `tags`, keeping the order of the first row that carries each one.
+ *  @param rows rows to union, in precedence order
+ *  @returns the tags, or undefined when no row carries one */
+export function unionTags(...rows: (Da|undefined)[]): string[] | undefined {
+  const out: string[] = []
+  for (const row of rows)
+    for (const tag of row?.tags ?? []) if (!out.includes(tag)) out.push(tag)
+  return out.length > 0 ? out : undefined
+}
+
+/** Fold rows carrying one `txt` into their keeper. Identical text has nothing to recover, so
+ *  `tags` union and `rec` merges whole, histories included, and the keeper is marked
+ *  `DUP_MERGED_TAG`.
+ *  @param rows two or more rows of one `daUniq` key sharing one `txt`
+ *  @returns the keeper to write */
+export function mergeSameTxt(rows: Da[]): Da {
+  const keeper = dupKeeper(rows)
+  const twins = rows.filter(r => r !== keeper)
+  const ver = twins.reduce<VerHist>((acc, r) => mergeVer(acc, r.rec?.ver)
+    , (keeper.rec?.ver ?? {}) as VerHist)
+  const cr = twins.reduce((acc, r) => ({ ...(r.rec?.cr as VerHist|undefined), ...acc })
+    , (keeper.rec?.cr ?? {}) as VerHist)
+  const rest = fc.recMerge(
+    twins.reduce((acc, r) => fc.recMerge(acc, recRest(r.rec), 5), {} as Record<string,unknown>)
+    , recRest(keeper.rec), 5)
+  const tags = unionTags(keeper, ...twins) ?? []
+  return { ...keeper
+    , tags: tags.includes(DUP_MERGED_TAG) ? tags : [...tags, DUP_MERGED_TAG]
+    , rec: { ...rest
+      , ...(Object.keys(ver).length > 0 ? { ver } : {})
+      , ...(Object.keys(cr).length > 0 ? { cr } : {}) } }
+}
+
+/** What one `daUniq` key's duplicate rows collapse into. */
+export interface DupMerge {
+  /** The one live row left for the key. */
+  keeper: Da
+  /** Rows to delete: every row of the key but the keeper, whose text the keeper now holds in its
+   *  `cr` log or already carries. */
+  doomed: Da[]
+  /** Rows of identical text folded into a survivor of the key. */
+  sameTxt: number
+  /** Rows filed under `keeper.rec.cr`. */
+  filed: number
+  /** Rows dropped unfiled. */
+  clash: number
+}
+
+/** Plan the merge of one `daUniq` key that holds more than one row.
+ *
+ *  A `[del]` row that is the key's newest effective stamp (`daLatest`) is the keeper: the ref
+ *  reads as deleted, so no sibling may resurrect it, and nothing is filed (the text stays in the
+ *  archive `clean` writes). Otherwise the rows sharing a `txt` fold together first, and each
+ *  surviving text is filed under the newest-`dt` row's `cr` keyed by the stamp that row carries,
+ *  which is its `modAt` when it holds a local edit and its server `dt` otherwise.
+ *
+ *  @param group two or more rows of one `daUniq` key
+ *  @returns the row to write and the rows to delete */
+export function planDupMerge(group: Da[]): DupMerge {
+  const tomb = daLatest(group)
+  if (tomb?.tags?.includes(DEL_TAG))
+    return { keeper: tomb, doomed: group.filter(r => r.tid !== tomb.tid)
+      , sameTxt: 0, filed: 0, clash: 0 }
+  const byTxt = new Map<string, Da[]>()
+  for (const row of group) byTxt.set(row.txt, [...(byTxt.get(row.txt) ?? []), row])
+  const texts = [...byTxt.values()]
+  const survivors = texts.map(rows => (rows.length > 1 ? mergeSameTxt(rows) : rows[0]))
+  const keeper = dupKeeper(survivors)
+  const dumped = survivors.filter(r => r.tid !== keeper.tid)
+  const cr = { ...((keeper.rec?.cr ?? {}) as VerHist) }
+  let filed = 0, clash = 0
+  for (const row of dumped) {
+    const key = crStamp(row.modAt ?? row.dt)
+    if (!key || key in cr) {
+      if (!key || cr[key]?.txt !== row.txt) clash++
+      continue
+    }
+    cr[key] = verSnap(row)
+    filed++
+  }
+  const tags = unionTags(keeper, ...dumped) ?? []
+  const rec: Record<string,unknown> = { ...fc.recMerge(
+    dumped.reduce((acc, r) => fc.recMerge(acc, recRest(r.rec), 5), {} as Record<string,unknown>)
+    , recRest(keeper.rec), 5) }
+  if (Object.keys(cr).length > 0) rec.cr = cr
+  if (keeper.rec?.ver !== undefined) rec.ver = keeper.rec.ver
+  const marked = texts.length > 1 && !tags.includes(DUP_REF_TAG) ? [...tags, DUP_REF_TAG] : tags
+  return { keeper: { ...keeper, tags: marked.length > 0 ? marked : undefined, rec }
+    , doomed: group.filter(r => r.tid !== keeper.tid)
+    , sameTxt: texts.reduce((n, rows) => n + (rows.length > 1 ? rows.length : 0), 0)
+    , filed, clash }
 }
 
 /** 3-way text/tags merge: apply the local diff `ancestor`→`mod` onto the server copy `base`.

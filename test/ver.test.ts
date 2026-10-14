@@ -2,7 +2,7 @@
  * @vitest-environment happy-dom
  */
 import 'fake-indexeddb/auto';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import * as sdb from '../src/sdb';
 import { bulk2put } from '../src/greet';
 
@@ -252,5 +252,95 @@ describe('patchMod', () => {
   it('returns the base when there is no ancestor copy', () => {
     const base = mk({ txt: 'server' })
     expect(sdb.patchMod(base, undefined, mk({ txt: 'local' }))).toBe(base)
+  })
+})
+
+describe('clean() duplicate merge', () => {
+  // newer than DT1, so a row can outrank the fixed fixture stamps
+  const FUT = new Date(Date.now() + HOUR)
+  const put = (rows: sdb.Da[]) => sdb.db.das.bulkPut(rows)
+  beforeEach(async () => {
+    await sdb.db.das.clear()
+    await sdb.db.bins.clear()
+  })
+
+  it('keeps the newest dt of a daUniq key and files the older row under cr', async () => {
+    await put([mk({ tid: 1, txt: 'older', dt: DT0, tags: ['a'] })
+      , mk({ tid: 2, txt: 'newer', dt: DT1, tags: ['b'] })])
+    const sum = await sdb.clean()
+    const left = await sdb.db.das.toArray()
+    expect(left).toHaveLength(1)
+    expect(left[0]).toMatchObject({ tid: 2, txt: 'newer' })
+    expect(left[0].tags).toEqual(['b', 'a', sdb.DUP_REF_TAG])
+    // a clean sibling carries no modAt, so its server dt names the entry
+    expect(crOf(left[0])[sdb.crStamp(DT0)!].txt).toBe('older')
+    expect(left[0].modAt).toBeUndefined()          // the keeper is not re-pushed
+    expect(await sdb.db.bins.count()).toBe(1)      // the dropped row is archived first
+    expect(sum).toMatchObject({ keys: 1, filed: 1, dropped: 1, sameTxt: 0, clash: 0 })
+  })
+
+  it('folds rows of one txt into one row, tags and rec merged, with no cr entry', async () => {
+    await put([mk({ tid: 1, txt: 'same', dt: DT0, tags: ['a'], rec: { visitTime: { 1: 10 } } })
+      , mk({ tid: 2, txt: 'same', dt: DT1, tags: ['b'], rec: { access2discard: { 2: 20 } } })])
+    const sum = await sdb.clean()
+    const left = await sdb.db.das.toArray()
+    expect(left).toHaveLength(1)
+    expect(left[0].tags).toEqual(['b', 'a', sdb.DUP_MERGED_TAG])
+    expect(left[0].rec).toMatchObject({ visitTime: { 1: 10 }, access2discard: { 2: 20 } })
+    expect(left[0].rec.cr).toBeUndefined()         // identical text leaves nothing to recover
+    expect(sum).toMatchObject({ keys: 1, sameTxt: 2, filed: 0, dropped: 1 })
+  })
+
+  it('files a duplicate that still holds a local edit and leaves the keeper clean', async () => {
+    await put([mk({ tid: 1, txt: 'mine', dt: DT0, modAt: MOD, tags: ['a'] })
+      , mk({ tid: 2, txt: 'server', dt: FUT, tags: ['b'] })])
+    const sum = await sdb.clean()
+    const [row] = await sdb.db.das.toArray()
+    expect(row).toMatchObject({ tid: 2, txt: 'server' })
+    expect(crOf(row)[sdb.crStamp(MOD)!].txt).toBe('mine')   // the edit is recoverable, not lost
+    expect(row.modAt).toBeUndefined()
+    expect(row.tags).toContain(sdb.DUP_REF_TAG)
+    expect(sum).toMatchObject({ filed: 1, dropped: 1 })
+  })
+
+  it('keeps rows of one ref under different types apart', async () => {
+    await put([mk({ tid: 1, ref: 'u', type: 'tab', txt: 'T' })
+      , mk({ tid: 2, ref: 'u', type: 'bookmark', txt: 'T' })])
+    const sum = await sdb.clean()
+    expect(await sdb.db.das.count()).toBe(2)
+    expect(sum.keys).toBe(0)
+  })
+
+  it('collapses onto a newest [del] row instead of resurrecting the ref', async () => {
+    await put([mk({ tid: 1, txt: 'gone', dt: DT1, tags: [sdb.DEL_TAG] })
+      , mk({ tid: 2, txt: 'live', dt: DT0, tags: ['a'] })])
+    await sdb.clean()
+    const left = await sdb.db.das.toArray()
+    expect(left).toHaveLength(1)
+    expect(left[0]).toMatchObject({ tid: 1, tags: [sdb.DEL_TAG] })
+    expect(left[0].rec.cr).toBeUndefined()
+  })
+
+  it('stamps a row with no dt and merges the duplicates in the same pass', async () => {
+    await put([mk({ tid: 1, dt: undefined, txt: 'undated' })
+      , mk({ tid: 2, dt: DT0, txt: 'dated' })])
+    const sum = await sdb.clean()
+    expect(sum).toMatchObject({ filled: 1, keys: 1, dropped: 1 })
+    const left = await sdb.db.das.toArray()
+    expect(left).toHaveLength(1)
+    expect(left[0].tid).toBe(1)                    // the pass stamp outranks DT0
+    expect(left[0].dt).toBeInstanceOf(Date)
+  })
+
+  it('leaves a table with one row per key alone', async () => {
+    await put([mk({ tid: 1 })])
+    expect(await sdb.clean()).toMatchObject({ filled: 0, keys: 0, dropped: 0 })
+    expect(await sdb.db.das.count()).toBe(1)
+  })
+
+  it('retires FIXME_dup_ref with the last cr entry', () => {
+    const key = sdb.crStamp(DT0)!
+    const row = mk({ tags: ['a', sdb.DUP_REF_TAG], rec: { cr: { [key]: sdb.verSnap(mk()) } } })
+    expect(sdb.dropCrEntry(row, key).tags).toEqual(['a'])
   })
 })

@@ -8,7 +8,8 @@ import {
   groupByDt, groupByDtVisit, groupBySession, groupRest, isRestGrouperScript, isTagGrouper,
   restAim, restDynAdapters, restDynCapable, restGroupsFor, restHyperScore, restProfileMap,
   restTagContributors, restTagMap, restTagStore, restTextMap, restVizMode, RECR_CONFIG_LABEL,
-  REST_PROFILES, RRF_GROUPER, RSDT_GROUPER, RSFREQ_GROUPER, RSSESS_GROUPER, RSTAG_GROUPER, RSTAG_LIMIT,
+  REST_PROFILES, ROWS_ALL, RRF_GROUPER, RSDT_GROUPER, RSFREQ_GROUPER, RSSESS_GROUPER, RSTAG_GROUPER,
+  RSTAG_LIMIT,
   RSTRANK_GROUPER, RSTEXT_GROUPER, RSTEXT_LIMIT, RSTT_GROUPER, UNDATED_LABEL,
 } from '../src/ui/restGrouper';
 import type { RowTagReport } from '../src/srctag';
@@ -517,11 +518,14 @@ describe('the six tag groupers as profiles', () => {
     expect(restAim(REST_PROFILES[RSTT_GROUPER], { aim: false })).toBe(false);
   });
 
-  it('starts every grouper on the chips reading and follows the switch', () => {
+  it('starts every grouper on the chips reading, and rrf on its tag clusters', () => {
     for (const grouper of Object.keys(REST_PROFILES)) {
-      expect(restVizMode(REST_PROFILES[grouper]), grouper).toBe('chips');
+      const start = grouper === RRF_GROUPER ? 'clusters' : 'chips';
+      expect(restVizMode(REST_PROFILES[grouper]), grouper).toBe(start);
     }
     expect(restVizMode(REST_PROFILES[RSTT_GROUPER], { viz: 'keywords' })).toBe('keywords');
+    // the switch still reaches the tag layer of the chain
+    expect(restVizMode(REST_PROFILES[RRF_GROUPER], { viz: 'chips' })).toBe('chips');
   });
 
   it('offers the dyn flag only where a dynamic channel carries weight', () => {
@@ -648,6 +652,15 @@ describe('rrf grouper', () => {
     expect(map.size).toBe(3);
     expect(map.has(12)).toBe(true);
     expect(map.has(3)).toBe(false);
+  });
+
+  it('scores the whole read window, past the read-path caps', async () => {
+    const rows = Array.from({ length: RSTAG_LIMIT + 5 }, (_, i) =>
+      site(i + 1, `react row ${i}`, `https://s${i}.example.com/${i}`));
+    expect(REST_PROFILES[RRF_GROUPER].limit).toBe(ROWS_ALL);
+    const map = await restProfileMap(rows, RRF_GROUPER, undefined, { pins: [pin('# topic #react')] });
+    // the two read paths stop at their own cap; this one reads to the end of the list
+    expect(map.size).toBe(RSTAG_LIMIT + 5);
   });
 
   it('reads the URL out of the inputs and out of the BM25F fields', () => {

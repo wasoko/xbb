@@ -34,6 +34,12 @@ export interface RestGroup {
   items: Da[];
   /** Visit-time blocks inside a date block, newest first. */
   subgroups?: RestGroup[];
+  /**
+   * Tag this block clusters, set by `vizBlocks`'s `clusters` reading. A tagged
+   * block heads with the tag itself instead of with `label`, so the chip reads
+   * as the key of the rows under it.
+   */
+  tag?: string;
 }
 
 /** `treeCac['restGrouper']` value: blocks by `dt` alone. */
@@ -143,11 +149,12 @@ export type RestKnob = keyof TagParts;
  * layer alone — today's view — and the other modes replace the blocks with the
  * reading that one algorithm is actually about.
  */
-export type RestVizMode = 'chips' | 'priority' | 'themes' | 'channels' | 'keywords';
+export type RestVizMode = 'chips' | 'clusters' | 'priority' | 'themes' | 'channels' | 'keywords';
 
 /** The visualization modes the tuner offers, in render order. */
 export const REST_VIZ_MODES: { value: RestVizMode; label: string }[] = [
   { value: 'chips', label: 'chips (tags only)' },
+  { value: 'clusters', label: 'tag clusters' },
   { value: 'priority', label: 'priority coverage' },
   { value: 'themes', label: 'theme groups' },
   { value: 'channels', label: 'channel shares' },
@@ -156,6 +163,13 @@ export const REST_VIZ_MODES: { value: RestVizMode; label: string }[] = [
 
 /** Mode a grouper starts on when its profile names none: the view it renders today. */
 export const REST_VIZ_DEFAULT: RestVizMode = 'chips';
+
+/**
+ * Rows cap meaning "every row the list holds". `rrf` ships it so a fresh mount
+ * scores the whole read window rather than an arbitrary prefix of it, and the
+ * tuner renders it as an empty `rows` box rather than as a number.
+ */
+export const ROWS_ALL = Number.POSITIVE_INFINITY;
 
 /**
  * One algorithm grouper's default hyperparameters and the knobs its tuner
@@ -169,7 +183,7 @@ export interface RestTagProfile {
   knobs: RestKnob[];
   /** Window a fresh mount starts on. */
   mode: RestWindowMode;
-  /** Rows scored. */
+  /** Rows scored; {@link ROWS_ALL} scores the whole list. */
   limit: number;
   /**
    * Whether a row's URL feeds the channels. Off for the three algorithm
@@ -282,7 +296,13 @@ export const REST_PROFILES: Record<string, RestTagProfile> = {
     score: RRF_TAG_SCORE,
     knobs: ['bm25', 'embed', 'textRank', 'clusterRank', 'priority'],
     mode: 'domain',
-    limit: RSTAG_LIMIT,
+    /* Uncapped: the chain's candidates come from every row the list holds, and a
+       prefix of the window would make the tag clusters depend on where the
+       reader happens to be scrolled. */
+    limit: ROWS_ALL,
+    /* The tag clusters are this pipeline's own reading: a chip per tag kept, and
+       the rows that kept it under it, rather than the `rsdt` date blocks. */
+    viz: 'clusters',
     /* The URL is out: under a list of one site's pages the hostname and the
        browser in the query string are on every row, so they say nothing about
        any one of them. `urls` keeps them out of the token bag and the BM25F `url`

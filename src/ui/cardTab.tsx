@@ -11,14 +11,29 @@ import { setTip, TipHost, TIP_ATTR } from './Tip';
 import { dtMs, groupRest, isRestGrouperScript, isTagGrouper, restGroupsFor, restProfileMap, restTagContributors, restTagMap, restTagStore, restVizMode, RSSESS_GROUPER, REST_PROFILES, type RestGroup, type RestHyperState } from './restGrouper';
 import { RestTuner } from './restTuner';
 import { RestViz } from './restViz';
-import { vizBlocks } from './restVizData';
+import { vizBlocks, tagTopExplanations, type VizTagDetail } from './restVizData';
 import { explanationText, type RowTagReport } from '../srctag';
 import { useTreeCac } from './useTreeCac';
 
 /** Rows read per page; the sentinel widens the read window by this much. */
 const PAGE = IQ_CNT;
 
+/** Budget for one widened read before the sentinel reports it as slow and offers a retry. */
+const LOAD_TIMEOUT_MS = 8000;
+
 const SELECTED_BG = 'rgba(59, 130, 246, 0.3)';
+
+/** The sentinel's manual grow/retry control; it inherits that line's `#888`. */
+const LOAD_MORE_BUTTON: React.CSSProperties = {
+  marginLeft: 8,
+  padding: '2px 10px',
+  background: 'transparent',
+  color: 'inherit',
+  border: '1px solid currentColor',
+  borderRadius: 4,
+  font: 'inherit',
+  cursor: 'pointer',
+};
 
 /* Row cropping — the fixed width, the sideways scroll and the hairline bar —
    lives in the shared `.crop-scroll` rule of `index.html`, so a `.da-row` and a
@@ -54,6 +69,8 @@ export interface CardTabProps {
  */
 export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, renderer }: CardTabProps) {
   const [limit, setLimit] = useState(PAGE);
+  /* Bumped to re-issue a read the user asked to retry. */
+  const [retryKey, setRetryKey] = useState(0);
 
   const filtersKey = filters.join(',');
   const filtersStable = useMemo(() => filters, [filtersKey]);
@@ -61,14 +78,20 @@ export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, ren
   /* `f=recr` lists recr's own rows; `iq` returns those instead of the tag rows. */
   const recrMode = filtersStable.length === 1 && filtersStable[0] === RECR_TYPE;
 
-  const das = useLiveQuery(
+  /* The rows carry the `limit` they were read at, which is what tells a widened window
+     apart from one that has not been read yet: while the read is in flight the rows in
+     hand are still the previous page. */
+  const page = useLiveQuery(
     async () => {
       const { finalDas } = await iqWithCrumbs(filtersStable, undefined, Number(tidLoc), limit);
-      return (finalDas ?? []) as Da[];
+      return { rows: (finalDas ?? []) as Da[], limit };
     },
-    [filtersKey, tidLoc, limit],
-    [] as Da[],
+    [filtersKey, tidLoc, limit, retryKey],
+    { rows: [] as Da[], limit: 0 },
   );
+  const das = page.rows;
+  /** The read for the current window has not landed yet. */
+  const loading = page.limit !== limit;
 
   /* A new filter set or locate target restarts the window at one page. */
   useEffect(() => {
@@ -144,21 +167,37 @@ export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, ren
     [restTagKey, restGrouper, hyperKey, profile !== undefined],
     new Map<number, RowTagReport>(),
   );
-  /* The panel's reading; `priority` and `themes` also replace the `rsdt` blocks. */
+  /* The panel's reading; `clusters`, `priority` and `themes` also replace the
+     `rsdt` blocks. */
   const viz = profile ? restVizMode(profile, hyper) : undefined;
+  /* The clustered reading heads each block with the tag itself. */
+  const clustered = viz === 'clusters';
   const vizGroups = useMemo(
     () => (viz ? vizBlocks(viz, listedRest, restTags) : undefined),
     [viz, restTagKey, restTags],
   );
-  /* Which rows propose each tag, for the chip tooltips. */
+  /* Which rows propose each tag, for the chip tooltips, and what the pass said
+     about each one, for the head chips the panel draws no bar for. */
   const restContributors = useMemo(
     () => restTagContributors(listedRest, restTags),
     [listedRest, restTags],
   );
+  const restTagDetails = useMemo(
+    () => tagTopExplanations(listedRest, restTags),
+    [restTagKey, restTags],
+  );
   useEffect(() => { restTagStore.set(restTags, listedRest); }, [restTags, restTagKey]);
 
-  const renderRestRow = (d: Da) => {
-    const report = restTagging && d.tid !== undefined ? restTags.get(d.tid) : undefined;
+  /**
+   * The rows of one block. A row whose block carries no tag head keeps its own
+   * chip strip: the `clusters` reading hides a row's suggestions only where the
+   * head above it already names one, so the blocks that fold their tags away
+   * still say what each of their rows was filed under.
+   */
+  const renderBlockItems = (block: RestGroup) => (d: Da) => {
+    const report = restTagging && block.tag === undefined && d.tid !== undefined
+      ? restTags.get(d.tid)
+      : undefined;
     return (
       /* A fragment, not a div: `.da-row` is inline-block and `.rest-group` has no
          rule, so same-block rows flow on one line until they wrap. */
@@ -172,20 +211,74 @@ export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, ren
     );
   };
 
-  /* A page shorter than asked for means the table is exhausted. */
-  const canGrow = !tidLoc && das.length >= limit;
+  /* A full page means older rows may remain and a short one means the table is
+     exhausted. `loading` is excluded because a widened read has left the rows in hand
+     at their old length, which would read as a short page. */
+  const canGrow = !tidLoc && !loading && das.length >= limit;
+  const [atEnd, setAtEnd] = useState(false);
+  const [slow, setSlow] = useState(false);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  /* One observer for the list's lifetime. Rebuilding it per page, as a `canGrow`
+     dependency did, drops the scroll that lands while the window widens: the sentinel
+     leaves the view as the new rows arrive, and only an observation made during the
+     load reports it back. */
   useEffect(() => {
     const el = sentinelRef.current;
-    if (!el || !canGrow) return;
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) setLimit((prev) => prev + PAGE);
-    });
+    if (!el) return;
+    const observer = new IntersectionObserver(([entry]) => setAtEnd(entry.isIntersecting));
     observer.observe(el);
     return () => observer.disconnect();
-  }, [canGrow]);
+  }, []);
+
+  /* Growth follows the state rather than the event, so a page that lands while the
+     sentinel still stands in view widens the window again without another scroll. */
+  useEffect(() => {
+    if (atEnd && canGrow) setLimit((prev) => prev + PAGE);
+  }, [atEnd, canGrow]);
+
+  /* A read that overruns the budget stops claiming progress and offers a retry. */
+  useEffect(() => {
+    if (!loading) { setSlow(false); return; }
+    const timer = setTimeout(() => setSlow(true), LOAD_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [loading, retryKey]);
+
+  /* Five states, not one message: a read that is running, one that overran its budget,
+     a window that can widen, a window with nothing older left, and an empty table. */
+  const sentinelLabel = das.length === 0
+    ? (loading ? 'Loading...' : 'No data found')
+    : loading
+      ? (slow ? `Still loading after ${LOAD_TIMEOUT_MS / 1000}s` : 'Loading more...')
+      : canGrow ? 'Scroll for more' : 'No more data';
+  const sentinelAction = slow ? 'Retry' : canGrow ? 'Load more' : null;
+  /* `slow` re-issues the read in flight; a click on a full page widens the window. */
+  const growOrRetry = () => {
+    if (slow) { setSlow(false); setRetryKey((k) => k + 1); }
+    else setLimit((prev) => prev + PAGE);
+  };
 
   const pinHeightVh = pinRows.length > 0 ? 66 / pinRows.length : 0;
+
+  /*
+   * One reading is one region: a reading that replaces the `rsdt` blocks draws
+   * them inside the panel that describes them, and a reading that keeps the
+   * blocks leaves them under it. Either way the window still grows a page at a
+   * time at the sentinel below the list.
+   */
+  const restBlocks = (vizGroups ?? restGroups).map((g, i) => (
+    <div key={g.key} className="rest-group" style={clusterBlock(clustered, i)}>
+      <RestGroupHead label={g.label} tag={g.tag} contributors={restContributors}
+        details={restTagDetails} itemCount={g.items.length} />
+      {g.items.map(renderBlockItems(g))}
+      {g.subgroups?.map((s) => (
+        <div key={s.key} className="rest-subgroup">
+          <RestGroupHead label={s.label} level={2} />
+          {s.items.map(renderBlockItems(s))}
+        </div>
+      ))}
+    </div>
+  ));
 
   return (
     <TipHost>
@@ -218,24 +311,18 @@ export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, ren
           )}
           {viz && (
             <RestViz grouper={restGrouper} mode={viz} rows={listedRest} reports={restTags}
-              hyper={hyper} dyn={hyper?.dyn === true} />
+              hyper={hyper} dyn={hyper?.dyn === true}>
+              {vizGroups ? restBlocks : null}
+            </RestViz>
           )}
-          {(vizGroups ?? restGroups).map((g) => (
-            <div key={g.key} className="rest-group">
-              <RestGroupHead label={g.label} />
-              {g.items.map(renderRestRow)}
-              {g.subgroups?.map((s) => (
-                <div key={s.key} className="rest-subgroup">
-                  <RestGroupHead label={s.label} level={2} />
-                  {s.items.map(renderRestRow)}
-                </div>
-              ))}
-            </div>
-          ))}
+          {vizGroups ? null : restBlocks}
         </div>
 
         <div ref={sentinelRef} className="load-more-trigger">
-          {das.length === 0 ? 'No data found' : canGrow ? 'Loading more...' : 'No more data'}
+          {sentinelLabel}
+          {sentinelAction && (
+            <button style={LOAD_MORE_BUTTON} onClick={growOrRetry}>{sentinelAction}</button>
+          )}
         </div>
       </div>
     </TipHost>
@@ -243,14 +330,76 @@ export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, ren
 }
 
 /**
- * One rest-block heading; `level` 2 is a visit-time subgroup nested in a date
- * block. An empty label renders nothing, which is what the flat grouper emits.
+ * One clustered block's box. The reading is a list of tag keys, so a block has
+ * no spacing of its own and a dotted rule is what tells it apart from the
+ * cluster above; the first block opens the list, so it carries no rule.
  *
- * @param props.label - Heading text.
+ * @param clustered - whether the blocks below come from the `clusters` reading.
+ * @param index - block position, so the first one can drop the rule.
+ * @returns The inline style, or undefined for the `rsdt` blocks.
+ */
+const clusterBlock = (clustered: boolean, index: number): React.CSSProperties | undefined =>
+  clustered
+    ? { margin: 0, padding: 0, ...(index > 0 ? { borderTop: '1px dotted rgba(255,255,255,0.18)' } : {}) }
+    : undefined;
+
+/**
+ * One rest-block head; `level` 2 is a visit-time subgroup nested in a date
+ * block. A tagged block heads with the tag itself — a chip whose right border is
+ * dropped, so the box opens onto the rows that follow instead of closing them
+ * off — and an empty label renders nothing, which is what the flat grouper
+ * emits.
+ *
+ * A cluster head has no bar of its own in the panel, so its hover text is where
+ * the tag is explained: the channels the pass scored it on, how many rows the
+ * cluster holds, and the rows themselves.
+ *
+ * @param props.label - Heading text; the tag, for a tagged block.
+ * @param props.tag - Tag the block clusters, when the block came from the
+ *   `clusters` reading.
+ * @param props.contributors - Rows proposing each tag, for the head's hover text.
+ * @param props.details - Best explanation of each tag, for the same hover text.
+ * @param props.itemCount - Rows in the block, so the head names its own size.
  * @param props.level - 1 for a date block, 2 for a visit-time subgroup.
  * @returns The heading element.
  */
-function RestGroupHead({ label, level = 1 }: { label: string; level?: 1 | 2 }) {
+function RestGroupHead({ label, tag, contributors, details, itemCount, level = 1 }: {
+  label: string;
+  tag?: string;
+  contributors?: Map<string, Da[]>;
+  details?: Map<string, VizTagDetail>;
+  itemCount?: number;
+  level?: 1 | 2;
+}) {
+  if (tag) {
+    const rows = contributors?.get(tag) ?? [];
+    const detail = details?.get(tag);
+    const title = [
+      ...(detail
+        ? [explanationText(detail.explanation, { dim: detail.report.dim, window: detail.report.window })]
+        : []),
+      `${itemCount ?? rows.length} row(s) cluster on #${tag}`,
+      ...(rows.length === 0 ? [] : [
+        `suggested by ${rows.length}:`,
+        ...rows.map((r) => r.txt || r.ref),
+      ]),
+    ].join('\n');
+    return (
+      <span
+        className="rest-cluster-head"
+        title={title}
+        style={{
+          ...DYNAMIC_CHIP,
+          color: tagCue(tag),
+          borderColor: tagCue(tag),
+          marginLeft: 0,
+          borderRightStyle: 'none',
+        }}
+      >
+        #{tag}
+      </span>
+    );
+  }
   if (!label) return null;
   return (
     <div
@@ -366,7 +515,8 @@ const tagCue = (tag: string): string =>
  * because the last chip of a strip unsets its right side. The native title
  * carries the channel breakdown and the rows that proposed the tag, so a chip
  * holds no state. The `help` cursor matches that: hovering explains, a chip has
- * nothing to click.
+ * nothing to click. A cluster head borrows the same box, with its right side
+ * unset as well, so it opens onto the rows it leads.
  */
 const DYNAMIC_CHIP: React.CSSProperties = {
   display: 'inline-block',

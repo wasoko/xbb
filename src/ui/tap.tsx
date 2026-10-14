@@ -138,7 +138,13 @@ const MAX_HINTS = 3;
  * list scored (click applies them), then the store's most used tags (click searches them).
  * Typing replaces both with the live matches.
  */
-function SearchOmnibox({ onOpen }: { onOpen: (ref: string) => void }) {
+function SearchOmnibox({ onOpen, drop, onExpandChange }: {
+  onOpen: (ref: string) => void
+  /** Screen position of the open list, moved by the bar handle ({@link UserBar}). */
+  drop: React.CSSProperties
+  /** Reports the box reaching the screen's left edge, which widens the toolbar holding it. */
+  onExpandChange: (expanded: boolean) => void
+}) {
   const [q, setQ] = useState('');
   const [debounced, setDebounced] = useState('');
   const [open, setOpen] = useState(false);
@@ -147,6 +153,11 @@ function SearchOmnibox({ onOpen }: { onOpen: (ref: string) => void }) {
   const [recentTags, setRecentTags] = useState<{ tag: string; count: number }[]>([]);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  /** Caret in the box, or a query left in it: the box then takes the toolbar's free width. */
+  const [focused, setFocused] = useState(false);
+  const expanded = focused || q.length > 0;
+
+  useEffect(() => { onExpandChange(expanded); }, [expanded, onExpandChange]);
 
   /* One query per typing burst. */
   useEffect(() => {
@@ -293,10 +304,11 @@ function SearchOmnibox({ onOpen }: { onOpen: (ref: string) => void }) {
   };
 
   return (
-    <div ref={rootRef} className="user-menu-container" style={{ alignSelf: 'center', marginLeft: 11, flex: '0 1 auto', minWidth: 0 }}>
+    <div ref={rootRef} className="user-menu-container"
+      style={{ alignSelf: 'center', flex: expanded ? '1 1 auto' : '0 1 auto', minWidth: 0 }}>
       <div style={{
         display: 'flex', alignItems: 'center', gap: 6, height: 40, padding: '0 12px',
-        width: 111, maxWidth: '100%', minWidth: 0, boxSizing: 'border-box',
+        width: expanded ? '100%' : 111, maxWidth: '100%', minWidth: 0, boxSizing: 'border-box',
         borderRadius: 20, background: 'transparent', border: '1px solid rgba(255,255,255,0.2)',
         backdropFilter: 'blur(10px)', transition: 'all 0.2s',
       }}>
@@ -309,14 +321,16 @@ function SearchOmnibox({ onOpen }: { onOpen: (ref: string) => void }) {
           placeholder="Search"
           spellCheck={false}
           onChange={(e) => { setQ(e.target.value); setOpen(true); }}
-          onFocus={() => { setOpen(true); void refreshHints(); }}
+          onFocus={() => { setFocused(true); setOpen(true); void refreshHints(); }}
+          onBlur={() => setFocused(false)}
           onKeyDown={onKeyDown}
           style={{ flex: '1 1 auto', minWidth: 0, margin: 0, padding: 0, background: 'transparent', border: 'none', outline: 'none', color: 'white', fontSize: 13 }}
         />
       </div>
-      {/* same panel, its own top edge: bar at 36px, the box centred in the 62px cell (11px) */}
+      {/* A mouse press on a row must not blur the input, or the box would collapse under it. */}
       {open && (debounced.length > 0 || hints.length > 0 || recentTags.length > 0) && (
-        <div className="user-dropdown" style={{ top: 'calc(36px + 11px + 48px)', maxHeight: 'calc(100vh - 36px - 11px - 48px)' }}>
+        <div className="user-dropdown" style={drop}
+          onPointerDown={(e) => { if (e.pointerType === 'mouse') e.preventDefault(); }}>
           {debounced.length === 0 && hints.length > 0 && (
             <div className="user-dropdown-item" style={{ opacity: 0.5, fontSize: 11 }}>suggested</div>
           )}
@@ -373,6 +387,52 @@ function SearchOmnibox({ onOpen }: { onOpen: (ref: string) => void }) {
   );
 }
 
+/**
+ * A datalist is filtered by whatever text the box already holds, so a setting that has a value
+ * lists almost none of its options. Focus parks the text in `data-keep` and empties the box,
+ * dispatching `input` because that is what makes the browser re-list every option.
+ */
+function showFullList(el: HTMLInputElement) {
+  if (!el.value) return;
+  el.dataset.keep = el.value;
+  delete el.dataset.typed;
+  el.value = '';
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+/**
+ * Put back what {@link showFullList} parked, unless the row was edited, so only looking at the
+ * list never changes the setting. An edited-to-empty box stays empty (`snap_pin`'s empty value
+ * means "follow the newest"); a pick from the list leaves a non-empty value and is kept too.
+ */
+function restoreFullList(el: HTMLInputElement) {
+  const keep = el.dataset.keep;
+  delete el.dataset.keep;
+  if (keep === undefined || el.dataset.typed || el.value !== '') return;
+  el.value = keep;
+}
+
+/** Mark a row as edited by the user, not emptied by {@link showFullList}. */
+function markTyped(el: HTMLInputElement) { el.dataset.typed = '1'; }
+
+/** Keys whose press means the row was edited rather than only emptied by {@link showFullList}. */
+const editsText = (k: string) => k.length === 1 || k === 'Backspace' || k === 'Delete';
+
+/**
+ * Wire a datalist row to that behaviour with listeners on the element itself: React's delegated
+ * `onFocus` never reached these rows, and `data-wired` keeps a re-render from stacking duplicates.
+ */
+function wireListInput(el: HTMLInputElement | null) {
+  if (!el || el.dataset.wired) return;
+  el.dataset.wired = '1';
+  el.addEventListener('focusin', () => { delete el.dataset.saved; showFullList(el); });
+  el.addEventListener('keydown', (e) => { if (editsText(e.key)) markTyped(el); });
+  el.addEventListener('blur', () => restoreFullList(el));
+}
+
+/** Toolbar's resting offsets; the drag handle beside the omnibox moves them from here. */
+const BAR_DEFAULT = { top: 36, right: 20 };
+
 export function UserBar() {
   const [session, setSession] = useState(sess);
   const [open, setOpen] = useState(false);
@@ -406,11 +466,33 @@ export function UserBar() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
+  /**
+   * Save one settings row, parked text first, so a row that was only looked at keeps its stored
+   * value. `snap_pin` takes the snapshot switch; every other key is a plain tree write.
+   */
+  const saveRow = (key: string, el: HTMLInputElement) => {
+    restoreFullList(el);
+    if (key === 'snap_pin') { void commitSnapPin(el, el.value); return; }
+    idb.db.tree.put({ key, value: idb.treeCac[key] = el.value });
+  };
+
+  /**
+   * Save the row the panel is about to lose. Closing a menu unmounts its inputs, and an input
+   * removed while focused fires no blur, so a tap outside would otherwise drop the edit and redraw
+   * the stored value. `data-saved` stops the row's own blur handler from saving it a second time.
+   */
+  const savePendingRow = () => {
+    const el = document.activeElement;
+    if (!(el instanceof HTMLInputElement) || !settingsRef.current?.contains(el)) return;
+    el.dataset.saved = '1';
+    saveRow(el.id.replace(/^input-tree-/, ''), el);
+  };
+
   /** Close every bar menu except the one whose container is `keep`; null closes all. */
   const closeMenus = (keep: HTMLDivElement | null) => {
     if (plusRef.current !== keep) setPlusOpen(false);
     if (noticeRef.current !== keep) setNoticeOpen(false);
-    if (settingsRef.current !== keep) setSettingsOpen(false);
+    if (settingsRef.current !== keep) { savePendingRow(); setSettingsOpen(false); }
     if (menuRef.current !== keep) setOpen(false);
   };
 
@@ -430,6 +512,55 @@ export function UserBar() {
     closeMenus(self);
     setSelf(!isOpen);
   };
+
+  /* Bar position and the handle that moves it, so the bar can be parked off the content under
+     it. Session-only by design: the drag is a workaround, and nothing here is persisted. */
+  const [barPos, setBarPos] = useState(BAR_DEFAULT);
+  /** Set while the omnibox is open to the screen's left edge; the toolbar then spans the width. */
+  const [omniExpanded, setOmniExpanded] = useState(false);
+  const barRef = useRef<HTMLDivElement | null>(null);
+  /** Collapsed bar size; expanded it spans the screen, so its own box cannot bound the drag. */
+  const barNatural = useRef({ w: 0, h: 0 });
+  const barDrag = useRef<{ x: number; y: number; top: number; right: number } | null>(null);
+
+  useEffect(() => {
+    if (omniExpanded) return;
+    const r = barRef.current?.getBoundingClientRect();
+    if (r) barNatural.current = { w: r.width, h: r.height };
+  }, [omniExpanded]);
+
+  const onBarDragStart = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button > 0) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    barDrag.current = { x: e.clientX, y: e.clientY, top: barPos.top, right: barPos.right };
+    document.body.classList.add('dragging-bar');
+  };
+
+  /** Follow the pointer, clamped so the bar keeps its whole width and height on screen. */
+  const onBarDragMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = barDrag.current;
+    if (!d) return;
+    const clamp = (v: number, max: number) => Math.max(0, Math.min(v, Math.max(0, max)));
+    setBarPos({
+      right: clamp(d.right - (e.clientX - d.x), window.innerWidth - barNatural.current.w),
+      top: clamp(d.top + (e.clientY - d.y), window.innerHeight - barNatural.current.h),
+    });
+  };
+
+  const onBarDragEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!barDrag.current) return;
+    barDrag.current = null;
+    document.body.classList.remove('dragging-bar');
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+
+  /** The panels are `position: fixed`, so the bar places them instead of their class defaults
+   *  (`top: 36px + 77px`, `right: 0`); `below` is the row's top edge to the panel's top edge. */
+  const dropStyle = (below: number): React.CSSProperties => ({
+    top: barPos.top + below,
+    right: barPos.right - BAR_DEFAULT.right,
+    maxHeight: `calc(100vh - ${barPos.top + below}px)`,
+  });
 
   /* `+` menu: newest rows by local edit time, newest first. */
   const recentDas = useLiveQuery(
@@ -599,6 +730,22 @@ export function UserBar() {
     }
   };
 
+  /** Collapse the duplicate rows `db.das` holds, and report what the pass did. */
+  const handleClean = async () => {
+    const id = toast.loading('merging duplicate rows…');
+    try {
+      const sum = await idb.clean();
+      toast.success(sum.keys === 0 ? 'no duplicate rows' : `${sum.keys} duplicate key(s) merged`, {
+        id,
+        description: `${sum.sameTxt} identical row(s) folded · ${sum.filed} filed under cr`
+          + ` · ${sum.dropped} row(s) dropped · ${sum.clash} unfiled`,
+        duration: 15000,
+      });
+    } catch (e) {
+      toast.error(`merge failed: ${e instanceof Error ? e.message : String(e)}`, { id });
+    }
+  };
+
   const refreshPaired = () => setPairedDevices(CredUnlock.loadPairedDevices());
 
   const handlePair = async () => {
@@ -680,8 +827,35 @@ export function UserBar() {
 
   return (
     <div className="flex flex-col items-center">
-      <div style={{ position: 'fixed', top: '36px', right: '20px', zIndex: 2, display: 'flex', justifyContent: 'flex-end', maxWidth: 'calc(100vw - 40px)', pointerEvents: 'none' }}>
-        <SearchOmnibox onOpen={openInEditor} />
+      <div
+        ref={barRef}
+        style={{
+          position: 'fixed', top: barPos.top, right: barPos.right,
+          // reach the screen's left edge while the omnibox is open, leaving the handle's width
+          left: omniExpanded ? 0 : 'auto',
+          zIndex: 100, display: 'flex', justifyContent: 'flex-end',
+          maxWidth: omniExpanded ? 'none' : `calc(100vw - ${barPos.right}px)`,
+          pointerEvents: 'none',
+        }}
+      >
+        {/* The handle rides left of the omnibox and moves the bar, omnibox included. */}
+        <div
+          title="drag to move the bar"
+          onPointerDown={onBarDragStart}
+          onPointerMove={onBarDragMove}
+          onPointerUp={onBarDragEnd}
+          onPointerCancel={onBarDragEnd}
+          style={{
+            pointerEvents: 'auto', alignSelf: 'center', display: 'flex', alignItems: 'center',
+            justifyContent: 'center', flex: '0 0 auto', width: 33, height: 40,
+            marginLeft: omniExpanded ? 0 : 11, borderRadius: 20, cursor: 'move', touchAction: 'none',
+            color: 'rgba(255,255,255,0.5)', background: 'rgba(0,0,0,0.35)', backdropFilter: 'blur(10px)',
+            border: '1px solid rgba(255,255,255,0.2)',
+          }}
+        >
+          <li.GripVertical size={16} />
+        </div>
+        <SearchOmnibox onOpen={openInEditor} drop={dropStyle(59)} onExpandChange={setOmniExpanded} />
         <div
           className="user-menu-container"
           ref={plusRef}
@@ -691,7 +865,7 @@ export function UserBar() {
             <li.Plus size={20} />
           </div>
           {plusOpen && (
-            <div className="user-dropdown">
+            <div className="user-dropdown" style={dropStyle(77)}>
               <button className="user-dropdown-item" onClick={handleNewDraft}>New</button>
               <button className="user-dropdown-item" onClick={handlePasteMd}>Paste markdown</button>
               {recentDas.map((r) => (
@@ -716,23 +890,25 @@ export function UserBar() {
           <div className="user-avatar">
               <li.Bell size={20} />
           </div>
-          {noticeOpen && <div className="user-dropdown"> <NotificationDropdown /> </div>}
+          {noticeOpen && <div className="user-dropdown" style={dropStyle(77)}> <NotificationDropdown /> </div>}
         </div>
         <div
           className="user-menu-container"
           ref={settingsRef}
-          onPointerDown={(e) => toggleMenu(e, settingsRef.current, settingsOpen, setSettingsOpen)}
+          onPointerDown={(e) => { savePendingRow(); toggleMenu(e, settingsRef.current, settingsOpen, setSettingsOpen); }}
         >
           <div className="user-avatar">
             <li.Settings size={20} />
           </div>
           {settingsOpen && (
-            <div className="user-dropdown">
+            <div className="user-dropdown" style={dropStyle(77)}>
               <button className="user-dropdown-item" onClick={fc.handleDisable(handlePair)}>Pair Device</button>
 
               <button className="user-dropdown-item" onClick={fc.handleDisable(handleUnlock)}>Unlock PC</button>
 
               <button className="user-dropdown-item" onClick={fc.handleDisable(handleTagAdapters)}>Tag adapters (smoke)</button>
+
+              <button className="user-dropdown-item" onClick={fc.handleDisable(handleClean)}>Merge duplicates</button>
 
               <div>Paired PCs</div>
               <div style={{paddingLeft:22}}>
@@ -751,16 +927,19 @@ export function UserBar() {
               <div key={key} style={{flexDirection:'row',display:'flex'}}>
                 <span>snap_name: </span><div id="stts-snapname" style={{paddingLeft:2}}/>
               </div> ) : (
-              <div key={key} style={{flexDirection:'row',display:'flex'}}>
+              <div key={key} style={{flexDirection:'row',display:'flex',alignItems:'center'}}>
                 <label htmlFor={`input-tree-${key}`}> {key}: </label>
-                <input id={`input-tree-${key}`}type="search" list={`opts-tree-${key}`}
-                  defaultValue={value as string}
-                  disabled={key === 'snap_pin' && !session}
-                  title={key === 'snap_pin' ? 'work against this snapshot; empty follows the newest' : undefined}
-                  onBlur={(e) => {
-                    if (key === 'snap_pin') { void commitSnapPin(e.target, e.target.value); return; }
-                    idb.db.tree.put({key, value: idb.treeCac[key] = e.target.value}); }}
-                  style={{flexGrow:1, paddingLeft:2}} />
+                <div className="picker-container">
+                  <input id={`input-tree-${key}`}type="search" list={`opts-tree-${key}`}
+                    ref={wireListInput}
+                    defaultValue={value as string}
+                    disabled={key === 'snap_pin' && !session}
+                    title={key === 'snap_pin' ? 'work against this snapshot; empty follows the newest' : undefined}
+                    onBlur={(e) => {
+                      if (e.target.dataset.saved) { delete e.target.dataset.saved; return; }
+                      saveRow(key, e.target); }}
+                    style={{flexGrow:1, paddingLeft:2}} />
+                </div>
                 {treeCacOptsFor(key).length > 0 && (
                   <datalist id={`opts-tree-${key}`}>
                     {treeCacOptsFor(key).map((opt) => (
@@ -798,7 +977,7 @@ export function UserBar() {
                 : snapPin ? <SyncRing color="#f59e0b" frac={1} /> : null}
             </div>
             {open && (
-              <div className="user-dropdown">
+              <div className="user-dropdown" style={dropStyle(77)}>
                 <button className="user-dropdown-item" onClick={fc.handleDisable(handleSync)}>Sync</button>
 
                 <button className="user-dropdown-item" onClick={fc.handleDisable(handleSnap)}>Snap new </button>

@@ -1,6 +1,6 @@
 # Filter read path
 
-`f` (filters csv) drives one reader: `useLiveQuery` -> `iqWithCrumbs` -> `iq`. `limit` decides how many rows are read *before* the `[del]` filter, so the visible count is a function of `limit`, not of how many rows match. No view wires search; `iq` keeps its `search` argument (`src/sdb.ts:100`) for a future caller.
+`f` (filters csv) drives one reader: `useLiveQuery` -> `iqWithCrumbs` -> `iq`. `limit` decides how many matching rows are read; the `[del]` tombstone drop runs inside the query, so a page holds `limit` live rows and a short page means the table has no older ones. No view wires search; `iq` keeps its `search` argument (`src/sdb.ts:100`) for a future caller.
 
 ## Order of operations
 
@@ -11,15 +11,15 @@ flowchart TD
   Q --> T{"tid set?"}
   T -->|yes| A["getRowsAroundTid(tid, limit ?? 33): filters ignored"]
   T -->|no| I["where('tags').equals(f 0) + in-DB filter for f 1..n"]
-  I --> L["reverse().limit(limit): newest ++tid first, LIMIT APPLIED HERE"]
-  L --> X["drop rows tagged [del]: AFTER limit"]
-  X --> S{"search set?"}
+  I --> X["drop rows tagged [del]: BEFORE limit, so a page is a full page of live rows"]
+  X --> L["reverse().limit(limit): newest ++tid first, LIMIT APPLIED HERE"]
+  L --> S{"search set?"}
   S -->|yes| F["txt.includes(q): AFTER limit // FIXME"]
   S -->|no| R["finalDas"]
   F --> R
 ```
 
-`[del]` filtering runs after `limit` (`src/sdb.ts:123`, `// FIXME beyond limit full search`), so a page can come back shorter than asked for while older rows remain. Order is descending `++tid` (insertion), not `rec.visitTime`.
+Dexie applies a collection `filter()` before `limit()`, so the tombstone drop is part of the query (`src/sdb.ts:143`) and a page shorter than asked for means the table has no older live rows. Order is descending `++tid` (insertion), not `rec.visitTime`. `search` is still a post-limit filter, with its own `FIXME`.
 
 ## View switch
 
@@ -66,12 +66,13 @@ while no row has read it.
 
 | | CardTab | BadCardTab |
 |---|---|---|
-| call | `iqWithCrumbs(filtersStable, undefined, Number(tidLoc), limit)` (`src/ui/cardTab.tsx:61`) | identical (`src/ui/tabs.tsx:48`) |
-| deps | `[filtersKey, tidLoc, limit]` (`:64`) | `[filtersKey, tidLoc]` (`src/ui/tabs.tsx:52`) |
-| limit | `useState(PAGE)` with `PAGE = 555` (`:54`), reset when `filtersKey`/`tidLoc` change (`:69-71`) | constant 555 (`src/ui/tabs.tsx:42`) |
-| growth | sentinel `IntersectionObserver` while `canGrow = !tidLoc && das.length >= limit` (`src/ui/cardTab.tsx:111-122`) | none |
+| call | `iqWithCrumbs(filtersStable, undefined, Number(tidLoc), limit)` (`src/ui/cardTab.tsx:86`) | identical (`src/ui/tabs.tsx:48`) |
+| deps | `[filtersKey, tidLoc, limit, retryKey]` (`:89`) | `[filtersKey, tidLoc]` (`src/ui/tabs.tsx:52`) |
+| limit | `useState(PAGE)` with `PAGE = 555` (`:71`), reset when `filtersKey`/`tidLoc` change (`:97-99`) | constant 555 (`src/ui/tabs.tsx:42`) |
+| growth | sentinel `IntersectionObserver` for the list's lifetime (`:210-216`) sets `atEnd`; a state effect widens the window while `canGrow = !tidLoc && !loading && das.length >= limit` (`:201`, `:220-222`). `loading` is `page.limit !== limit` (`:94`), the rows carrying the limit they were read at | none |
+| slow read | a load still in flight after `LOAD_TIMEOUT_MS` (`:21`) reports "Still loading after 8s" with a `Retry`, which re-runs the read through `retryKey` (`:225-229`) | none |
 | rows | pin rows in a 66vh split, then rest rows grouped by `restGrouper` | same |
-| page end | `No data found` / `Loading more...` / `No more data` (`src/ui/cardTab.tsx:169`) | `No data found` only when the page is empty |
+| page end | `Loading...` / `Loading more...` / `Scroll for more` / `No more data` / `No data found`, plus a manual `Load more` while the last page came back full (`:233-238`) | `No data found` only when the page is empty |
 
 Same call and same arguments at the same `limit`: CardTab never returns rows BadCardTab would not return; only the growth differs. `FilterBar` reads the same way at a fixed 555 for its crumb options (`src/ui/FilterBar.tsx:51`).
 
@@ -82,11 +83,11 @@ Same call and same arguments at the same `limit`: CardTab never returns rows Bad
 | Pins occupy a fixed 66vh, each row squeezed to `66/pinCount vh` with its own `overflow: auto` | `src/ui/cardTab.tsx:124`, `:129` |
 | `.rest-das` has no height, so `.left-panel` scrolls the whole view instead | `src/ui/cardTab.tsx:145`, `index.html:36` |
 | `card-tab`, `pin-cards`, `pin-card-row`, `rest-das`, `rest-group`, `rest-group-head`, `end-message` have no rule in `index.html` or `src/tw4.css` | inline styles only |
-| a short page ends the window early and reports "No more data" without a count | `src/sdb.ts:123`, `src/ui/cardTab.tsx:112` |
+| the sentinel reports the state but no row count, so a window of 555 rows and one of 5550 read the same | `src/ui/cardTab.tsx:233` |
 
 ## Crumb cache
 
-Only crumbs are cached: `availableDas(tags)` keyed by `{f, s, t, l}` (`src/sdb.ts:210-215`); `iq` re-runs per prefix on every read (`:227`). Crumbs therefore inherit both the limit and the post-limit filters.
+Only crumbs are cached: `availableDas(tags)` keyed by `{f, s, t, l}` (`src/sdb.ts:210-215`); `iq` re-runs per prefix on every read (`:227`). Crumbs therefore inherit both the limit and the tombstone drop.
 
 ## Tagging (`src/srctag.ts`, `src/srctagRows.ts`)
 
