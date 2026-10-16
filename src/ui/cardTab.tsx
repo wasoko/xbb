@@ -13,7 +13,7 @@ import { RestTuner } from './restTuner';
 import { RestViz } from './restViz';
 import { vizBlocks, tagTopExplanations, CLUSTER_SUB_MAX, type VizTagDetail } from './restVizData';
 import { tagCue } from './restCue';
-import { RestGraph } from './RestGraph';
+import { RestGraph } from './TagGraph';
 import { buildTagGraph } from './restGraph';
 import { REST_GRAPH_PARAM, openRestGraph, restGraphOpen } from './restGraphWindow';
 import { explanationText, type RowTagReport } from '../srctag';

@@ -1,5 +1,5 @@
 /**
- * RestGraph.tsx — the tag graph as inline SVG.
+ * TagGraph.tsx — the tag graph as inline SVG.
  *
  * Pinned tags sit at the centre, the tags rows are filed under ring them, promoted
  * themes sit between a head and the outer ring, and a chip no head claims takes the

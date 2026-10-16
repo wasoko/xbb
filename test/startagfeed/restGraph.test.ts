@@ -14,7 +14,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { type RowTagReport, type TagExplanation } from '../../src/srctag';
 import type { Da } from '../../src/sdb';
-import { RestGraph } from '../../src/ui/RestGraph';
+import { RestGraph } from '../../src/ui/TagGraph';
 import {
   GRAPH_NODE_KIND, GRAPH_REACH, REACH_RING, buildTagGraph, headingTags, pinReach, tagGraphLayout,
 } from '../../src/ui/restGraph';

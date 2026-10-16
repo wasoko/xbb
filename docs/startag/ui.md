@@ -34,7 +34,7 @@ src/ui/restGraph.ts     buildTagGraph · pinReach · tagGraphLayout   (tags, not
         │    src/ui/seaSky.ts · seaScene.ts · seaMotion.ts · SeaRegions.tsx · SeaView.tsx
         │              the wall, its geometry, its glide, its boxes, its camera and input
         │
-        └──▶ src/ui/RestGraph.tsx   the disc, over the same graph
+        └──▶ src/ui/TagGraph.tsx    the disc, over the same graph
                      ▲
              src/ui/restGraphWindow.ts   the rgraph flag, and the wide window
 ```
@@ -268,7 +268,7 @@ the wide view reads the reports the list is already showing.
 | Piece | Where | Knows |
 |---|---|---|
 | `buildTagGraph`, `tagGraphLayout` | `src/ui/restGraph.ts` | tags, rows, reports, pins — no DOM, no pass |
-| `RestGraph` | `src/ui/RestGraph.tsx` | the graph, and one click handler |
+| `RestGraph` | `src/ui/TagGraph.tsx` | the graph, and one click handler |
 | the flag and the window | `src/ui/restGraphWindow.ts` | the URL, and the work area |
 
 Live check: the disc has not been read against a populated table (the scratch browser profile
@@ -341,7 +341,7 @@ is where the contracts are:
 - [filter_search.md](filter_search.md) — the read path the chips and the omnibox feed.
 - [webfeed.md](../webfeed.md) — the feeds that hand `tid`-less rows to `tagRows`.
 - [greet.md](../greet.md) — the settings tree a bar row writes.
-- `src/ui/restGraph.ts`, `src/ui/restGraphWindow.ts`, `src/ui/RestGraph.tsx`,
+- `src/ui/restGraph.ts`, `src/ui/restGraphWindow.ts`, `src/ui/TagGraph.tsx`,
   `src/ui/restCue.ts`, `src/ui/seaSky.ts`, `src/ui/seaRegion.ts`, `src/ui/seaStars.ts`,
   `src/ui/seaScene.ts`, `src/ui/seaMotion.ts`, `src/ui/seaPinGraph.ts`, `src/ui/SeaRegions.tsx`,
   `src/ui/SeaView.tsx`, `src/ui/tap.tsx`.
