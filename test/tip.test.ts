@@ -3,7 +3,11 @@
  * Hover preview header: the app's tooltip line is `… synced:<age>`, the row id,
  * and its tag chips, with the pin board tag left out. Chips reuse the cs1 tag
  * color, so a tag reads the same here as in the card.
+ *
+ * The preview's own body is imported with the header, and the feed body reads the
+ * store, so the test opens an IndexedDB shim the way `tagApply.test.ts` does.
  */
+import 'fake-indexeddb/auto';
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { getColorChar11 } from '../src/fc'

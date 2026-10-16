@@ -6,8 +6,9 @@ until the model stops or calls `task_complete`. It is the Chat half of the
 `/tabs` page: the editor pane edits tag rows, the Chat pane edits them through a
 model.
 
-Structure borrowed from `tabext/docs/recr.md`; that file still describes the
-pre-port `idb.db.tags` design, so this one is the authority for xbb. Grounded in:
+Ported from `tabext/src/recr.ts`, whose design write-up `tabext/docs/recr.md`
+described the pre-port `idb.db.tags` store; neither file is in the tabext tree any
+more, so this one is the authority for xbb. Grounded in:
 
 - `src/recr.ts` — `rcr`, `runLoop`, `fetchLLM`, `ToolExecutor`, `parseSecrets`,
   `parseSettings`, `parseTools`, `buildPromptFromNode`, `saveTurnNode`
@@ -119,6 +120,24 @@ missing, tombstoned, or names an unknown level.
 the tools out of the request, and `ToolExecutor.denial` refuses the call if the
 model asks for one from memory — a filter alone is not enforcement.
 
+A client with no `gate.md` sits at `read`: it can list, read, and search, and
+nothing else. That is why an agent asked to write a file answers that it has no
+file-writing tool — the tool was never in the request. Writing is one row:
+
+```md
+## Selected
+* Level: rwr
+```
+
+Writing a script and then running it needs `rwr` (not `rw`): `rw` adds
+`write_file` alone, and `run_src` is the next level up. `all` adds `run_command`
+on top, limited to the `## Endpoints` prefixes the same document lists.
+The system prompt names the level in force and every tool it withholds, with the
+level each one needs, so the model reports the gate instead of claiming the tool
+does not exist. The Chat pane warns above the transcript while the document is
+absent, with a button that writes it at `rwr` and opens it in the editor pane —
+the level ladder is a comment inside the document it writes.
+
 `run_src` reads the row body and picks one of two execution paths. A body whose
 first token on a line is a static `import` or an `export` is imported as a module
 from a `data:text/javascript` URL, and its default export is called with one `ctx`
@@ -128,6 +147,11 @@ detected from the constructor's syntax error. A specifier carries the whole body
 so identical text resolves to one module instance and module-level state survives
 a repeated call. Both paths run in the page's realm with the page's privileges,
 which is why the gate level, not the tool, is the authorization point.
+`run_src` also captures the body's `ctx.console` output: every call still reaches
+the page console, and the first 40 lines, with the true line count and how many
+were left out, are appended to the tool result. A body that throws is reported as
+`Error running <ref>: <message>` followed by the same log block, so a script's own
+diagnostics reach the model rather than only devtools.
 `run_command` fails closed: an empty endpoint list refuses
 every URL, and the caller's `Authorization` header is passed through rather than
 stored server-side.
@@ -222,6 +246,7 @@ host, so the browser-visible error stands as it is.
 | Streaming | `rcr({ onProgress })` accumulates per-delta text into a live bubble |
 | Tool rows | `recrBus` (`recr-tool-call` / `recr-tool-result`) appended as they happen |
 | Stop | `AbortController`; an abort renders as `stopped`, not as an error |
+| Gate warning | A live query on `gate.md`; while the row is absent the pane shows an amber bar whose button writes `recrGate.DEFAULT_GATE_MD` and opens the tab |
 | Errors | `rcr` rethrows, so the `catch` owns the error bubble — the bus error is not also rendered |
 | Key fallback | A non-OK status offers the next listed key through a toast action (`askNextKey`); accepting records it in `settings/keys` and the same turn continues |
 | Session key | URL `sid` param, else `default` |
@@ -260,10 +285,11 @@ host, so the browser-visible error stands as it is.
   and lands in the S3 snapshot. Nothing encrypts it, and because the row syncs,
   every client of that snapshot resolves the same key. `sdb.getSecret` exists as
   a plain accessor for callers that want the document without parsing it.
-- **R6 — the extension's CORS bypass cannot run as written.** `tabext/src/recr.ts`
-  calls `chrome.declarativeNetRequest.updateDynamicRules`, but
-  `tabext/ext/manifest.json` declares no `declarativeNetRequest` or
-  `declarativeNetRequestWithHostAccess` permission, so the API is undefined and
+- **R6 — the extension's CORS bypass cannot run as written.** The extension-side
+  `recr.ts` left the tabext tree, so this applies to the port when it returns: it
+  called `chrome.declarativeNetRequest.updateDynamicRules`, while
+  `tabext/ext/manifest.json` granted neither `declarativeNetRequest` nor
+  `declarativeNetRequestWithHostAccess`, leaving the API undefined so
   `setupCorsBypass()` throws on install. `modifyHeaders` also requires host
   access for the request URL — `<all_urls>` is already granted, so adding
   `declarativeNetRequestWithHostAccess` (no install-time warning) is the fix.
@@ -273,6 +299,15 @@ host, so the browser-visible error stands as it is.
   position from `parentId` + `timestamp` rather than from `TurnNode.version`, which
   every writer still stores as `1`; `forkSession` remains unused. A sibling branch
   is a second root when the edited turn was the first one.
+- **R8 — a `tools/` row replaces the built-in tool set rather than adding to it.**
+  `rcr` takes the parsed rows whenever any exist (`toolDefs.length > 0 ?
+  toolDefs : getDefaultToolDefs()`), so one custom row such as `tools/foo` drops
+  `read_file`, `write_file`, and the rest from the request. The tool's name is the
+  last segment of its ref, so the spelling `tools/builtin/{name}` in §3 works.
+  A parsed tool is also subject to the same gate filter, which only knows the
+  built-in names — a row named anything else is dropped at every level. Merging by
+  name, and letting the gate name custom tools, is what the doc's "override"
+  implies; neither is applied yet.
 - **Minor:** tool calls are sequential, so one slow tool blocks the turn;
   `usage` is only present when the provider honours
   `stream_options.include_usage`; `LLM_PROXY_TARGET` covers one provider at a
@@ -280,8 +315,8 @@ host, so the browser-visible error stands as it is.
 
 ## 8. References
 
-- `tabext/docs/recr.md` — original design write-up (pre-port store and paths)
-- `tabext/src/recr.ts` — `setupCorsBypass` DNR rule, the extension-side answer to §5 (R6)
+- `tabext/docs/recr.md`, `tabext/src/recr.ts` — the pre-port design write-up and
+  the extension-side `setupCorsBypass` DNR rule (R6); both have left that tree
 - `docs/greet.md` — the sync, `rec.ver`, and `deepMerge` rules the store reuses
 - `src/recr.ts` — the loop and tool implementations
 - `test/recr-secret.test.ts`, `test/recr-gate.test.ts`, `test/recr-tools.test.ts`,

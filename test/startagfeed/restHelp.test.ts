@@ -12,13 +12,13 @@ import 'fake-indexeddb/auto';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { TAG_CHANNEL_LABEL, type TagParts } from '../src/srctag';
-import { REST_PROFILES, RRF_GROUPER, REST_VIZ_MODES, REST_WINDOW_MODES, RSFREQ_GROUPER, RSTAG_GROUPER, RSTAG_LIMIT, RSTT_GROUPER } from '../src/ui/restGrouper';
+import { TAG_CHANNEL_LABEL, type TagParts } from '../../src/srctag';
+import { REST_PROFILES, RRF_GROUPER, REST_VIZ_MODES, REST_WINDOW_MODES, RSFREQ_GROUPER, RSTAG_GROUPER, RSTAG_LIMIT, RSTT_GROUPER } from '../../src/ui/restGrouper';
 import {
   CHANNEL_HELP, knobHelp, knobLabel, PROFILE_HELP, TUNER_HELP, VIZ_HELP, vizCaveat, WINDOW_HELP,
-} from '../src/ui/restHelp';
-import { RestTuner } from '../src/ui/restTuner';
-import { RestViz } from '../src/ui/restViz';
+} from '../../src/ui/restHelp';
+import { RestTuner } from '../../src/ui/restTuner';
+import { RestViz } from '../../src/ui/restViz';
 
 describe('restHelp', () => {
   it('names every grouper the profiles offer, and only those', () => {

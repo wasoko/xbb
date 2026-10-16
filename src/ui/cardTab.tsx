@@ -1,17 +1,21 @@
 // src/ui/cardTab.tsx
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { fmtAgo, getColorChar11, sideLog } from '../fc';
+import { fmtAgo, sideLog } from '../fc';
 import { IQ_CNT, iqWithCrumbs, type Da } from '../sdb';
 import { RECR_TYPE } from '../recrConst';
 import { recrRowLabel, recrTargetOf, type RecrTarget } from '../sessionTree';
 import { cardDoubleClick, Cs1Renderer, matchedRefsByPins } from './cs1';
 import { setTip, TipHost, TIP_ATTR } from './Tip';
-import { dtMs, groupRest, isRestGrouperScript, isTagGrouper, restGroupsFor, restProfileMap, restTagContributors, restTagMap, restTagStore, restVizMode, RSSESS_GROUPER, REST_PROFILES, type RestGroup, type RestHyperState } from './restGrouper';
+import { dtMs, groupRest, isRestGrouperScript, isTagGrouper, restGroupsFor, restProfileMap, restTagContributors, restTagMap, restTagStore, restVizMode, RSSESS_GROUPER, REST_PROFILES, type RestGroup, type RestHyperState, type RestSubTag } from './restGrouper';
 import { RestTuner } from './restTuner';
 import { RestViz } from './restViz';
-import { vizBlocks, tagTopExplanations, type VizTagDetail } from './restVizData';
+import { vizBlocks, tagTopExplanations, CLUSTER_SUB_MAX, type VizTagDetail } from './restVizData';
+import { tagCue } from './restCue';
+import { RestGraph } from './RestGraph';
+import { buildTagGraph } from './restGraph';
+import { REST_GRAPH_PARAM, openRestGraph, restGraphOpen } from './restGraphWindow';
 import { explanationText, type RowTagReport } from '../srctag';
 import { useTreeCac } from './useTreeCac';
 
@@ -41,7 +45,8 @@ const LOAD_MORE_BUTTON: React.CSSProperties = {
    `txt` stays in the DOM and is cropped by clipping instead of `slice`, so
    browser find-in-page can still reach the hidden tail. */
 
-const isPinCardRow = (da: Da) =>
+/** Whether a row is one of the pin cards the list's rest region sits below. */
+export const isPinCardRow = (da: Da) =>
   da.type === 'md' && typeof da.ref === 'string' && da.ref.startsWith('pin');
 
 export interface CardTabProps {
@@ -58,6 +63,25 @@ export interface CardTabProps {
   /** Pin-row renderer: `cs1` markdown card, `cs2` cropped preview row. */
   renderer: 'cs1' | 'cs2';
 }
+
+/**
+ * The card and the graph side by side, in the wide view's window: the list keeps
+ * two thirds and the graph takes the rest.
+ */
+const WIDE_ROW: React.CSSProperties = { display: 'flex', alignItems: 'flex-start' };
+const WIDE_LEFT: React.CSSProperties = { flex: '0 0 62.5%', minWidth: 0 };
+const WIDE_PANE: React.CSSProperties = {
+  flex: '1 1 auto', minWidth: 0, height: '100vh', overflow: 'hidden',
+  borderLeft: '1px solid rgba(128,128,128,0.35)',
+};
+
+/** The control that opens the graph's own window; the wide view does not repeat it. */
+const GRAPH_BUTTON: React.CSSProperties = {
+  display: 'block', margin: '2px 0 4px', padding: '2px 8px', fontSize: 12,
+  background: 'transparent', color: 'inherit', cursor: 'pointer',
+  border: '1px solid rgba(128,128,128,0.45)', borderRadius: 4,
+};
+const GRAPH_HELP = 'the same list, in a window of its own, with the tag graph beside it';
 
 /**
  * Card list over `iqWithCrumbs`: pin card rows on top, the rest rows below
@@ -186,7 +210,19 @@ export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, ren
     () => tagTopExplanations(listedRest, restTags),
     [restTagKey, restTags],
   );
-  useEffect(() => { restTagStore.set(restTags, listedRest); }, [restTags, restTagKey]);
+  useEffect(() => { restTagStore.set(restTags, listedRest, pinRows); }, [restTags, restTagKey, pinKey]);
+
+  /*
+   * The wide view is this same list in a window of its own, with the tag graph
+   * beside it. It reads the page's own flag, so opening it costs no state and the
+   * two windows stay in step through the store and the filter alone.
+   */
+  const [search] = useSearchParams();
+  const wide = restGraphOpen(search);
+  const tagGraph = useMemo(
+    () => (wide ? buildTagGraph(pinRows, listedRest, restTags) : undefined),
+    [wide, listedRest, restTagKey, restTags],
+  );
 
   /**
    * The rows of one block. A row whose block carries no tag head keeps its own
@@ -268,7 +304,7 @@ export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, ren
    */
   const restBlocks = (vizGroups ?? restGroups).map((g, i) => (
     <div key={g.key} className="rest-group" style={clusterBlock(clustered, i)}>
-      <RestGroupHead label={g.label} tag={g.tag} contributors={restContributors}
+      <RestGroupHead label={g.label} tag={g.tag} subs={g.subs} contributors={restContributors}
         details={restTagDetails} itemCount={g.items.length} />
       {g.items.map(renderBlockItems(g))}
       {g.subgroups?.map((s) => (
@@ -280,10 +316,47 @@ export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, ren
     </div>
   ));
 
+  /*
+   * The list column, shared by the plain view and the wide one: the wide view is
+   * this same list with the graph beside it, not a second rendering of it. The
+   * button that opens that window belongs to the list, so the wide view drops it.
+   */
+  const restColumn = (
+    <>
+      <div className="rest-das">
+        {profile && (
+          <RestTuner
+            grouper={restGrouper}
+            hyper={hyper}
+            onChange={(h) => setHyperState((s) => ({ ...s, [restGrouper]: h }))}
+          />
+        )}
+        {!wide && (
+          <button type="button" style={GRAPH_BUTTON} title={GRAPH_HELP} onClick={openRestGraph}>
+            graph
+          </button>
+        )}
+        {viz && (
+          <RestViz grouper={restGrouper} mode={viz} rows={listedRest} reports={restTags}
+            hyper={hyper} dyn={hyper?.dyn === true}>
+            {vizGroups ? restBlocks : null}
+          </RestViz>
+        )}
+        {vizGroups ? null : restBlocks}
+      </div>
+      <div ref={sentinelRef} className="load-more-trigger">
+        {sentinelLabel}
+        {sentinelAction && (
+          <button style={LOAD_MORE_BUTTON} onClick={growOrRetry}>{sentinelAction}</button>
+        )}
+      </div>
+    </>
+  );
+
   return (
     <TipHost>
-      <div className="card-tab">
-        {pinRows.length > 0 && (
+      <div className="card-tab" style={wide ? WIDE_ROW : undefined}>
+        {!wide && pinRows.length > 0 && (
           <div className="pin-cards" style={{ height: '66vh', overflow: 'hidden' }}>
             {pinRows.map((p) => (
               <div
@@ -301,29 +374,12 @@ export function CardTab({ filters, onSelectTag, onJump, selectedRef, tidLoc, ren
           </div>
         )}
 
-        <div className="rest-das">
-          {profile && (
-            <RestTuner
-              grouper={restGrouper}
-              hyper={hyper}
-              onChange={(h) => setHyperState((s) => ({ ...s, [restGrouper]: h }))}
-            />
-          )}
-          {viz && (
-            <RestViz grouper={restGrouper} mode={viz} rows={listedRest} reports={restTags}
-              hyper={hyper} dyn={hyper?.dyn === true}>
-              {vizGroups ? restBlocks : null}
-            </RestViz>
-          )}
-          {vizGroups ? null : restBlocks}
-        </div>
-
-        <div ref={sentinelRef} className="load-more-trigger">
-          {sentinelLabel}
-          {sentinelAction && (
-            <button style={LOAD_MORE_BUTTON} onClick={growOrRetry}>{sentinelAction}</button>
-          )}
-        </div>
+        {wide ? (
+          <>
+            <div style={WIDE_LEFT}>{restColumn}</div>
+            <div style={WIDE_PANE}>{tagGraph ? <RestGraph graph={tagGraph} /> : null}</div>
+          </>
+        ) : restColumn}
       </div>
     </TipHost>
   );
@@ -357,15 +413,17 @@ const clusterBlock = (clustered: boolean, index: number): React.CSSProperties | 
  * @param props.label - Heading text; the tag, for a tagged block.
  * @param props.tag - Tag the block clusters, when the block came from the
  *   `clusters` reading.
+ * @param props.subs - Other tags the block's rows kept, listed beside the head.
  * @param props.contributors - Rows proposing each tag, for the head's hover text.
  * @param props.details - Best explanation of each tag, for the same hover text.
  * @param props.itemCount - Rows in the block, so the head names its own size.
  * @param props.level - 1 for a date block, 2 for a visit-time subgroup.
  * @returns The heading element.
  */
-function RestGroupHead({ label, tag, contributors, details, itemCount, level = 1 }: {
+function RestGroupHead({ label, tag, subs, contributors, details, itemCount, level = 1 }: {
   label: string;
   tag?: string;
+  subs?: RestSubTag[];
   contributors?: Map<string, Da[]>;
   details?: Map<string, VizTagDetail>;
   itemCount?: number;
@@ -374,30 +432,67 @@ function RestGroupHead({ label, tag, contributors, details, itemCount, level = 1
   if (tag) {
     const rows = contributors?.get(tag) ?? [];
     const detail = details?.get(tag);
+    const held = subs ?? [];
     const title = [
       ...(detail
         ? [explanationText(detail.explanation, { dim: detail.report.dim, window: detail.report.window })]
         : []),
       `${itemCount ?? rows.length} row(s) cluster on #${tag}`,
+      ...(held.length === 0 ? [] : [
+        `its rows also keep: ${held.map((s) => `#${s.tag} (${s.rows})`).join(' · ')}`,
+      ]),
       ...(rows.length === 0 ? [] : [
         `suggested by ${rows.length}:`,
         ...rows.map((r) => r.txt || r.ref),
       ]),
     ].join('\n');
+    /* The head is the cluster's key and the sub-tags are what it holds: the same
+       box, the row chip's own promotion mark, so a promoted `head/theme` reads as
+       minted rather than scored. A wide cluster stops at the cap and counts the
+       rest, because the rows the head opens have to start somewhere on the line. */
+    const shown = held.slice(0, CLUSTER_SUB_MAX);
+    const rest = held.slice(shown.length);
     return (
-      <span
-        className="rest-cluster-head"
-        title={title}
-        style={{
-          ...DYNAMIC_CHIP,
-          color: tagCue(tag),
-          borderColor: tagCue(tag),
-          marginLeft: 0,
-          borderRightStyle: 'none',
-        }}
-      >
-        #{tag}
-      </span>
+      <>
+        <span
+          className="rest-cluster-head"
+          title={title}
+          style={{
+            ...DYNAMIC_CHIP,
+            color: tagCue(tag),
+            borderColor: tagCue(tag),
+            marginLeft: 0,
+            borderRightStyle: 'none',
+          }}
+        >
+          #{tag}
+        </span>
+        {shown.map((s) => (
+          <span
+            key={s.tag}
+            className="rest-cluster-sub"
+            title={`#${s.tag} — kept by ${s.rows} row(s) of this cluster`
+              + `${s.sub ? ', minted by the aim pass as the burst’s theme' : ''}`}
+            style={{
+              ...DYNAMIC_CHIP,
+              color: tagCue(s.tag),
+              borderColor: tagCue(s.tag),
+              ...(s.sub ? SUB_CHIP : {}),
+            }}
+          >
+            #{s.tag}
+          </span>
+        ))}
+        {rest.length > 0 && (
+          <span
+            className="rest-cluster-sub"
+            title={`also kept by its rows: ${rest.map((s) => `#${s.tag} (${s.rows})`).join(' · ')}`}
+            style={{ ...DYNAMIC_CHIP, opacity: 0.6 }}
+          >
+            +{rest.length}
+          </span>
+        )}
+      </>
     );
   }
   if (!label) return null;
@@ -498,15 +593,6 @@ function Cs2Renderer({
     </Link>
   );
 }
-
-/**
- * The tag's own hue, lifted for the dark panel. `getColorChar11` draws a tag at
- * lightness 0.2 — right for the filled chips the hover preview and cs1 paint,
- * too close to the panel color for an outline — so the same hue is mixed toward
- * the row text color. Chip text and border share it.
- */
-const tagCue = (tag: string): string =>
-  `color-mix(in srgb, ${getColorChar11(tag)} 70%, rgb(230, 236, 244))`;
 
 /**
  * A `rstag` chip: a suggestion `srctag` found, not a tag the row carries. An

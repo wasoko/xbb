@@ -24,7 +24,8 @@ import { join, resolve } from 'node:path';
 import { runBody, type RecrScriptContext } from '../src/runsrc';
 import { SRCTAG_ROW_SEEDS, SRCTAG_SUGGEST_BODY, SRCTAG_SUGGEST_DS_BODY, SRCTAG_ROW_REFS } from '../src/srctagRows';
 import {
-  DEFAULT_TAG_AIM, RSTEXT_TAG_SCORE, applyTagAim, embedBatch, installSrctagGlobal, loadAdaptersFromStore,
+  DEFAULT_TAG_AIM, RSTEXT_TAG_SCORE, applyTagAim, embedBatch, groupByDomain, installSrctagGlobal,
+  loadAdaptersFromStore,
   mergeTagScore, pinPriorityTags, rowSources, summarizeTagAim, summarizeTagRun, tagRows, tokenize, urlTokens,
   type ClassifyFn, type EmbedFn, type TagAimConfig, type TagDim, type TagParts, type TagRow, type TagRowResult,
   type TagScoreConfig, type TagWindowConfig, type TextRankOptions,
@@ -33,6 +34,9 @@ import {
   DEFAULT_BM25, DEFAULT_BUCKETS, DEFAULT_GLOBAL, DEFAULT_RRF, RRF_TAG_SCORE, applyRrfBuckets,
   rrfScore, rrfTagRows, runRestPass, type GlobalConfig, type RrfRowsOptions,
 } from '../src/rstag';
+import {
+  DEFAULT_QARF, qarfAdaptive, qarfLambdas, qarfTagRows, type QarfConfig,
+} from '../src/qarf';
 
 /** IndexedDB the app opens, and the table its rows live in. */
 const DB_NAME = 'tagDB_0';
@@ -813,6 +817,156 @@ async function runRrfCase(
   };
 }
 
+// ─── The adaptive fusion, alpha by alpha ───────────────────────────────────
+
+/**
+ * One `qarf` case: the steepness of the specificity → weight sigmoid, and any
+ * bound it reads.
+ */
+interface QarfCase {
+  key: string;
+  qarf: Partial<QarfConfig>;
+  /** False leaves the theme stage's `graph` weight alone, so the two levers are read apart. */
+  burst?: boolean;
+}
+
+/**
+ * The grid: the control setting that must reproduce the `rrf` grid's anchor, then
+ * the paper's own steepness and two beyond it, and the clip read at its extremes.
+ */
+const QARF_CASES: QarfCase[] = [
+  { key: 'α 0 (= rrf)', qarf: { alpha: 0 } },
+  { key: 'α 0.5', qarf: { alpha: 0.5 } },
+  { key: 'α 1 (default)', qarf: { alpha: 1 } },
+  { key: 'α 2', qarf: { alpha: 2 } },
+  { key: 'α 4', qarf: { alpha: 4 } },
+  { key: 'α 1, clip 0.2/0.8', qarf: { alpha: 1, floor: 0.2, ceil: 0.8 } },
+  { key: 'α 1, clip 0.01/0.99', qarf: { alpha: 1, floor: 0.01, ceil: 0.99 } },
+  { key: 'α 1, floor 0.3', qarf: { alpha: 1, floor: 0.3 } },
+  { key: 'α 1, ceil 0.7', qarf: { alpha: 1, ceil: 0.7 } },
+  { key: 'α 0.5, clip 0.2/0.8', qarf: { alpha: 0.5, floor: 0.2, ceil: 0.8 } },
+  { key: 'α 1, no burst', qarf: { alpha: 1 }, burst: false },
+];
+
+/**
+ * The channels a `qarf` case's lists carry: the trie has the pin cards' headings
+ * in every case below, and no case supplies an embedder or a classifier.
+ */
+const QARF_CHANNELS: ('bm25' | 'textRank' | 'clusterRank' | 'priority')[] =
+  ['bm25', 'textRank', 'clusterRank', 'priority'];
+
+/** One `qarf` case's statistics, exactly as printed. */
+interface QarfResult {
+  key: string;
+  rows: number;
+  empty: number;
+  suggested: number;
+  distinct: number;
+  /** Mean lexical share the rows were read with. */
+  lambdaMean: number;
+  /** Spread of that share; near zero means every row was read the same way. */
+  lambdaSigma: number;
+  /** Share of rows whose share sits on the clip. */
+  lambdaClipped: number;
+  /** Rows carrying a promoted sub-tag, and how many distinct ones were minted. */
+  subRows: number;
+  subTags: number;
+  roots: string;
+  jaccard: number;
+  ms: number;
+}
+
+/**
+ * Score the live rows through the adaptive chain under one case's steepness, then
+ * read the result through the bucket half, exactly as the `rrf` grid does.
+ *
+ * The λ statistics are read per site, because that is the corpus the chain scores
+ * a row against under the profile's `domain` bucket.
+ *
+ * @param c the case's adaptive weighting knobs
+ * @param set rows this case scores
+ * @param priorityTags tags the trie treats as priorities
+ * @returns the statistics and the tags the run proposed
+ */
+async function runQarfCase(
+  c: QarfCase, set: LiveRow[], priorityTags: string[],
+): Promise<{ result: QarfResult; tags: Set<string> }> {
+  const opts = {
+    urls: false,
+    bm25: { ...DEFAULT_BM25, fields: { ...DEFAULT_BM25.fields, url: 0 } },
+    score: RRF_TAG_SCORE,
+    priorityTags,
+    bucket: 'domain' as const,
+    window: { dim: 'visitTime' as TagDim },
+    qarf: c.qarf,
+  };
+  const started = performance.now();
+  const scored = await qarfTagRows(set as TagRow[], opts);
+  const adaptive = qarfAdaptive(c.qarf);
+  const list = applyRrfBuckets(scored, { priorityTags }, DEFAULT_BUCKETS, rrfScore(opts).minScore,
+    c.burst === false ? undefined : adaptive.burst);
+  const ms = Math.round(performance.now() - started);
+
+  /* The λ diagnostics the paper reports: a mean and spread near the clip is a
+     corpus-level recalibration, a mean away from it with a wide spread is real
+     per-row adaptivity. */
+  const weights = rrfScore(opts);
+  const lambdas = [...groupByDomain(set as TagRow[]).values()].flatMap((bucket) =>
+    qarfLambdas(bucket.map((r) => tokenize(r.txt)), weights, QARF_CHANNELS, c.qarf));
+  const lambdaMean = lambdas.reduce((n, v) => n + v, 0) / Math.max(1, lambdas.length);
+  const cfg = { ...DEFAULT_QARF, ...c.qarf };
+  const lo = Math.min(cfg.floor, cfg.ceil);
+  const hi = Math.max(cfg.floor, cfg.ceil);
+
+  const flat = list.flatMap((r) => r.suggestions);
+  const tags = new Set(flat.map((s) => s.tag));
+  const sub = flat.filter((s) => s.parts.group > 0);
+  return {
+    result: {
+      key: c.key,
+      rows: list.length,
+      empty: list.filter((r) => r.suggestions.length === 0).length,
+      suggested: flat.length,
+      distinct: tags.size,
+      lambdaMean,
+      lambdaSigma: Math.sqrt(lambdas.reduce((n, v) => n + (v - lambdaMean) ** 2, 0) / Math.max(1, lambdas.length)),
+      lambdaClipped: lambdas.filter((v) => v <= lo + 1e-6 || v >= hi - 1e-6).length / Math.max(1, lambdas.length),
+      subRows: list.filter((r) => r.suggestions.some((s) => s.parts.group > 0)).length,
+      subTags: new Set(sub.map((s) => s.tag)).size,
+      roots: topRoots(flat.map((s) => s.tag)),
+      jaccard: 0,
+      ms,
+    },
+    tags,
+  };
+}
+
+/** The printed `qarf` columns, one header and one row format. */
+const QARF_COLUMNS: [string, number, boolean][] = [
+  ['case', 18, false], ['rows', 5, true], ['empty', 5, true], ['sugg', 5, true],
+  ['dist', 5, true], ['λ̄', 7, true], ['σλ', 7, true], ['λ clip', 7, true],
+  ['sub rows', 8, true], ['sub tags', 8, true], ['jaccard', 7, true], ['ms', 7, true],
+];
+
+/** One line per `qarf` case, so `test.log` carries the whole grid. */
+function printQarfTable(results: QarfResult[], title: string): void {
+  console.info(`[srctag-sweep] ${title}`);
+  console.info('[qarf-sweep] ' + QARF_COLUMNS
+    .map(([name, width, right]) => (right ? padL(name, width) : pad(name, width))).join(' '));
+  const rows: string[][] = [];
+  for (const r of results) {
+    const cells = [
+      r.key, String(r.rows), String(r.empty), String(r.suggested), String(r.distinct),
+      r.lambdaMean.toFixed(3), r.lambdaSigma.toFixed(3), r.lambdaClipped.toFixed(2),
+      String(r.subRows), String(r.subTags), r.jaccard.toFixed(3), String(r.ms),
+    ];
+    console.info('[qarf-sweep] ' + QARF_COLUMNS
+      .map(([, width, right], i) => (right ? padL(cells[i], width) : pad(cells[i], width))).join(' '));
+    rows.push(cells);
+  }
+  SECTIONS.push({ title, headers: QARF_COLUMNS.map(([name]) => name), rows });
+}
+
 /** The printed `rrf` columns, one header and one row format. */
 const RRF_COLUMNS: [string, number, boolean][] = [
   ['case', 16, false], ['stage', 9, false], ['rows', 5, true], ['scored', 6, true],
@@ -1198,6 +1352,47 @@ describe('hybrid sweep over the live working set', () => {
     expect(at('themes ≤ 1').subTags).toBeLessThanOrEqual(at('preset').subTags);
     // the rank constant changes the fusion, which is what makes it a parameter
     expect(at('k 1').jaccard).toBeLessThan(1);
+  }, 600_000);
+
+  it('sweeps the adaptive fusion weight over the live table', async ({ skip }) => {
+    if (down) {
+      console.warn(`[srctag-sweep] skipped: ${down}`);
+      skip();
+    }
+    expect(priorityTags.length).toBeGreaterThan(0);
+    const set = sweepRows.slice(0, RRF_ROWS);
+
+    const results: QarfResult[] = [];
+    let anchor: Set<string> | undefined;
+    for (const c of QARF_CASES) {
+      const { result, tags } = await runQarfCase(c, set, priorityTags);
+      if (c.qarf.alpha === 0) anchor = tags;
+      result.jaccard = anchor === undefined ? 1 : jaccard(tags, anchor);
+      results.push(result);
+    }
+    printQarfTable(
+      results,
+      `qarf alpha over the newest ${set.length} of ${sweepRows.length} live rows · priority from ${prioritySource} (${priorityTags.length} tags)`,
+    );
+
+    const at = (key: string) => results.find((r) => r.key === key)!;
+    // the control setting is the fixed reading exactly, which is what makes every
+    // later row's distance from it attributable to the adaptive weighting
+    expect(at('α 0 (= rrf)').jaccard).toBe(1);
+    // and a steeper weight is a different reading, or the knob moves nothing
+    expect(at('α 2').jaccard).toBeLessThan(1);
+    // a tighter clip is a non-expansive map, so it cannot spread the rows further
+    expect(at('α 1, clip 0.2/0.8').lambdaSigma)
+      .toBeLessThanOrEqual(at('α 1, clip 0.01/0.99').lambdaSigma + 1e-9);
+    // the second lever is the theme stage, and it is independent of the first:
+    // turning it off cannot change which share a row was read with
+    expect(at('α 1, no burst').lambdaMean).toBeCloseTo(at('α 1 (default)').lambdaMean, 12);
+    expect(at('α 1, no burst').lambdaSigma).toBeCloseTo(at('α 1 (default)').lambdaSigma, 12);
+    for (const r of results) {
+      expect(r.rows, r.key).toBeGreaterThan(0);
+      expect(r.lambdaMean, r.key).toBeGreaterThan(0.01);
+      expect(r.lambdaMean, r.key).toBeLessThan(1);
+    }
   }, 600_000);
 
   it('drops the pattern a filtered list repeats on every one of its rows', async ({ skip }) => {

@@ -42,6 +42,31 @@ export interface GateConfig {
   endpoints: string[];
 }
 
+/**
+ * The document the Chat pane's setup warning writes and opens: `rwr` is the lowest level
+ * that both writes a file and runs it, and the level ladder sits in the document so its
+ * next reader changes one line instead of looking the levels up.
+ */
+export const DEFAULT_GATE_MD = `## Selected
+* Level: rwr
+
+read: read_file, search_content, list_dir · rw adds write_file · rwr adds run_src · all adds run_command
+
+## Endpoints
+one "- https://host" prefix per line; only level all may call them
+`;
+
+/**
+ * Whether `gate.md` is present as a live row. A missing document is what silently withholds
+ * every writing tool, so the Chat pane warns on it; a document naming an unknown level is
+ * present, and already fails closed to `read`.
+ *
+ * @returns true when the row exists and is not tombstoned
+ */
+export async function gateDocumentExists(): Promise<boolean> {
+  return (await daRead(GATE_REF, 'md')) !== undefined;
+}
+
 /** Tools `level` allows, cumulative; ending a turn is never gated. */
 export function gateTools(level: GateLevel): Set<string> {
   const upTo = ORDER.slice(0, ORDER.indexOf(level) + 1);

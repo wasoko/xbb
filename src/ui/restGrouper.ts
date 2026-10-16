@@ -8,6 +8,7 @@ import {
   DEFAULT_BM25, DEFAULT_BUCKETS, DEFAULT_GLOBAL, DEFAULT_RRF, RRF_TAG_SCORE, RSTAG_LIMIT, RSTEXT_LIMIT, runRestPass,
   type Bm25Config, type BucketConfig, type GlobalConfig, type RestPassSpec, type RestTagOptions, type RrfConfig,
 } from '../rstag';
+import { DEFAULT_QARF, QARF_TAG_SCORE, qarfAdaptive, qarfTagReports, type QarfConfig } from '../qarf';
 import {
   DEFAULT_TAG_SCORE, DEFAULT_TEXTRANK, DEFAULT_TRIE, embedWithCache, RSTEXT_TAG_SCORE,
   SRCTAG_EMBED_REF,
@@ -20,6 +21,10 @@ import { loadAdapterSet, type AdapterSet } from './srctagSmoke';
    rest list and its tests reach the passes through this module. */
 export { RSTAG_LIMIT, RSTEXT_LIMIT, restTagMap, restTextMap } from '../rstag';
 export type { RestPassSpec, RestTagOptions } from '../rstag';
+
+/* The grouper a fresh table opens on, re-exported so a caller that has to run the
+   same reading never names a grouper key of its own. */
+export { DEFAULT_REST_GROUPER } from '../sdb';
 
 export { dtMs };
 
@@ -40,6 +45,25 @@ export interface RestGroup {
    * as the key of the rows under it.
    */
   tag?: string;
+  /**
+   * Tags the block's rows kept besides the head, most rows first, so a cluster
+   * head names what it holds rather than only what filed it. Set by the same
+   * reading as {@link RestGroup.tag}.
+   */
+  subs?: RestSubTag[];
+}
+
+/** One tag a rest block's rows kept besides its head. */
+export interface RestSubTag {
+  /**
+   * Tag as a head line prints it: the theme of a promoted `head/theme` sub-tag,
+   * which the head already names the parent of, and the tag itself otherwise.
+   */
+  tag: string;
+  /** Rows of the block keeping it. */
+  rows: number;
+  /** Whether the aim pass minted it rather than a channel scoring the row on it. */
+  sub?: boolean;
 }
 
 /** `treeCac['restGrouper']` value: blocks by `dt` alone. */
@@ -115,6 +139,20 @@ export const RSTT_GROUPER = 'rstt';
  * calibrating against the other.
  */
 export const RRF_GROUPER = 'rrf';
+
+/**
+ * `treeCac['restGrouper']` value: the same blocks, clusters and stages as
+ * {@link RRF_GROUPER}, fused with a weight that follows the row instead of one
+ * channel split for the whole pass.
+ *
+ * A title of rare, specific tokens is what the exact lexical lists (`bm25`, the
+ * trie) are good at, and a title of common words is what the neighbour walks and
+ * the embedding list are good at. `qarf` reads that off corpus IDF statistics the
+ * pass already has — see `src/qarf.ts` — and leans each row's fusion the way its
+ * own text says. At `qarf α` 0 it is `rrf` exactly, which is what makes the two
+ * comparable on a sweep.
+ */
+export const QARF_GROUPER = 'qarf';
 
 /**
  * Ordering and bucketing a rest pass reads a row in. `domain` is the visit-time
@@ -202,10 +240,11 @@ export interface RestTagProfile {
   aim: boolean;
   /**
    * Which scoring pipeline the pass runs: `srctag`'s weighted channel sum (the
-   * default) or `rstag`'s 3-stage chain. The three algorithm groupers and the
-   * two read paths are all the same fusion; `rrf` is the one that is not.
+   * default), `rstag`'s 3-stage chain, or the same chain fused with a weight that
+   * follows the row. The three algorithm groupers and the two read paths are all
+   * the same fusion; `rrf` and `qarf` are the ones that are not.
    */
-  pipeline?: 'fusion' | 'rrf';
+  pipeline?: 'fusion' | 'rrf' | 'qarf';
   /** Mode the panel starts on; unset means {@link REST_VIZ_DEFAULT}. */
   viz?: RestVizMode;
   /** TextRank knobs the tuner offers, for the families that walk the graph. */
@@ -218,9 +257,42 @@ export interface RestTagProfile {
   rrf?: RrfConfig;
   /** Sub-tag discovery knobs the tuner offers, for `rrf`. */
   buckets?: BucketConfig;
-  /** Pre-processing knobs the tuner offers, for `rrf`: the corpus frequency floor. */
+  /** Pre-processing knobs the tuner offers, for the chain groupers: the corpus frequency floor. */
   global?: GlobalConfig;
+  /** Adaptive weighting knobs the tuner offers, for `qarf`. */
+  qarf?: QarfConfig;
 }
+
+/**
+ * The chain groupers' shared defaults: the whole window read as one set, the tag
+ * clusters that reading renders, the URL decision, and the three stages' knobs.
+ * `rrf` and `qarf` differ in the pipeline they name and in what moves the fusion
+ * weight, not in any of these.
+ */
+const CHAIN_DEFAULTS: Omit<RestTagProfile, 'score' | 'pipeline' | 'qarf'> = {
+  knobs: ['bm25', 'embed', 'textRank', 'clusterRank', 'priority'],
+  mode: 'domain',
+  /* Uncapped: the chain's candidates come from every row the list holds, and a
+     prefix of the window would make the tag clusters depend on where the reader
+     happens to be scrolled. */
+  limit: ROWS_ALL,
+  /* The tag clusters are the chain's own reading: a chip per tag kept, and the
+     rows that kept it under it, rather than the `rsdt` date blocks. */
+  viz: 'clusters',
+  /* The URL is out: under a list of one site's pages the hostname and the browser
+     in the query string are on every row, so they say nothing about any one of
+     them. `urls` keeps them out of the token bag and the BM25F `url` field is
+     weighted 0, which is the same decision twice — and `w url` on the tuner is
+     the one box that puts it back. */
+  urls: false,
+  pinsPriority: true,
+  aim: true,
+  rank: DEFAULT_TEXTRANK,
+  bm25: { ...DEFAULT_BM25, fields: { ...DEFAULT_BM25.fields, url: 0 } },
+  rrf: DEFAULT_RRF,
+  buckets: DEFAULT_BUCKETS,
+  global: DEFAULT_GLOBAL,
+};
 
 /**
  * The six tag groupers' presets. The three algorithm groupers isolate one family
@@ -228,8 +300,8 @@ export interface RestTagProfile {
  * TurboText trie for `rstt` — while the priority channel stays on in all three,
  * because the pin cards' `#tag` headings are the curated half of what they
  * propose. The two read paths, `rstag` and `rstext`, keep the fused default and
- * the TextRank preset. `rrf` is the one that changes pipeline rather than
- * channel weights: BM25F and the fusion are stages, not weights.
+ * the TextRank preset. `rrf` and `qarf` are the ones that change pipeline rather
+ * than channel weights: BM25F and the fusion are stages, not weights.
  *
  * The three algorithm defaults are starting points, not answers; the tuner is
  * there to move them against a real table.
@@ -293,30 +365,15 @@ export const REST_PROFILES: Record<string, RestTagProfile> = {
     trie: DEFAULT_TRIE,
   },
   [RRF_GROUPER]: {
+    ...CHAIN_DEFAULTS,
     score: RRF_TAG_SCORE,
-    knobs: ['bm25', 'embed', 'textRank', 'clusterRank', 'priority'],
-    mode: 'domain',
-    /* Uncapped: the chain's candidates come from every row the list holds, and a
-       prefix of the window would make the tag clusters depend on where the
-       reader happens to be scrolled. */
-    limit: ROWS_ALL,
-    /* The tag clusters are this pipeline's own reading: a chip per tag kept, and
-       the rows that kept it under it, rather than the `rsdt` date blocks. */
-    viz: 'clusters',
-    /* The URL is out: under a list of one site's pages the hostname and the
-       browser in the query string are on every row, so they say nothing about
-       any one of them. `urls` keeps them out of the token bag and the BM25F `url`
-       field is weighted 0, which is the same decision twice — and `w url` on the
-       tuner is the one box that puts it back. */
-    urls: false,
-    pinsPriority: true,
-    aim: true,
-    rank: DEFAULT_TEXTRANK,
     pipeline: 'rrf',
-    bm25: { ...DEFAULT_BM25, fields: { ...DEFAULT_BM25.fields, url: 0 } },
-    rrf: DEFAULT_RRF,
-    buckets: DEFAULT_BUCKETS,
-    global: DEFAULT_GLOBAL,
+  },
+  [QARF_GROUPER]: {
+    ...CHAIN_DEFAULTS,
+    score: QARF_TAG_SCORE,
+    pipeline: 'qarf',
+    qarf: DEFAULT_QARF,
   },
 };
 
@@ -361,6 +418,8 @@ export interface RestHyper {
   buckets?: Partial<BucketConfig>;
   /** Pre-processing override: the corpus frequency floor. */
   global?: Partial<GlobalConfig>;
+  /** Adaptive weighting override: the steepness of the specificity → weight sigmoid. */
+  qarf?: Partial<QarfConfig>;
 }
 
 /** One {@link RestHyper} per grouper ref, as the tuner holds it in component state. */
@@ -677,6 +736,7 @@ const BUILT_IN_GROUPERS = new Map<string, (das: Da[]) => RestGroup[]>([
   [RSTRANK_GROUPER, groupByDt],
   [RSTT_GROUPER, groupByDt],
   [RRF_GROUPER, groupByDt],
+  [QARF_GROUPER, groupByDt],
 ]);
 
 /**
@@ -732,6 +792,12 @@ export async function restProfileMap(
     limit: hyper?.limit ?? profile.limit,
     aim: restAim(profile, hyper),
     ...(profile.pipeline ? { pipeline: profile.pipeline } : {}),
+    /* The adaptive chain is handed the two hooks and its own entry point: `qarf.ts`
+       imports the chain from `rstag.ts`, so the profile is the one place that can
+       wire the two together. */
+    ...(profile.pipeline === 'qarf'
+      ? { qarf: { ...qarfAdaptive({ ...profile.qarf, ...hyper?.qarf }), tag: qarfTagReports } }
+      : {}),
     ...(profile.bm25 || hyper?.bm25
       ? { bm25: { ...profile.bm25, ...hyper?.bm25 } } : {}),
     ...(profile.rrf || hyper?.rrf
@@ -783,27 +849,49 @@ export function restTagContributors(
  * Holder of the rest list's last `srctag` pass, shared with the userbar
  * omnibox's suggestion zone (and with `rstag`'s own chips) so one pass serves
  * both and the zone does not rescore the same rows.
+ *
+ * The pass's own inputs stay readable after it lands, because a second reader may
+ * want them as a whole rather than one report at a time: the suggestion zone
+ * publishes over whatever pass came first, and the sea's own seed — the pin
+ * reading in `ui/seaPinGraph.ts` — lands here when the list has not run yet, so
+ * the pin cards it was rooted at are kept beside the rows.
  */
 class RestTagStore {
-  private map: Map<number, RowTagReport> = new Map();
-  private rows: Da[] = [];
+  /** One report per scored row of the last pass, keyed by `tid`. */
+  reports: Map<number, RowTagReport> = new Map();
+  /** The rows that pass scored, in its own order. */
+  rows: Da[] = [];
+  /** The pin cards in scope when it ran; the graph is rooted at their headings. */
+  pins: Da[] = [];
   private listeners = new Set<() => void>();
+  private n = 0;
 
   /**
    * Publish one pass.
    *
    * @param map one report per scored row, keyed by `tid`
    * @param rows the rows that pass scored, in its own order
+   * @param pins the pin cards in scope, whose `#tag` headings root the graph
    */
-  set(map: Map<number, RowTagReport>, rows: Da[]): void {
-    this.map = map;
+  set(map: Map<number, RowTagReport>, rows: Da[], pins: Da[] = []): void {
+    this.reports = map;
     this.rows = rows;
+    this.pins = pins;
+    this.n++;
     for (const l of this.listeners) l();
   }
 
   /** Rows the last pass reported; 0 before the first pass resolves. */
   get size(): number {
-    return this.map.size;
+    return this.reports.size;
+  }
+
+  /**
+   * How many passes have been published. It only ever grows, so it is a stable
+   * snapshot for `useSyncExternalStore`.
+   */
+  get version(): number {
+    return this.n;
   }
 
   /**
@@ -828,7 +916,7 @@ class RestTagStore {
   rank(n: number): RestTagHint[] {
     const byTag = new Map<string, RestTagHint>();
     for (const row of this.rows) {
-      const report = row.tid === undefined ? undefined : this.map.get(row.tid);
+      const report = row.tid === undefined ? undefined : this.reports.get(row.tid);
       if (!report) continue;
       for (const t of report.tags) {
         const hit = byTag.get(t.tag);

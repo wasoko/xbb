@@ -10,13 +10,13 @@
 
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
-import type { Da } from '../src/sdb';
-import type { KeywordMatch, RowTagReport, TagChannelStat, TagExplanation, TagParts } from '../src/srctag';
+import type { Da } from '../../src/sdb';
+import type { KeywordMatch, RowTagReport, TagChannelStat, TagExplanation, TagParts } from '../../src/srctag';
 import {
   channelShares, keywordHits, priorityCoverage, reportOf, tagClusters, tagTopExplanations, tagsPerTitle,
   themeGroups, vizBlocks,
   VIZ_SMALL_LABEL, VIZ_UNCLUSTERED_LABEL, VIZ_UNSCORED_LABEL, type VizReports,
-} from '../src/ui/restVizData';
+} from '../../src/ui/restVizData';
 
 /** A row with the fields the list reads. */
 const row = (tid: number, txt: string): Da => ({ tid, txt, ref: `https://e.com/${tid}`, type: 'tab', tags: [], rec: {} });
@@ -134,6 +134,39 @@ describe('tagClusters', () => {
     );
     expect(tagClusters(two, twice).map((b) => b.tag ?? b.label))
       .toEqual([VIZ_SMALL_LABEL, VIZ_UNSCORED_LABEL]);
+  });
+
+  it('lists the other tags its rows kept on the head, and marks a minted one', () => {
+    /* A curated head reaches whatever rows keep it, so the sub-tag rule is read
+       against four rows: three share `quant`/`stress`, the fourth keeps a word of
+       its own. */
+    const head = [row(1, 'a'), row(2, 'b'), row(3, 'c'), row(4, 'd')];
+    const minted = (name: string, strength: number): TagExplanation =>
+      ({
+        tag: name,
+        score: strength,
+        channels: [{ channel: 'group', weight: 0.5, value: strength, contribution: strength }],
+        text: '',
+        origin: 'sub',
+      });
+    const map = reports(
+      // row 1 carries the word and the minted theme at once: the label counts once
+      report(1, [kept('risk', channel('priority', 1)), kept('quant', channel('bm25', 0.4)), minted('risk/quant', 2), kept('stress', channel('bm25', 0.3))]),
+      report(2, [kept('risk', channel('priority', 1)), kept('quant', channel('bm25', 0.4))]),
+      // the minted `risk/quant` names a theme the same cluster already kept as a word
+      report(3, [kept('risk', channel('priority', 1)), kept('stress', channel('bm25', 0.3)), minted('risk/quant', 2)]),
+      report(4, [kept('risk', channel('priority', 1)), kept('outlier', channel('bm25', 0.2))]),
+    );
+
+    const block = tagClusters(head, map)[0];
+    expect(block.tag).toBe('risk');
+    expect(block.items.map((r) => r.tid)).toEqual([1, 2, 3, 4]);
+    expect(block.subs).toEqual([
+      // counted once however a row carried it, and the minted tag is what marks it:
+      // rows 1-2 kept `quant`, row 3 carried it as the theme aim minted for the burst
+      { tag: 'quant', rows: 3, sub: true },
+      { tag: 'stress', rows: 2 },
+    ]);
   });
 
   it('lists every row of the list exactly once, and in its own order inside a block', () => {

@@ -17,9 +17,10 @@
 * thanks to: pi(Mario Zechner) 3.js webgpu dexie supabase
 
 ### Requirement
-- Chromium-based browser with WebGPU enabled
-  - Chrome 113+ (you may need `chrome://flags/#enable-unsafe-webgpu`)
-  - e.g. android 5+ opera 58
+- Chromium-based browser with WebGL 2: the sea draws through three.js, which asks the
+  canvas for a `webgl2` context itself and has no WebGL 1 path (`src/ui/SeaView.tsx`)
+  - Chrome/Edge 113+, e.g. android 5+ opera 58
+- `src/webgpu.ts` exists but nothing imports it; WebGPU is not a requirement
 
 ## Robust
 - vitest playwright

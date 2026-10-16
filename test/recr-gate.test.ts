@@ -5,7 +5,7 @@ import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../src/sdb';
 import { createDefaultExecutor, getStore, TASK_COMPLETE, type ToolCall } from '../src/recr';
-import { filterTools, gateTools, loadGate } from '../src/recrGate';
+import { filterTools, gateTools, loadGate, gateDocumentExists, DEFAULT_GATE_MD } from '../src/recrGate';
 import type { ToolDef } from '../src/recr';
 
 const ALL: ToolDef[] = ['read_file', 'write_file', 'search_content', 'list_dir', 'run_src', 'run_command', TASK_COMPLETE]
@@ -67,6 +67,24 @@ describe('gate levels', () => {
     const row = await db.das.where('[ref+type]').equals(['gate.md', 'md']).first();
     await db.das.update(row!.tid!, { tags: ['[del]'], modAt: new Date() });
     expect((await loadGate()).level).toBe('read');
+  });
+
+  it('reports the document absent until one is written', async () => {
+    expect(await gateDocumentExists()).toBe(false);
+    await putGate(DEFAULT_GATE_MD);
+    expect(await gateDocumentExists()).toBe(true);
+  });
+
+  it('reports a tombstoned gate.md as absent, which is what the Chat warning reads', async () => {
+    await putGate(DEFAULT_GATE_MD);
+    const row = await db.das.where('[ref+type]').equals(['gate.md', 'md']).first();
+    await db.das.update(row!.tid!, { tags: ['[del]'], modAt: new Date() });
+    expect(await gateDocumentExists()).toBe(false);
+  });
+
+  it('parses the default document the warning writes to level rwr with no endpoints', async () => {
+    await putGate(DEFAULT_GATE_MD);
+    expect(await loadGate()).toEqual({ level: 'rwr', endpoints: [] });
   });
 });
 

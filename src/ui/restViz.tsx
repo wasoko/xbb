@@ -20,7 +20,7 @@ import React, { useEffect, useState } from 'react';
 import type { Da } from '../sdb';
 import { TAG_CHANNEL_LABEL, type RowTagReport } from '../srctag';
 import {
-  RSTAG_GROUPER, REST_PROFILES, restDynAdapters, restHyperScore, restVecStatus,
+  REST_PROFILES, restDynAdapters, restDynCapable, restHyperScore, restVecStatus,
   type RestHyper, type RestVizMode,
 } from './restGrouper';
 import { VIZ_HELP, vizCaveat } from './restHelp';
@@ -263,7 +263,8 @@ function ClusterBody({ rows, reports }: { rows: Da[]; reports: Map<number, RowTa
       <div style={LABEL}>
         {`the blocks below are one cluster per tag the rows kept, curated tags first — a tag kept by
 fewer than ${CLUSTER_MIN_ROWS} rows is no cluster, so those rows trail with their own chips.
-Hover a head for the channels behind it and the rows it holds`}
+Each head lists the other tags its rows kept beside it, so a cluster says what it holds and
+not only what filed it. Hover a head for the channels behind it and the rows it holds`}
       </div>
       <div style={ROW}>
         <span>{heads} clusters</span>
@@ -357,7 +358,8 @@ export function RestViz({ grouper, mode, rows, reports, hyper, dyn = false, chil
         <Head mode={mode} rows={rows} reports={reports} />
         {caveat && <div style={{ ...LABEL, ...HINT }} title={caveat}>{caveat}</div>}
         <Body mode={mode} rows={rows} reports={reports} />
-        {grouper === RSTAG_GROUPER && dyn && <AdapterStatus />}
+        {/* Every family the `dyn` flag is offered on reports the adapters it loaded. */}
+        {profile && restDynCapable(profile) && dyn && <AdapterStatus />}
       </div>
       {children}
     </div>

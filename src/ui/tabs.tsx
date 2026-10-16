@@ -324,6 +324,7 @@ export function VbCard() {
       onNodeChange={handleNodeChange}
       onSwitchSession={handleSwitchSession}
       onTabChange={handleEditorChange}
+      onOpenRef={handleSelectTag}
     />
   );
 

@@ -1,4 +1,7 @@
-// src/components/BottomIconBar.tsx
+/**
+ * tap.tsx — the user bar: the omnibox, the four bar menus, the nav bar and the settings
+ * rows they open.
+ */
 import React, { useState, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import * as li from 'lucide-react'
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
@@ -433,6 +436,9 @@ function wireListInput(el: HTMLInputElement | null) {
 /** Toolbar's resting offsets; the drag handle beside the omnibox moves them from here. */
 const BAR_DEFAULT = { top: 36, right: 20 };
 
+/** The toolbar's own height: the handle, the omnibox and the four menu cells are all one row. */
+const BAR_HEIGHT = 62;
+
 export function UserBar() {
   const [session, setSession] = useState(sess);
   const [open, setOpen] = useState(false);
@@ -529,6 +535,12 @@ export function UserBar() {
     if (r) barNatural.current = { w: r.width, h: r.height };
   }, [omniExpanded]);
 
+  /* The bar's bottom edge, published for the parts of the page that have to stay clear of it: the
+     sea's readout hangs below whatever the bar covers, so parking the bar does not crop it. */
+  useEffect(() => {
+    document.documentElement.style.setProperty('--userbar-bottom', `${barPos.top + BAR_HEIGHT}px`);
+  }, [barPos.top]);
+
   const onBarDragStart = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button > 0) return;
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -555,11 +567,14 @@ export function UserBar() {
   };
 
   /** The panels are `position: fixed`, so the bar places them instead of their class defaults
-   *  (`top: 36px + 77px`, `right: 0`); `below` is the row's top edge to the panel's top edge. */
-  const dropStyle = (below: number): React.CSSProperties => ({
+   *  (`top: 36px + 77px`, `right: 0`); `below` is the row's top edge to the panel's top edge.
+   *  `spanLeft` reaches the screen's left edge like the widened omnibox, so the class width
+   *  and its `max-width: 95vw` have to give way to both edges. */
+  const dropStyle = (below: number, spanLeft = false): React.CSSProperties => ({
     top: barPos.top + below,
     right: barPos.right - BAR_DEFAULT.right,
     maxHeight: `calc(100vh - ${barPos.top + below}px)`,
+    ...(spanLeft ? { left: 0, width: 'auto', maxWidth: 'none' } : null),
   });
 
   /* `+` menu: newest rows by local edit time, newest first. */
@@ -855,7 +870,7 @@ export function UserBar() {
         >
           <li.GripVertical size={16} />
         </div>
-        <SearchOmnibox onOpen={openInEditor} drop={dropStyle(59)} onExpandChange={setOmniExpanded} />
+        <SearchOmnibox onOpen={openInEditor} drop={dropStyle(59, omniExpanded)} onExpandChange={setOmniExpanded} />
         <div
           className="user-menu-container"
           ref={plusRef}

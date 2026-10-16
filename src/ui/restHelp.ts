@@ -23,6 +23,7 @@ export const PROFILE_HELP: Record<string, string> = {
   rstrank: 'the two TextRank walks: the row\'s own centrality and its burst\'s',
   rstt: 'the TurboText Aho–Corasick trie, over the pin cards and `keywords.md`',
   rrf: 'the 3-stage chain: TurboText candidates, BM25F over the title and the row\'s tags, then a rank fusion of that with the semantic and TextRank lists; sub-tags come from c-TF-IDF over each burst',
+  qarf: 'the same chain, fused with a weight that follows the row: a title of rare tokens leans on the lexical lists, a title of common words on the neighbour walks. `qarf α` 0 is `rrf` exactly',
 };
 
 /**
@@ -67,6 +68,7 @@ export const TUNER_HELP: Record<string, string> = {
   bm25Field: 'how much one BM25F field counts when a word appears in it. `title` names the item, `tags` is what the row is already filed under, and `url` is the field its own switch governs — weighting it 0 is what stops a URL pattern being read as a topic',
   rrfK: 'the rank constant of the fusion: how much a first place is worth. Larger flattens the lists towards equal, so a word one list ranks low still contributes; smaller lets the top of each list decide. It moves the printed suggestion counts a lot and the per-row chip count very little, because every candidate of a short title is already in the first ranks',
   maxDf: 'share of the rows that may carry a word before it is dropped as a corpus-wide term, over the title, the URL and the row\'s own tags together. This is what keeps a pattern on every row — the site in a list of its own pages, the browser in every query string — out of the chips. It needs a corpus: a pass shorter than 8 rows reads every term as evidence',
+  qarfAlpha: 'steepness of the specificity → weight sigmoid. 0 reads every row the way the profile\'s weights do — the exact `rrf` reading — and larger values lean a row of rare tokens harder on the lexical lists and a row of common words harder on the neighbour walks. The weight is clipped, so no row silences one side: the sweep\'s λ̄ and its spread say whether the weighting is really per-row or has collapsed into one constant',
   stop: 'function words dropped by name, on top of the tokenizer\'s own list. A short title\'s `vs`, `how` and `any` are central to its graph walk and rare enough to pass the frequency floor, so this is the only knob that removes them without also removing two-character CJK words',
   bucketLambda: 'MMR trade-off in sub-tag discovery: 1 keeps the highest c-TF-IDF words, 0 the most distinct ones, so near-synonyms of a theme already picked do not all become sub-tags',
   bucketGraph: 'share of the burst\'s TextRank centrality folded into a theme\'s c-TF-IDF score: the difference between a word the burst merely contains and one it keeps returning to',
@@ -76,7 +78,7 @@ export const TUNER_HELP: Record<string, string> = {
 /** One line per panel reading. */
 export const VIZ_HELP: Record<RestVizMode, string> = {
   chips: 'the tag layer beside each row, and nothing replaced',
-  clusters: 'one block per tag the rows kept, headed by the tag itself with its right border dropped so the box opens onto its rows. A row joins the highest-scored tag the priority half carried, or its top-ranked tag when nothing curated carried it; the pin cards\' tags lead, then the widest clusters. A tag fewer than three rows keep is no cluster: those rows trail with their own chips, then a row that kept nothing under `(no suggestion)`. This reading draws no bars — hover a head for the channels behind it and the rows it holds',
+  clusters: 'one block per tag the rows kept, headed by the tag itself with its right border dropped so the box opens onto its rows. A row joins the highest-scored tag the priority half carried, or its top-ranked tag when nothing curated carried it; the pin cards\' tags lead, then the widest clusters. A tag fewer than three rows keep is no cluster: those rows trail with their own chips, then a row that kept nothing under `(no suggestion)`. Beside the head are the other tags its own rows kept, most rows first, in the same box — a promoted `parent/theme` sub-tag reads as its theme in italics — so a head says what the cluster holds and not only what filed it; a wide cluster draws the first few and counts the rest. This reading draws no bars — hover a head for the channels behind it, the tags its rows also keep, and the rows it holds',
   priority: 'rows on a curated tag vs none, then one bar per tag kept by more than one row — the priority-backed ones in green, with the count of one-off tags beside them. `topK` shortens the list and the pre-processing (`stop`, `max df`) cleans it; a generic word a graph channel lifted leaves through `minLen`',
   themes: 'one line per burst-and-anchor group sharing a word: the evidence behind a promoted sub-tag. Calibrate with `promote ≥` and `themes ≤`',
   channels: 'one bar per channel, sized by its share of the pass\'s total contribution',

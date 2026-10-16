@@ -951,6 +951,59 @@ async function listDir(args: Record<string, unknown>, store: IRecrStore): Promis
 }
 
 /**
+ * Lines a script wrote, and how many it wrote: `lines` is the head the tool result
+ * carries, `total` counts past the cap so the result can say what it left out.
+ */
+interface ScriptLog {
+  lines: string[];
+  total: number;
+}
+
+/** Lines of script console output the tool result carries; the rest is counted only. */
+const SCRIPT_LOG_LINES = 40;
+
+/** One console argument as the model reads it: strings as written, everything else as JSON. */
+function logArg(v: unknown): string {
+  if (typeof v === 'string') return v;
+  try {
+    return JSON.stringify(v) ?? String(v);
+  } catch {
+    // a cyclic or unserializable value has no JSON form; its string form is the report
+    return String(v);
+  }
+}
+
+/**
+ * Console a script body writes through: every call still reaches the page console, and
+ * the line is also collected for the tool result, so a script's own diagnostics are what
+ * the model reads back instead of being visible only in devtools.
+ *
+ * @param log sink the script's output is collected into
+ * @returns a `Console` delegating everything not captured to the page console
+ */
+function scriptConsole(log: ScriptLog): Console {
+  const cap = Object.create(console) as Console;
+  for (const level of ['log', 'info', 'warn', 'error', 'debug'] as const) {
+    cap[level] = (...args: unknown[]) => {
+      console[level](...args);
+      log.total++;
+      if (log.lines.length >= SCRIPT_LOG_LINES) return;
+      log.lines.push(`${level}: ${args.map(logArg).join(' ')}`);
+    };
+  }
+  return cap;
+}
+
+/** `text` followed by the script's console output, when the script wrote any. */
+function withLogs(text: string, log: ScriptLog): string {
+  if (log.lines.length === 0) return text;
+  const hidden = log.total - log.lines.length;
+  const more = hidden > 0 ? `\n… ${hidden} more line${hidden === 1 ? '' : 's'} not shown` : '';
+  return `${text}\n\n--- console (${log.total} line${log.total === 1 ? '' : 's'}) ---`
+    + `\n${log.lines.join('\n')}${more}`;
+}
+
+/**
  * run_src: run the body of a `type='src'` row in page context.
  *
  * The script receives one `ctx` argument — `{ db, ref, args, console }` — so it
@@ -960,20 +1013,25 @@ async function listDir(args: Record<string, unknown>, store: IRecrStore): Promis
  *
  * @param args `ref` names the script row; `args` is forwarded to the script as `ctx.args`
  * @param store store holding the script row
- * @returns the script's string result, or its JSON form, truncated to 8000 chars
+ * @returns the script's string result, or its JSON form, plus the lines the script
+ *   wrote through `ctx.console`; truncated to 8000 chars
  */
 async function runSrc(args: Record<string, unknown>, store: IRecrStore): Promise<string> {
   const ref = String(args.ref ?? args.filePath ?? args.path ?? '');
   if (!ref) return 'Error: ref is required';
   const body = await store.readScript(ref);
   if (body === undefined) return `Error: script not found: ${ref}`;
-  const ctx: RecrScriptContext = { db, ref, args: args.args ?? {}, console };
+  const log: ScriptLog = { lines: [], total: 0 };
+  const ctx: RecrScriptContext = { db, ref, args: args.args ?? {}, console: scriptConsole(log) };
   try {
     const out = await runBody(body, ctx);
-    if (out === undefined) return `${ref} completed with no result`;
-    return (typeof out === 'string' ? out : JSON.stringify(out, null, 2)).slice(0, 8000);
+    const text = out === undefined
+      ? `${ref} completed with no result`
+      : (typeof out === 'string' ? out : JSON.stringify(out, null, 2));
+    return withLogs(text, log).slice(0, 8000);
   } catch (e) {
-    return `Error running ${ref}: ${e instanceof Error ? e.message : String(e)}`;
+    const message = e instanceof Error ? e.message : String(e);
+    return withLogs(`Error running ${ref}: ${message}`, log).slice(0, 8000);
   }
 }
 
@@ -1719,7 +1777,7 @@ export async function rcr(opts: RcrOptions): Promise<RunLoopResult> {
   const executor = opts.executor ?? createDefaultExecutor(gate);
 
   // Default system prompt
-  const systemPrompt = opts.systemPrompt ?? getDefaultSystemPrompt(effectiveTools);
+  const systemPrompt = opts.systemPrompt ?? getDefaultSystemPrompt(effectiveTools, gate);
 
   // ── Build plugin context and request state ──────────────────────────
 
@@ -1827,16 +1885,43 @@ export async function rcr(opts: RcrOptions): Promise<RunLoopResult> {
 
 // ─── Defaults ──────────────────────────────────────────────────────────────
 
-function getDefaultSystemPrompt(tools: ToolDef[]): string {
+/**
+ * The prompt's account of the current gate, so a withheld tool is reported as a gate
+ * setting rather than as a tool that does not exist.
+ *
+ * @param gate the level and endpoints `gate.md` selected
+ * @returns a paragraph naming what the level withholds and what unlocks it; empty at `all`
+ */
+function gateNote(gate: GateConfig): string {
+  const withheld = BUILTIN_TOOL_NAMES.filter(n => !gateTools(gate.level).has(n));
+  if (withheld.length === 0) return '';
+  return `
+The tool gate in gate.md is at level "${gate.level}", so these tools are withheld this turn:
+${withheld.join(', ')}. When a task needs one, say which tool is missing and which level
+unlocks it (rw adds write_file, rwr adds run_src, all adds run_command); do not report that no
+such tool exists.
+`;
+}
+
+/**
+ * Default system prompt: what the store holds, which tools this turn offers, and — when
+ * the gate withholds any — what the gate did, so the model can name the missing tool.
+ *
+ * @param tools tool definitions the request carries
+ * @param gate gate level `gate.md` selected
+ * @returns the system message text
+ */
+function getDefaultSystemPrompt(tools: ToolDef[], gate: GateConfig): string {
   const toolList = tools.map(t => `- ${t.name}: ${t.description}`).join('\n');
+  const note = gateNote(gate);
   return `You are an AI coding agent working on a store of tagged documents.
-File refs are paths such as "src/main.ts" or "readme.md"; a ref's extension decides
-whether it is a source row or a markdown row. Do not invent refs: use list_dir and
-search_content to find them.
+File refs are paths such as "src/main.ts" or "readme.md". A ref ending in ".md" is a
+markdown row; every other ref is a source row, so a script written as ".ts" or ".js" is a
+row run_src can run. Do not invent refs: use list_dir and search_content to find them.
 
 Available tools:
 ${toolList}
-
+${note}
 When you need to accomplish a task, use the appropriate tools. After each tool call,
 you will receive the result. You can make multiple tool calls in sequence.
 

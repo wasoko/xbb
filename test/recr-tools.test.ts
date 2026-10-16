@@ -112,6 +112,30 @@ describe('run_src', () => {
     expect(await run('run_src', { ref: 'scripts/boom.ts' })).toBe('Error running scripts/boom.ts: boom');
   });
 
+  it('returns the lines the script logged, so its own diagnostics reach the model', async () => {
+    await run('write_file', { filePath: 'scripts/logs.ts'
+      , content: 'ctx.console.log("a", { b: 1 })\nctx.console.warn("w")\nreturn "done"' });
+    expect(await run('run_src', { ref: 'scripts/logs.ts' }))
+      .toBe('done\n\n--- console (2 lines) ---\nlog: a {"b":1}\nwarn: w');
+  });
+
+  it('keeps the logged lines of a script that threw', async () => {
+    await run('write_file', { filePath: 'scripts/log_boom.ts'
+      , content: 'ctx.console.log("before")\nthrow new Error("boom")' });
+    expect(await run('run_src', { ref: 'scripts/log_boom.ts' }))
+      .toBe('Error running scripts/log_boom.ts: boom\n\n--- console (1 line) ---\nlog: before');
+  });
+
+  it('caps the returned lines and counts the rest', async () => {
+    await run('write_file', { filePath: 'scripts/chatty.ts'
+      , content: 'for (let i = 0; i < 45; i++) ctx.console.log("n" + i)\nreturn "done"' });
+    const out = await run('run_src', { ref: 'scripts/chatty.ts' });
+    expect(out).toContain('--- console (45 lines) ---');
+    expect(out).toContain('… 5 more lines not shown');
+    expect(out).toContain('log: n39');
+    expect(out).not.toContain('log: n40');
+  });
+
   it('reports an unknown script', async () => {
     expect(await run('run_src', { ref: 'scripts/none.ts' })).toBe('Error: script not found: scripts/none.ts');
   });

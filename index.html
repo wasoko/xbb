@@ -169,6 +169,11 @@
       .cs1-match { color: var(--bt-color); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; text-decoration: none; }
       button.cs1-match { background: rgba(255,255,255,0.05); border: 1px solid var(--bt-color); }
       a.cs1-match:hover { text-decoration: underline; }
+      /* A `{ref}` token: a document the pin card points at, marked apart from a `#tag`
+         button so a ref reads as a file rather than as a tag. */
+      .cs1-ref { font: inherit; font-size: 12px; padding: 1px 6px; border-radius: 4px; cursor: pointer;
+        color: #7dd3fc; background: rgba(125,211,252,0.08); border: 1px dashed rgba(125,211,252,0.55); }
+      .cs1-ref:hover { background: rgba(125,211,252,0.18); }
 
       /* --- hover preview (dark panel, same family as .tab-dropdown-content) --- */
       .tip > * > :first-child { margin-top: 0; }

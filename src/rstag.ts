@@ -14,9 +14,9 @@
  *   2. *Statistical ranking* — {@link bm25fScores}, BM25F over weighted fields,
  *      so a term the title carries outranks the same term in a URL, with `k1`
  *      damping repetition and `b` normalizing a long field.
- *   3. *Semantic bucketing and expansion* — {@link reciprocalRankFusion} fuses the
- *      ranked lists by rank rather than by score, which is what lets a BM25F list
- *      and a cosine list be combined without calibrating either; and
+ *   3. *Semantic bucketing and expansion* — {@link fuseLists} fuses the ranked
+ *      lists by rank rather than by score, which is what lets a BM25F list and a
+ *      cosine list be combined without calibrating either; and
  *      {@link cTfIdf} with MMR ({@link discoverThemes}) reads the terms
  *      *distinctive to* one burst, which is what a sub-tag is.
  *
@@ -38,7 +38,7 @@ import {
   textRank, tokenize, urlTokens,
   type KeywordMatch, type RowTagReport, type SparseVector,
   type TagAimConfig, type TagDim, type TagParts, type TagRow, type TagRowResult, type TagRowsOptions,
-  type TagScoreConfig,
+  type TagScoreConfig, type TagSuggestion,
 } from './srctag';
 
 // ─── The rest-list pass ────────────────────────────────────────────────────
@@ -110,17 +110,25 @@ export interface RestPassSpec {
   aim: Partial<TagAimConfig> | false;
   /**
    * Pipeline the rows are scored with. The default `fusion` is `srctag`'s
-   * weighted channel sum; `rrf` is this module's 3-stage chain.
+   * weighted channel sum; `rrf` is this module's 3-stage chain, and `qarf` is
+   * the same chain fused with a weight that follows the row.
    */
-  pipeline?: 'fusion' | 'rrf';
-  /** BM25F knobs of the `rrf` pipeline. */
+  pipeline?: 'fusion' | 'rrf' | 'qarf';
+  /** BM25F knobs of the chain pipelines. */
   bm25?: Partial<Bm25Config> & { fields?: Record<string, number> };
-  /** Rank constant of the `rrf` fusion. */
+  /** Rank constant of the chain's fusion. */
   rrf?: Partial<RrfConfig>;
-  /** Sub-tag discovery knobs of the `rrf` pipeline. */
+  /** Sub-tag discovery knobs of the chain pipelines. */
   buckets?: Partial<BucketConfig>;
-  /** Pre-processing knobs of the `rrf` pipeline: the corpus frequency floor and the terms to drop. */
+  /** Pre-processing knobs of the chain pipelines: the corpus frequency floor and the terms to drop. */
   global?: Partial<GlobalConfig> & { exclude?: string[] };
+  /**
+   * The adaptive half of a `qarf` pass. `qarf.ts` imports this module for the
+   * chain mechanics, so the dependency cannot run the other way; the profile —
+   * the one caller that imports both — hands the weighting and the chain's entry
+   * point over here.
+   */
+  qarf?: QarfSpec;
   /**
    * Resolve the dynamic channels for a pass, given the priority tags it ended up
    * with. Only a caller that can reach the store supplies one; the scoring half
@@ -149,8 +157,9 @@ export async function runRestPass(
   /* The rrf pipeline reads its curated half off the rows only when they are
      topics; a provenance tag is the capture context, not one, and its terms are
      dropped from the evidence anyway. */
+  const chain = spec.pipeline === 'rrf' || spec.pipeline === 'qarf';
   const priorityTags = opts.priorityTags
-    ?? (pinTags.length > 0 ? pinTags : restPriorityTags(rows, spec.pipeline === 'rrf' ? isProvenanceTag : undefined));
+    ?? (pinTags.length > 0 ? pinTags : restPriorityTags(rows, chain ? isProvenanceTag : undefined));
   /* A dynamic adapter is a network call, so only a pass that asked for one makes
      it; the aim pass reads the same priority list the fusion did. */
   const dyn = spec.dyn ? await spec.dyn(priorityTags) : {};
@@ -171,11 +180,12 @@ export async function runRestPass(
     ...spec.global,
     ...(named.length > 0 ? { exclude: [...(spec.global?.exclude ?? []), ...named] } : {}),
   };
-  const reports = spec.pipeline === 'rrf'
-    ? await rrfTagReports(rows, {
-      ...shared, bm25: spec.bm25, rrf: spec.rrf, buckets: spec.buckets, global,
-    })
-    : await tagRowReports(rows, shared);
+  const chainOpts = { ...shared, bm25: spec.bm25, rrf: spec.rrf, buckets: spec.buckets, global };
+  const reports = spec.pipeline === 'qarf' && spec.qarf
+    ? await spec.qarf.tag(rows, chainOpts, spec.qarf)
+    : spec.pipeline === 'rrf'
+      ? await rrfTagReports(rows, chainOpts)
+      : await tagRowReports(rows, shared);
   return ownTagLess(rows, reports);
 }
 
@@ -677,20 +687,26 @@ function countTerms(tokens: string[]): Map<string, number> {
  * @param min occurrences a term needs inside its own class
  * @param top most themes one class mints
  * @param skip term that is already the class's own anchor
+ * @param graphScale multiplier on the `graph` weight, one per class
  * @returns one theme list per class, in the order given
  */
 export function discoverThemes(
   pooled: string[][], buckets: Partial<BucketConfig>, min: number, top: number, skip: string[] = [],
+  graphScale: number[] = [],
 ): string[][] {
   const cfg = { ...DEFAULT_BUCKETS, ...buckets };
   const scores = cTfIdf(pooled);
   return pooled.map((tokens, i) => {
     const counts = countTerms(tokens);
-    const rank = cfg.graph > 0 ? textRank(tokens, { minLength: 2 }) : {};
+    /* A burst of rare tokens leans on the class statistic and a burst of common
+       ones on its own walk, so the share is one number per burst; 1 leaves
+       `graph` exactly as the profile sets it. */
+    const graph = cfg.graph * (graphScale[i] ?? 1);
+    const rank = graph > 0 ? textRank(tokens, { minLength: 2 }) : {};
     const candidates: { item: string; score: number }[] = [];
     for (const [term, n] of counts) {
       if (n < min || term === skip[i]) continue;
-      candidates.push({ item: term, score: (scores[i][term] ?? 0) * (1 + cfg.graph * (rank[term] ?? 0)) });
+      candidates.push({ item: term, score: (scores[i][term] ?? 0) * (1 + graph * (rank[term] ?? 0)) });
     }
     candidates.sort((a, b) => b.score - a.score || a.item.localeCompare(b.item));
     return mmrSelect(candidates, top, cfg.lambda, termSimilarity);
@@ -732,11 +748,54 @@ export interface RrfRowsOptions extends TagRowsOptions {
   global?: Partial<GlobalConfig> & { exclude?: string[] };
 }
 
+/** Channels the chain builds a ranked list for, and so the channels a blend can move. */
+export type FusionChannel = 'bm25' | 'textRank' | 'clusterRank' | 'priority' | 'suggest' | 'embed';
+
 /** One ranked list feeding the fusion, with the channel its contribution is reported under. */
-interface RrfList {
-  channel: keyof TagParts;
+export interface RrfList {
+  channel: FusionChannel;
   terms: string[];
   weight: number;
+}
+
+/**
+ * Weights one row's fusion runs with, and the adaptive share that produced them.
+ *
+ * The share travels with the weights rather than being recomputed by whoever
+ * reads the result: a graph or a panel shows what the pass actually did, and
+ * cannot drift from it.
+ */
+export interface RowWeights {
+  weights: TagScoreConfig;
+  /** Lexical share the row was fused with; absent when nothing adapted. */
+  lambda?: number;
+}
+
+/**
+ * Weights one row's fusion runs with, given the channels its lists carry.
+ *
+ * @param cfg the pass's normalized weights
+ * @param channels channels of the lists that held terms
+ * @returns the weights to fuse this row with, and the share behind them
+ */
+export type WeightBlend = (cfg: TagScoreConfig, channels: FusionChannel[]) => RowWeights;
+
+/**
+ * How a query-adaptive pass moves the chain: per-row weights, and per-burst
+ * themes. Both hooks are optional, and a pass that leaves one out is the chain's
+ * own reading.
+ */
+export interface AdaptiveFusion {
+  /** Per-row weights, by the row's index in the working set it is scored in. */
+  blend?: (docs: string[][]) => (index: number) => WeightBlend | undefined;
+  /** Multiplier on the theme stage's `graph` weight, one per burst. */
+  burst?: (pooled: string[][]) => number[];
+}
+
+/** The adaptive half of a `qarf` pass, resolved by the caller that can import `qarf.ts`. */
+export interface QarfSpec extends AdaptiveFusion {
+  /** Score a working set through the adaptive chain. */
+  tag: (rows: TagRow[], opts: RrfRowsOptions, adaptive: AdaptiveFusion) => Promise<RowTagReport[]>;
 }
 
 /**
@@ -762,6 +821,48 @@ export function rrfExplainCfg(cfg: TagScoreConfig, enabled: (keyof TagParts)[], 
   return out;
 }
 
+/**
+ * Fuse one row's ranked lists into scored candidates.
+ *
+ * Ranks, not scores, are what get combined, so a BM25F weight and an embedding
+ * cosine need no calibration to be fused. A term absent from a list contributes
+ * nothing from it, so a term several lists agree on outranks one that tops a
+ * single list.
+ *
+ * @param lists the row's lists, in the order the channels were built
+ * @param cfg the pass's normalized weights
+ * @param k rank constant
+ * @param blend the row's own weights; omitted fuses every row with `cfg`
+ * @returns the row's candidates best first, the weights they were fused with,
+ *   and the adaptive share when one applied
+ */
+export function fuseLists(
+  lists: RrfList[], cfg: TagScoreConfig, k: number, blend?: WeightBlend,
+): { suggestions: TagSuggestion[]; weights: TagScoreConfig; lambda?: number } {
+  const active = lists.filter(l => l.terms.length > 0);
+  const blended = blend?.(cfg, active.map(l => l.channel));
+  const weights = blended?.weights ?? cfg;
+  const ranks = rankMaps(active.map(l => l.terms), k);
+  /* Ranked before cutting: `rankTags` reads its input in score order and keeps
+     the survivors in that order, which is what makes the first suggestion the
+     one a sub-tag is anchored to. */
+  const suggestions = [...new Set(active.flatMap(l => l.terms))].map((tag) => {
+    const parts: TagParts = {
+      tfidf: 0, bm25: 0, embed: 0, textRank: 0, clusterRank: 0, priority: 0, keyword: 0, suggest: 0,
+      group: 0,
+    };
+    let score = 0;
+    active.forEach((list, li) => {
+      const value = ranks[li].get(tag);
+      if (value === undefined) return;
+      parts[list.channel] = value;
+      score += weights[list.channel] * value;
+    });
+    return { tag, score, parts };
+  }).sort((a, b) => b.score - a.score || a.tag.localeCompare(b.tag));
+  return { suggestions, weights, ...(blended?.lambda === undefined ? {} : { lambda: blended.lambda }) };
+}
+
 /** A promoted theme's channel breakdown: nothing but the rows that proposed it. */
 const themeParts = (n: number): TagParts => ({
   tfidf: 0, bm25: 0, embed: 0, textRank: 0, clusterRank: 0, priority: 0, keyword: 0, suggest: 0,
@@ -777,12 +878,15 @@ const provenanceTerms = (row: TagRow): string[] =>
  *
  * @param rows the working set, already one bucket's worth
  * @param opts channels and the three stages' knobs
- * @param explainCfg the weights this run explains its suggestions with
+ * @param weight the weights the fusion is run with
+ * @param cfg the weights this run explains its suggestions with
+ * @param drop the terms no channel may propose
+ * @param adaptive per-row weights, for a pass whose fusion weight follows the row
  * @returns one result per scored row, in the working set's order
  */
 async function rrfRowsInSet(
   rows: TagRow[], opts: RrfRowsOptions, weight: TagScoreConfig, cfg: TagScoreConfig,
-  drop: Set<string>,
+  drop: Set<string>, adaptive?: AdaptiveFusion,
 ): Promise<TagRowResult[]> {
   const k = opts.rrf?.k ?? DEFAULT_RRF.k;
   const bm25Cfg: Bm25Config = {
@@ -859,6 +963,8 @@ async function rrfRowsInSet(
     termVecs = new Map(terms.map((t, i) => [t, vecs[texts.length + i] ?? []]));
   }
 
+  const blend = adaptive?.blend?.(docs);
+
   const results: TagRowResult[] = [];
   for (let n = 0; n < kept.length; n++) {
     const i = kept[n];
@@ -902,33 +1008,17 @@ async function rrfRowsInSet(
       lists.push({ channel: 'embed', terms: ranked, weight: weight.embed });
     }
 
-    const active = lists.filter(l => l.terms.length > 0);
-    const ranks = rankMaps(active.map(l => l.terms), k);
-    /* Ranked before cutting: `rankTags` reads its input in score order and keeps
-       the survivors in that order, which is what makes the first suggestion the
-       one a sub-tag is anchored to. */
-    const scored = [...new Set(active.flatMap(l => l.terms))].map((tag) => {
-      const parts: TagParts = {
-        tfidf: 0, bm25: 0, embed: 0, textRank: 0, clusterRank: 0, priority: 0, keyword: 0, suggest: 0,
-        group: 0,
-      };
-      let score = 0;
-      active.forEach((list, li) => {
-        const value = ranks[li].get(tag);
-        if (value === undefined) return;
-        parts[list.channel] = value;
-        score += cfg[list.channel] * value;
-      });
-      return { tag, score, parts };
-    }).sort((a, b) => b.score - a.score || a.tag.localeCompare(b.tag));
+    const { suggestions: scored, weights, lambda } = fuseLists(lists, cfg, k, blend?.(i));
 
     results.push({
       row,
-      suggestions: rankTags(scored, cfg),
+      suggestions: rankTags(scored, weights),
       window: win,
       dim: windowCfg.dim,
       cluster: clusterOf.get(i) ?? 0,
       keywords: keywords[n],
+      ...(weights === cfg ? {} : { weights }),
+      ...(lambda === undefined ? {} : { qarf: lambda }),
     });
   }
   return results;
@@ -952,6 +1042,7 @@ async function rrfRowsInSet(
  * @param aim aim overrides; `aimMin` is clamped up to the run's own cut-off
  * @param buckets discovery knobs
  * @param minScore the run's `minScore`
+ * @param burstScale multiplier on the theme stage's `graph` weight, one per burst
  * @returns new results carrying the focused lists and the promoted sub-tags
  */
 export function applyRrfBuckets(
@@ -959,6 +1050,7 @@ export function applyRrfBuckets(
   aim: Partial<TagAimConfig> = {},
   buckets: Partial<BucketConfig> = {},
   minScore = 0,
+  burstScale?: (pooled: string[][]) => number[],
 ): TagRowResult[] {
   const cfg = { ...DEFAULT_TAG_AIM, ...aim };
   const cut = Math.max(cfg.aimMin, minScore);
@@ -988,8 +1080,9 @@ export function applyRrfBuckets(
   });
 
   const list = [...groups.values()];
-  const themes = discoverThemes(list.map(g => g.pooled), buckets, cfg.promoteMin, cfg.promoteTop,
-    list.map(g => g.anchor));
+  const pooled = list.map(g => g.pooled);
+  const themes = discoverThemes(pooled, buckets, cfg.promoteMin, cfg.promoteTop,
+    list.map(g => g.anchor), burstScale?.(pooled) ?? []);
   list.forEach((group, gi) => {
     const counts = countTerms(group.pooled);
     for (const i of group.members) {
@@ -1061,19 +1154,22 @@ function rrfSettings(opts: RrfRowsOptions): {
  *
  * @param rows rows to score, in any order
  * @param opts channels and the three stages' knobs
+ * @param adaptive per-row weights, for a pass whose fusion weight follows the row
  * @returns one result per scored row, in the working set's order
  */
-export async function rrfTagRows(rows: TagRow[], opts: RrfRowsOptions = {}): Promise<TagRowResult[]> {
+export async function rrfTagRows(
+  rows: TagRow[], opts: RrfRowsOptions = {}, adaptive?: AdaptiveFusion,
+): Promise<TagRowResult[]> {
   const { weight, cfg, global } = rrfSettings(opts);
   const drop = excludedTerms(rows, opts, global);
   if (opts.bucket === 'domain') {
     const out: TagRowResult[] = [];
     for (const bucket of domainBuckets(rows).values()) {
-      out.push(...await rrfRowsInSet(bucket, { ...opts, bucket: undefined }, weight, cfg, drop));
+      out.push(...await rrfRowsInSet(bucket, { ...opts, bucket: undefined }, weight, cfg, drop, adaptive));
     }
     return out;
   }
-  return rrfRowsInSet(rows, opts, weight, cfg, drop);
+  return rrfRowsInSet(rows, opts, weight, cfg, drop, adaptive);
 }
 
 /** Rows grouped by the hostname they were saved from, first-appearance order. */
@@ -1108,15 +1204,20 @@ function hostOf(row: TagRow): string {
  *
  * @param rows rows to score, in any order
  * @param opts channels and configuration
+ * @param adaptive per-row weights and per-burst themes, for a query-adaptive pass
  * @returns one report per scored row, in the working set's order
  */
-export async function rrfTagReports(rows: TagRow[], opts: RrfRowsOptions = {}): Promise<RowTagReport[]> {
+export async function rrfTagReports(
+  rows: TagRow[], opts: RrfRowsOptions = {}, adaptive?: AdaptiveFusion,
+): Promise<RowTagReport[]> {
   const dim = opts.window?.dim ?? 'tid';
   const { weight, cfg, priority } = rrfSettings(opts);
-  const scored = await rrfTagRows(rows, opts);
+  const scored = await rrfTagRows(rows, opts, adaptive);
   const results = opts.aim === undefined || opts.aim === false ? scored : applyRrfBuckets(scored, {
     ...opts.aim,
     priorityTags: opts.aim.priorityTags ?? priority,
-  }, opts.buckets, weight.minScore);
-  return results.map((r) => reportRowTags(r, cfg, dim));
+  }, opts.buckets, weight.minScore, adaptive?.burst);
+  /* A query-adaptive pass reads its rows with different shares, so a report is
+     explained with the weights that actually produced its score. */
+  return results.map((r) => reportRowTags(r, r.weights ?? cfg, dim));
 }

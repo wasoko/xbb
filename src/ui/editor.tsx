@@ -2,6 +2,7 @@
 
 // src/components/Chat.tsx
 import { useState, useEffect, useRef, useSyncExternalStore } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
 import * as li from 'lucide-react';
 import { toast } from 'sonner';
 import { db, DEL_TAG, daEdit, daRead, dropHistEntry, fileDiscardedCr, stampTime, type Da, type VerHist, treeCacOpts, treeCacCurrent } from '../sdb';
@@ -15,6 +16,7 @@ import {
   type ChatMessage, type SecretsConfig,
 } from '../recr';
 import { noticeStore } from './notice';
+import { DEFAULT_GATE_MD, GATE_REF, gateDocumentExists } from '../recrGate';
 import { RECR_TYPE } from '../recrConst';
 import { getSessionSource, listAllSessions, loadTreeFor } from '../sessionSource';
 import { G4_MODEL, G4_PIN, G4_PROVIDER } from '../sessionSourceG4';
@@ -36,7 +38,23 @@ import { useTabSyncState } from './tabSync';
 import { tabVisual, type TabSyncState } from './tabState';
 import { planPersist, reapplyBuffer } from './reapply';
 import { DiffTab } from './diffTab';
+import { feedDraft } from '../webfeedRows';
+import { isFeedRef } from '../wFeed';
 import { subscribeNav } from './navStore';
+
+/**
+ * The text a tab with no row yet opens with.
+ *
+ * A `*.feed.md` ref is a feed document, so it opens on the template that ref's kind starts
+ * from — schedule, the default source, and no read behind it — and the row is written only
+ * when the user saves it. Every other missing ref opens on the placeholder as before.
+ *
+ * @param ref - the tab's ref
+ * @returns the buffer to open the tab with
+ */
+const draftText = (ref: string): string => (isFeedRef(ref)
+  ? feedDraft(ref)
+  : `// ${ref}\n// New content`);
 
 interface ArtfactProps {
   openTabs: string[];
@@ -285,7 +303,7 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
         }
         if (!newContents[tab]) {
           const row = await daRead(tab);
-          newContents[tab] = row?.txt ?? `// ${tab}\n// New content`;
+          newContents[tab] = row?.txt ?? draftText(tab);
           fresh[tab] = newContents[tab];
           draftNext[tab] = !row;
           changed = true;
@@ -750,6 +768,8 @@ interface ChatProps {
   /** Focus one node, or null to follow the session head again. */
   onNodeChange: (nodeId: string | null) => void;
   onSwitchSession: (sessionId: string) => void;
+  /** Open `ref` in the editor pane, appending it to the open tabs. */
+  onOpenRef: (ref: string) => void;
   /** Whether the editor pane is beside the chat, so maximize has space to take. */
   canMaximize: boolean;
   /** Whether the chat already fills the pane. */
@@ -821,6 +841,11 @@ const MENU_ITEM: React.CSSProperties = {
   display: 'block', width: '100%', textAlign: 'left', background: 'transparent',
   border: 'none', color: 'inherit', cursor: 'pointer', padding: '3px 4px', fontSize: 12,
 };
+/** Bar the chat shows while `gate.md` is missing: amber, the hue the pinned avatar ring uses. */
+const GATE_WARN: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', fontSize: 11,
+  background: 'rgba(245, 158, 11, 0.15)', borderBottom: '1px solid rgba(245, 158, 11, 0.5)',
+};
 
 /** A fresh session id, in the shape `createBranchingSession` mints. */
 const newSessionId = (): string =>
@@ -839,7 +864,7 @@ async function newPinnedSession(): Promise<string> {
 }
 
 export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession
-  , canMaximize, chatMax, onChatMax }: ChatProps) {
+  , onOpenRef, canMaximize, chatMax, onChatMax }: ChatProps) {
   const [bubbles, setBubbles] = useState<Bubble[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState('');
@@ -858,6 +883,9 @@ export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession
   const [editing, setEditing] = useState<{ nodeId: string; text: string } | null>(null);
   /** Bumped when a turn ends, so the tree and the transcript are read again. */
   const [reloadAt, setReloadAt] = useState(0);
+  /** `gate.md` absent withholds every writing tool, so the pane offers to create it. The
+   *  live query follows the editor, which is the other place the row gets written. */
+  const gateMissing = useLiveQuery(() => gateDocumentExists().then(exists => !exists), [], false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -1036,6 +1064,16 @@ export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession
 
   const stop = () => abortRef.current?.abort();
 
+  /** Create `gate.md` with the default level and open it, so the user lands on the one line
+   *  that decides what the agent may write. The editor's own insert recipe, dirty so `greet`
+   *  pushes it like any other row. */
+  const openGate = async () => {
+    await db.das.put({ ref: GATE_REF, type: 'md', txt: DEFAULT_GATE_MD
+      , tags: ['md'], rec: {}, modAt: new Date() } as Da);
+    await greet(db.das);
+    onOpenRef(GATE_REF);
+  };
+
   return (
     <div className="chat-container">
       <div className="chat-header" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1057,6 +1095,18 @@ export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession
           <li.Rows2 size={13} />
         </button>
       </div>
+
+      {gateMissing && (
+        <div className="chat-gate-warn" style={GATE_WARN}>
+          <span style={{ flex: 1 }}>
+            {GATE_REF} missing — the agent can read rows but is offered no write or script tool.
+          </span>
+          <button style={{ ...CHIP_BTN, textDecoration: 'underline' }} onClick={() => void openGate()}
+            title={`create ${GATE_REF} at the default level and open it`}>
+            Open {GATE_REF}
+          </button>
+        </div>
+      )}
 
       {drawerOpen && (
         <SessionTreeDrawer tree={tree} focus={focus} busy={busy} onJump={id => onNodeChange(id)} />
@@ -1240,6 +1290,8 @@ interface EditorSplitPaneProps {
   onNodeChange: (nodeId: string | null) => void;
   onSwitchSession: (sessionId: string) => void;
   onTabChange: (activeTab: string, openTabs: string[]) => void;
+  /** Open `ref` in the editor pane, appending it to the open tabs. */
+  onOpenRef: (ref: string) => void;
 }
 
 /**
@@ -1247,7 +1299,7 @@ interface EditorSplitPaneProps {
  * entirely (chat at full height) while no tab is open or while the chat is maximized.
  */
 export function EditorSplitPane({ openTabs, activeTab, sessionId, nodeId
-  , onNodeChange, onSwitchSession, onTabChange }: EditorSplitPaneProps) {
+  , onNodeChange, onSwitchSession, onTabChange, onOpenRef }: EditorSplitPaneProps) {
   const [editorPct, setEditorPct] = useState(66);
   /** The chat has taken the whole pane until the normal button brings the editor back. */
   const [chatMax, setChatMax] = useState(false);
@@ -1309,6 +1361,7 @@ export function EditorSplitPane({ openTabs, activeTab, sessionId, nodeId
         <Chat sessionId={sessionId} nodeId={nodeId}
           onNodeChange={onNodeChange}
           onSwitchSession={onSwitchSession}
+          onOpenRef={onOpenRef}
           canMaximize={hasTabs} chatMax={chatMax} onChatMax={setChatMax} /></LocalErrorBoundary>
       </div>
     </div>

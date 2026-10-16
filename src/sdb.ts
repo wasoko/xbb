@@ -125,6 +125,15 @@ export class DDB extends Dexie {
 }
 export const db = new DDB(); 
 export const dbReady = db.open()
+
+/**
+ * `treeCac['restGrouper']` a fresh table opens on: the tag grouper that reads the
+ * rest list's rows with an adaptive fusion weight. Named here rather than at the
+ * call site so a caller that must run the same reading — a popup, an extension —
+ * picks it up without naming a grouper key of its own; see `ui/restGrouper.ts`.
+ */
+export const DEFAULT_REST_GROUPER = 'qarf';
+
 export const treeCac:{[key:string]: unknown} = {
   "devAgent": "this"+fc.userAgentStr(),
   "server": 'https://qhumewjpkzxaltwefqch.supabase.co',
@@ -137,9 +146,9 @@ export const treeCac:{[key:string]: unknown} = {
   'snap_pin': '',
   'tabSeer': 'cardtab',
   'cardSeer': 'cs1',
-  'restGrouper': 'rsdt',
+  'restGrouper': DEFAULT_REST_GROUPER,
   // CSS width every `.crop-scroll` window is capped to: the cs1 matches, the cs2 rows and the rest-tag chips.
-  'cropWidth': 'max(33.33%, 222px)',
+  'cropWidth': '22ch',
   // , "emb_model-HF":HF_OR[0]
 }
 export let treeCacOpts: Record<string, string[]> = {
@@ -147,8 +156,8 @@ export let treeCacOpts: Record<string, string[]> = {
   'cardSeer': ['cs1', 'cs2'],
   // `snap_pin` options are the recent CDN snapshots, cached here by the settings menu.
   'snap_pin': [],
-  // `rsdt`/`rsid`/`rsess`/`rstag`/`rstext`/`rsfreq`/`rstrank`/`rstt`/`rrf` are built in; `restGroupers/...` refs are appended from `db.das` at render.
-  'restGrouper': ['rsdt', 'rsid', 'rsess', 'rstag', 'rstext', 'rsfreq', 'rstrank', 'rstt', 'rrf', 'none'],
+  // `rsdt`/`rsid`/`rsess`/`rstag`/`rstext`/`rsfreq`/`rstrank`/`rstt`/`rrf`/`qarf` are built in; `restGroupers/...` refs are appended from `db.das` at render.
+  'restGrouper': ['rsdt', 'rsid', 'rsess', 'rstag', 'rstext', 'rsfreq', 'rstrank', 'rstt', 'rrf', 'qarf', 'none'],
   'cropWidth': ['max(33.33%, 222px)', 'max(33.33%, 155px)', '22ch', 'none'],
   'provider-model': ['Default'],
 };

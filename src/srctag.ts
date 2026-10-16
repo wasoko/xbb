@@ -174,6 +174,17 @@ export interface TagRowResult {
   cluster: number;
   /** Trie hits on the row's text, the evidence the keyword channel read. */
   keywords: KeywordMatch[];
+  /**
+   * Weights the row was fused with, when they are not the pass's own. A
+   * query-adaptive pass reads its rows with different channel shares, so a hover
+   * has to be explained with the weights that produced that row's score.
+   */
+  weights?: TagScoreConfig;
+  /**
+   * Lexical share the row was fused with, on a pass that adapts its weighting.
+   * A reading of the pass shows it; a run with a fixed weighting leaves it unset.
+   */
+  qarf?: number;
 }
 
 // ─── Defaults ──────────────────────────────────────────────────────────────
@@ -1927,6 +1938,12 @@ export interface RowTagReport {
   keywords: KeywordMatch[];
   /** Suggested tags, each with its channel breakdown. */
   tags: TagExplanation[];
+  /**
+   * Lexical share the pass fused this row with, on an adaptive pass such as
+   * `qarf`: what fraction of its channel weight the exact lexical lists carried.
+   * Absent on every fixed-weighting pass.
+   */
+  qarf?: number;
 }
 
 /**
@@ -1950,6 +1967,7 @@ export function reportRowTags(
     cluster: result.cluster,
     keywords: result.keywords,
     tags: result.suggestions.map((s) => explainTag(s, cfg)),
+    ...(result.qarf === undefined ? {} : { qarf: result.qarf }),
   };
 }
 

@@ -1,6 +1,6 @@
 # Filter read path
 
-`f` (filters csv) drives one reader: `useLiveQuery` -> `iqWithCrumbs` -> `iq`. `limit` decides how many matching rows are read; the `[del]` tombstone drop runs inside the query, so a page holds `limit` live rows and a short page means the table has no older ones. No view wires search; `iq` keeps its `search` argument (`src/sdb.ts:100`) for a future caller.
+`f` (filters csv) drives one reader: `useLiveQuery` -> `iqWithCrumbs` -> `iq`. `limit` decides how many matching rows are read; the `[del]` tombstone drop runs inside the query, so a page holds `limit` live rows and a short page means the table has no older ones. The one place a query reaches rows is the search box, and it reads the page rather than the query ([below](#the-search-box)); `iq` keeps its own `search` argument (`src/sdb.ts:100`) unused.
 
 ## Order of operations
 
@@ -23,19 +23,20 @@ Dexie applies a collection `filter()` before `limit()`, so the tombstone drop is
 
 ## View switch
 
-`treeCac['tabSeer']` selects the view, `treeCac['cardSeer']` the pin-row renderer, `treeCac['restGrouper']` how the rows below the pins are grouped (`src/sdb.ts:61-70`), and `treeCac['cropWidth']` how wide a cropped row may grow before it scrolls.
+`treeCac['tabSeer']` selects the view, `treeCac['cardSeer']` the pin-row renderer, `treeCac['restGrouper']` how the rows below the pins are grouped (`src/sdb.ts:133-137`), and `treeCac['cropWidth']` how wide a cropped row may grow before it scrolls.
 
 | Setting | Value | View |
 |---|---|---|
 | `tabSeer` | `'card'` | `BadCardTab` (`src/ui/tabs.tsx:41`), fixed 555-row window |
 | `tabSeer` | anything else | `CardTab` (`src/ui/cardTab.tsx`), window grows by page |
-| `cardSeer` | `'cs1'` | pin rows render `Cs1Renderer` (`src/ui/cs1.tsx`) |
+| `cardSeer` | `'cs1'` | pin rows render `Cs1Renderer` (`src/ui/cs1.tsx`): a heading's `#tag` buttons select the tag and its `{ref}` tokens open the row in the editor (a missing `*.feed.md` opens on its template, unpersisted), with a feed ref previewing the feed ([webfeed.md](../webfeed.md#the-pin-card-token-and-its-readout)) |
 | `cardSeer` | `'cs2'` | pin rows render the cropped preview row (`Cs2Renderer`) |
-| `restGrouper` | `'rsdt'` (default) | rest rows split into one block per exact `dt`, newest first (`src/ui/restGrouper.ts`) |
+| `restGrouper` | `'rsdt'` (the block-only default) | rest rows split into one block per exact `dt`, newest first (`src/ui/restGrouper.ts`) |
 | `restGrouper` | `'rsid'` | `rsdt` plus one visit-time subgroup per exact `rec.visitTime` inside each date block; rows without a visit time stay under the date heading |
 | `restGrouper` | `'rstag'` / `'rstext'` | the `rsdt` blocks unchanged, plus each row's `srctag` suggestions as dotted-outline chips in a cropped, scrollable strip (solid and italic for a promoted `parent/theme` sub-tag); hovering a chip names the channels that produced it and every scored row proposing it ([sTag.md](sTag.md#read-only-chips-restgrouper-rstag)) |
 | `restGrouper` | `'rsfreq'` / `'rstrank'` / `'rstt'` | the same blocks and chips scored by one channel family instead of the fused mix — TF-IDF, the two TextRank walks, or the TurboText trie — with the pin cards' `#tag` headings as the priority tags, the aim pass on, and a visualization switch plus hyperparameters above the blocks ([sTag.md](sTag.md#algorithm-groupers-rsfreq-rstrank-rstt)) |
 | `restGrouper` | `'rrf'` | the same blocks and chips scored by the 3-stage chain of `src/rstag.ts` — TurboText candidates, BM25F over the title and the row's tags, then a rank fusion of that with the semantic and TextRank lists — with the pin cards' headings as the priority tags, sub-tags discovered per burst by c-TF-IDF, and the URL plus any provenance tag or filter term dropped before scoring ([rstag.md](rstag.md)) |
+| `restGrouper` | `'qarf'` (what a fresh table opens on, `DEFAULT_REST_GROUPER`) | the same chain and the same blocks, fused with a weight that follows each row: a title of rare tokens leans on the lexical lists and a title of common words on the neighbour walks, off corpus IDF statistics the pass already has. `qarf α` 0 is `rrf` exactly ([rstag.md](rstag.md#the-adaptive-weight-qarf)) |
 | `restGrouper` | `'none'` or empty | rest rows render flat, without headings |
 | `restGrouper` | any other ref | the `type='src'` row of that ref returns the blocks; a block carries `items`, `subgroups`, or both. A missing row, a throwing body, or a result that is not an array of blocks falls back to flat |
 | `cropWidth` | any CSS width | the cap every `.crop-scroll` row scrolls past; default `max(33.33%, 222px)` |
@@ -89,6 +90,36 @@ Same call and same arguments at the same `limit`: CardTab never returns rows Bad
 
 Only crumbs are cached: `availableDas(tags)` keyed by `{f, s, t, l}` (`src/sdb.ts:210-215`); `iq` re-runs per prefix on every read (`:227`). Crumbs therefore inherit both the limit and the tombstone drop.
 
+## The search box
+
+The user bar's omnibox (`SearchOmnibox`, `src/ui/tap.tsx`) is the one query that reaches
+rows, and it does not go through `f`: it reads a page with no filter and no limit
+(`iq([])`) and filters it in JavaScript, so typing never re-runs a Dexie query and never
+touches the crumb cache. The match is one substring, lower-cased, against a row's `ref`
+**or** its `txt`, capped at 12 rows — so `ref` is reachable here, which `iq`'s own
+`search` argument (`txt` only) cannot do, and a multi-word query matches only where the
+whole phrase appears.
+
+The box shows three zones, in the order they are consulted:
+
+| Zone | When | Read from |
+|---|---|---|
+| matches | a query is typed (180 ms debounce) | the page above |
+| suggested | the box is focused and empty | `restTagStore.rank` — the last rest-list pass's own reports |
+| recent | the box is focused and empty, below the suggestions | `availableDas` over the page, top 5 |
+
+`Up`/`Down` move the highlight, `Enter` opens the highlighted row in the editor, `Escape`
+closes the list, and `Shift+Enter` tags only that row with the query. The `#<tags>` row
+tags every match, and a click on a suggested tag applies it to the rows that suggested
+it. Both are `src/ui/tagApply.ts`: add-only, written through `daEdit` so the `rec.ver`
+shelf survives, with the applied tags offered back as an undo toast. The query's tokens
+are the priority tags of that write (`tokenize`, capped at `MAX_QUERY_TAGS`), which is
+what keeps a long query from drowning each row's own terms.
+
+Focus also widens the bar: the box takes the toolbar's free width and its panel reaches
+the screen's left edge. The chrome, the drag handle and the settings rows around it are
+[ui.md](ui.md#the-bar-and-the-settings-rows)'s.
+
 ## Tagging (`src/srctag.ts`, `src/srctagRows.ts`)
 
 How a row's `tags[]` are scored and written is documented in [sTag.md](sTag.md), split by
@@ -119,9 +150,13 @@ The body follows `da.type`: `md` renders markdown (math deferred, below) inside
 Tailwind's preflight flattens; `src` shows the row through the editor pane's
 CodeMirror setup read-only, highlighted as JavaScript whenever the ref's suffix
 names no other grammar; every other type prints `txt || ref` as plain text, which
-is what a link row shows. The first line carries the sync ages, `tid: <n>` when the
-row has one, and the row's tags as chips colored by `getColorChar11` — the same
-color `cs1` gives that tag's button.
+is what a link row shows. A row may instead register a `kind` and get that kind's
+own body: the cs1 `{w.feed.md}` token renders the feed readout in place of the row,
+so the preview shows the schedule, the sources read and the stored items rather than
+the markdown of the document that holds them
+([webfeed.md](../webfeed.md#the-pin-card-token-and-its-readout)). The first line carries
+the sync ages, `tid: <n>` when the row has one, and the row's tags as chips colored
+by `getColorChar11` — the same color `cs1` gives that tag's button.
 
 The popover is placed flush under the row (`top: row.bottom - 1`) with its left
 edge on the list container's, so every row of one list previews in the same

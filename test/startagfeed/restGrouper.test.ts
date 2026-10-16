@@ -3,16 +3,17 @@
  */
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { db, treeCacOpts, type Da } from '../src/sdb';
+import { db, treeCac, treeCacOpts, type Da } from '../../src/sdb';
 import {
   groupByDt, groupByDtVisit, groupBySession, groupRest, isRestGrouperScript, isTagGrouper,
   restAim, restDynAdapters, restDynCapable, restGroupsFor, restHyperScore, restProfileMap,
   restTagContributors, restTagMap, restTagStore, restTextMap, restVizMode, RECR_CONFIG_LABEL,
+  DEFAULT_REST_GROUPER, QARF_GROUPER,
   REST_PROFILES, ROWS_ALL, RRF_GROUPER, RSDT_GROUPER, RSFREQ_GROUPER, RSSESS_GROUPER, RSTAG_GROUPER,
   RSTAG_LIMIT,
   RSTRANK_GROUPER, RSTEXT_GROUPER, RSTEXT_LIMIT, RSTT_GROUPER, UNDATED_LABEL,
-} from '../src/ui/restGrouper';
-import type { RowTagReport } from '../src/srctag';
+} from '../../src/ui/restGrouper';
+import type { RowTagReport } from '../../src/srctag';
 
 const T0 = Date.UTC(2026, 9, 5, 10, 0, 0);
 
@@ -486,7 +487,7 @@ describe('restTagContributors', () => {
   });
 });
 
-describe('the six tag groupers as profiles', () => {
+describe('the seven tag groupers as profiles', () => {
   const site = (tid: number, txt: string, url: string, tags: string[] = []): Da =>
     ({ tid, ref: url, txt, type: 'tab', dt: new Date(T0), tags, rec: { url } });
 
@@ -508,7 +509,7 @@ describe('the six tag groupers as profiles', () => {
   });
 
   it('defaults aim on for the algorithm groupers and off for the read paths', () => {
-    for (const grouper of [RSFREQ_GROUPER, RSTRANK_GROUPER, RSTT_GROUPER, RRF_GROUPER]) {
+    for (const grouper of [RSFREQ_GROUPER, RSTRANK_GROUPER, RSTT_GROUPER, RRF_GROUPER, QARF_GROUPER]) {
       expect(restAim(REST_PROFILES[grouper]), grouper).toEqual({});
     }
     expect(restAim(REST_PROFILES[RSTAG_GROUPER])).toBe(false);
@@ -518,21 +519,23 @@ describe('the six tag groupers as profiles', () => {
     expect(restAim(REST_PROFILES[RSTT_GROUPER], { aim: false })).toBe(false);
   });
 
-  it('starts every grouper on the chips reading, and rrf on its tag clusters', () => {
+  it('starts every grouper on the chips reading, and both chain groupers on their tag clusters', () => {
     for (const grouper of Object.keys(REST_PROFILES)) {
-      const start = grouper === RRF_GROUPER ? 'clusters' : 'chips';
+      const start = grouper === RRF_GROUPER || grouper === QARF_GROUPER ? 'clusters' : 'chips';
       expect(restVizMode(REST_PROFILES[grouper]), grouper).toBe(start);
     }
     expect(restVizMode(REST_PROFILES[RSTT_GROUPER], { viz: 'keywords' })).toBe('keywords');
     // the switch still reaches the tag layer of the chain
     expect(restVizMode(REST_PROFILES[RRF_GROUPER], { viz: 'chips' })).toBe('chips');
+    expect(restVizMode(REST_PROFILES[QARF_GROUPER], { viz: 'chips' })).toBe('chips');
   });
 
   it('offers the dyn flag only where a dynamic channel carries weight', () => {
     expect(restDynCapable(REST_PROFILES[RSTAG_GROUPER])).toBe(true);
-    // the semantic list of the rrf fusion is the embed channel, so its profile
-    // is the second one a `dyn` adapter can feed
+    // the semantic list of the chain is the embed channel, so both chain profiles
+    // are ones a `dyn` adapter can feed
     expect(restDynCapable(REST_PROFILES[RRF_GROUPER])).toBe(true);
+    expect(restDynCapable(REST_PROFILES[QARF_GROUPER])).toBe(true);
     for (const grouper of [RSTEXT_GROUPER, RSFREQ_GROUPER, RSTRANK_GROUPER, RSTT_GROUPER]) {
       expect(restDynCapable(REST_PROFILES[grouper]), grouper).toBe(false);
     }
@@ -683,5 +686,57 @@ describe('rrf grouper', () => {
     expect(plain.get(1)!.tags.map((t) => t.tag)).toContain('tabs');
     const filtered = await restProfileMap(rows, RRF_GROUPER, undefined, { pins, filters: ['f=tabs'] });
     expect(filtered.get(1)!.tags.map((t) => t.tag)).not.toContain('tabs');
+  });
+});
+
+describe('qarf grouper', () => {
+  const site = (tid: number, txt: string, url: string, tags: string[] = []): Da =>
+    ({ tid, ref: url, txt, type: 'tab', dt: new Date(T0), tags, rec: { url } });
+
+  const pin = (txt: string): Da =>
+    ({ tid: -1, ref: 'pin/demo.md', txt, type: 'md', tags: [], rec: {} });
+
+  /* One site's rows, five of them paraphrases of one topic and one carrying a
+     token only it holds: the two must not be read with the same channel split. */
+  const mixed = [1, 2, 3, 4].map((i) => site(i, 'react hooks guide', `https://react.dev/${i}`));
+  mixed.push(site(5, 'alphabetical psychrometry', 'https://react.dev/5'));
+  const pins = [pin('## reading #react')];
+
+  const scored = (map: Map<number, RowTagReport>) =>
+    [...map].flatMap(([tid, r]) => r.tags.map((t) => `${tid}:${t.tag}:${t.score}`));
+
+  it('resolves as a built-in whose blocks are exactly rsdt, and is what a fresh table opens on', () => {
+    const rows = [row(1, new Date(T0)), row(2, new Date(T0)), row(3, new Date(T0 + 1000))];
+    expect(isRestGrouperScript(QARF_GROUPER)).toBe(false);
+    expect(restGroupsFor(rows, QARF_GROUPER)).toEqual(groupByDt(rows));
+    expect(isTagGrouper(QARF_GROUPER)).toBe(true);
+    expect(REST_PROFILES[QARF_GROUPER].pipeline).toBe('qarf');
+    // the settings control offers it, so a user can select it without a script row
+    expect(treeCacOpts['restGrouper']).toContain(QARF_GROUPER);
+    // and no caller names a key of its own: the default is the one exported name
+    expect(DEFAULT_REST_GROUPER).toBe(QARF_GROUPER);
+    expect(treeCac['restGrouper']).toBe(DEFAULT_REST_GROUPER);
+  });
+
+  it('reads the same rows as rrf, exactly, at alpha 0', async () => {
+    const fixed = await restProfileMap(mixed, RRF_GROUPER, undefined, { pins });
+    const control = await restProfileMap(mixed, QARF_GROUPER, { qarf: { alpha: 0 } }, { pins });
+    expect([...control]).toEqual([...fixed]);
+  });
+
+  it('moves the shares once alpha is above 0', async () => {
+    const fixed = await restProfileMap(mixed, RRF_GROUPER, undefined, { pins });
+    const adaptive = await restProfileMap(mixed, QARF_GROUPER, { qarf: { alpha: 2 } }, { pins });
+    expect(scored(adaptive)).not.toEqual(scored(fixed));
+  });
+
+  it('keeps the chain reading: the tag clusters, and a sub-tag for the term the burst shares', async () => {
+    const map = await restProfileMap(mixed, QARF_GROUPER, { qarf: { alpha: 2 } }, { pins });
+    expect(restVizMode(REST_PROFILES[QARF_GROUPER])).toBe('clusters');
+    expect(map.get(1)!.dim).toBe('visitTime');
+    const channels = map.get(1)!.tags.flatMap((t) => t.channels.map((c) => c.channel));
+    expect(channels).toContain('bm25');
+    expect(channels).not.toContain('tfidf');
+    expect(map.get(1)!.tags[0].tag).toBe('react');
   });
 });

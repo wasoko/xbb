@@ -1,0 +1,164 @@
+{
+  "summary": "2/4 source(s) answered",
+  "findings": [
+    {
+      "source": "wallstreetcn",
+      "url": "https://wallstreetcn.com/live/global",
+      "strategy": "api",
+      "rows": 3,
+      "stoppedAt": null,
+      "notes": [],
+      "attempts": [
+        {
+          "source": "wallstreetcn",
+          "strategy": "api",
+          "url": "https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=30",
+          "delayMs": 0,
+          "ok": true,
+          "status": 200,
+          "bytes": 34799,
+          "ms": 4462,
+          "error": ""
+        }
+      ]
+    },
+    {
+      "source": "zhihu-fly51fly",
+      "url": "https://www.zhihu.com/people/fly51fly",
+      "strategy": null,
+      "rows": 0,
+      "stoppedAt": null,
+      "notes": [
+        "api: blocked: empty body",
+        "direct: HTTP 403",
+        "proxy: blocked: 安全验证"
+      ],
+      "attempts": [
+        {
+          "source": "zhihu-fly51fly",
+          "strategy": "api",
+          "url": "https://www.zhihu.com/api/v4/members/fly51fly/activities?limit=20",
+          "delayMs": 0,
+          "ok": false,
+          "status": 200,
+          "bytes": 12,
+          "ms": 161,
+          "error": "blocked: empty body"
+        },
+        {
+          "source": "zhihu-fly51fly",
+          "strategy": "direct",
+          "url": "https://www.zhihu.com/people/fly51fly",
+          "delayMs": 0,
+          "ok": false,
+          "status": 403,
+          "bytes": 584,
+          "ms": 79,
+          "error": "HTTP 403"
+        },
+        {
+          "source": "zhihu-fly51fly",
+          "strategy": "proxy",
+          "url": "https://r.jina.ai/https://www.zhihu.com/people/fly51fly",
+          "delayMs": 0,
+          "ok": false,
+          "status": 200,
+          "bytes": 549,
+          "ms": 6118,
+          "error": "blocked: 安全验证"
+        }
+      ]
+    },
+    {
+      "source": "sina-fly51fly",
+      "url": "https://www.sina.cn/media/1402400261",
+      "strategy": "direct",
+      "rows": 3,
+      "stoppedAt": null,
+      "notes": [],
+      "attempts": [
+        {
+          "source": "sina-fly51fly",
+          "strategy": "direct",
+          "url": "https://www.sina.cn/media/1402400261",
+          "delayMs": 0,
+          "ok": true,
+          "status": 200,
+          "bytes": 267301,
+          "ms": 697,
+          "error": ""
+        }
+      ]
+    },
+    {
+      "source": "weibo-fly51fly",
+      "url": "https://weibo.com/u/2337530130",
+      "strategy": null,
+      "rows": 0,
+      "stoppedAt": null,
+      "notes": [
+        "api: blocked: Sina Visitor System",
+        "direct: blocked: Sina Visitor System",
+        "mobile: blocked: Sina Visitor System",
+        "proxy: blocked: Sina Visitor System"
+      ],
+      "attempts": [
+        {
+          "source": "weibo-fly51fly",
+          "strategy": "api",
+          "url": "https://m.weibo.cn/api/container/getIndex?containerid=2304132337530130&page=1&count=20",
+          "delayMs": 0,
+          "ok": false,
+          "status": 200,
+          "bytes": 9422,
+          "ms": 669,
+          "error": "blocked: Sina Visitor System"
+        },
+        {
+          "source": "weibo-fly51fly",
+          "strategy": "cookied",
+          "url": "https://weibo.com/u/2337530130",
+          "delayMs": 0,
+          "ok": false,
+          "status": 0,
+          "bytes": 0,
+          "ms": 500,
+          "error": "Unexpected token '<', \"<!doctype \"... is not valid JSON"
+        },
+        {
+          "source": "weibo-fly51fly",
+          "strategy": "direct",
+          "url": "https://weibo.com/u/2337530130",
+          "delayMs": 0,
+          "ok": false,
+          "status": 200,
+          "bytes": 9110,
+          "ms": 347,
+          "error": "blocked: Sina Visitor System"
+        },
+        {
+          "source": "weibo-fly51fly",
+          "strategy": "mobile",
+          "url": "https://m.weibo.cn/u/2337530130",
+          "delayMs": 0,
+          "ok": false,
+          "status": 200,
+          "bytes": 9092,
+          "ms": 223,
+          "error": "blocked: Sina Visitor System"
+        },
+        {
+          "source": "weibo-fly51fly",
+          "strategy": "proxy",
+          "url": "https://r.jina.ai/https://weibo.com/u/2337530130",
+          "delayMs": 0,
+          "ok": false,
+          "status": 200,
+          "bytes": 272,
+          "ms": 1533,
+          "error": "blocked: Sina Visitor System"
+        }
+      ]
+    }
+  ]
+}

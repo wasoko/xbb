@@ -2,10 +2,11 @@
  * `Tip.tsx` — the one hover preview used by the card list.
  *
  * A row registers itself with {@link setTip} and the `data-tip` marker; the
- * popover picks its body from the row type: `md` renders markdown (math included)
- * under the `.tip-md` typography, `src` shows the row through the same CodeMirror
- * setup the editor pane uses, and anything else — a plain row, a `http(s)` ref —
- * prints its text.
+ * popover picks its body from what it was registered with: `md` renders markdown
+ * (math included) under the `.tip-md` typography, `src` shows the row through the
+ * same CodeMirror setup the editor pane uses, anything else — a plain row, a
+ * `http(s)` ref — prints its text, and a row registered with a `kind` renders that
+ * kind's own body instead of its row (`wfeed`, the `{w.feed.md}` token's readout).
  *
  * The whole list shares one popover and one pair of listeners, because a page
  * holds hundreds of rows. The popover sits flush under the row so the pointer can
@@ -22,12 +23,16 @@ import { oneDark } from '@codemirror/theme-one-dark';
 import { dtMs, fmtAgo, getColorChar11 } from '../fc';
 import type { Da } from '../sdb';
 import { hydrateMath, renderMd } from '../md';
+import { WFeedTip } from './WFeedTip';
 
 /** Marker attribute the delegated listener looks for. */
 export const TIP_ATTR = 'data-tip';
 
+/** A body that is not the row's own text: the feed readout of a `w.feed.md` ref. */
+export type TipKind = 'wfeed';
+
 /** Text per previewable element; a `WeakMap` so unmounted rows leave nothing behind. */
-const tipData = new WeakMap<Element, Da>();
+const tipData = new WeakMap<Element, { da: Da; kind?: TipKind }>();
 
 /**
  * Registers one row's preview. Call it from a `ref` callback; passing `null` on
@@ -35,9 +40,11 @@ const tipData = new WeakMap<Element, Da>();
  *
  * @param el - Element that should preview `da` on hover.
  * @param da - Row whose `type` chooses the body renderer.
+ * @param kind - Body to render instead of the row's own, for a ref whose doc has a
+ *   readout of its own.
  */
-export function setTip(el: Element | null, da: Da): void {
-  if (el) tipData.set(el, da);
+export function setTip(el: Element | null, da: Da, kind?: TipKind): void {
+  if (el) tipData.set(el, { da, kind });
 }
 
 /** Delay before a hover opens the popover, so a pointer crossing the list stays quiet. */
@@ -167,7 +174,7 @@ export function tipFittedLeft(left: number, panelRight: number, viewportWidth: n
  * @returns The wrapped list plus, while open, one portal popover.
  */
 export function TipHost({ children }: { children: React.ReactNode }) {
-  const [row, setRow] = useState<(TipAnchor & { da: Da }) | null>(null);
+  const [row, setRow] = useState<(TipAnchor & { da: Da; kind?: TipKind }) | null>(null);
   const openTimer = useRef<number | undefined>(undefined);
   const closeTimer = useRef<number | undefined>(undefined);
   const popover = useRef<HTMLDivElement | null>(null);
@@ -186,13 +193,13 @@ export function TipHost({ children }: { children: React.ReactNode }) {
   }, []);
 
   const open = useCallback((el: Element) => {
-    const da = tipData.get(el);
-    if (!da) return;
+    const held = tipData.get(el);
+    if (!held) return;
     window.clearTimeout(closeTimer.current);
     openTimer.current = window.setTimeout(() => {
       const rect = el.getBoundingClientRect();
       const boxLeft = list.current?.firstElementChild?.getBoundingClientRect().left ?? rect.left;
-      setRow({ da, ...tipAnchor(rect, boxLeft, window.innerWidth) });
+      setRow({ da: held.da, kind: held.kind, ...tipAnchor(rect, boxLeft, window.innerWidth) });
     }, HOVER_DELAY_MS);
   }, []);
 
@@ -211,7 +218,9 @@ export function TipHost({ children }: { children: React.ReactNode }) {
 
   /* Math fills in after the popover is on screen, so text paints first. */
   useEffect(() => {
-    if (row?.da.type === 'md' && popover.current) void hydrateMath(popover.current);
+    if (row?.kind === undefined && row?.da.type === 'md' && popover.current) {
+      void hydrateMath(popover.current);
+    }
   }, [row]);
 
   useEffect(() => {
@@ -237,6 +246,7 @@ export function TipHost({ children }: { children: React.ReactNode }) {
 
   const body = useMemo(() => {
     if (!row) return null;
+    if (row.kind === 'wfeed') return <WFeedTip feedRef={row.da.ref} />;
     if (row.da.type === 'md') {
       return <div className="tip-md" dangerouslySetInnerHTML={{ __html: cachedHtml(row.da.txt) }} />;
     }
@@ -257,6 +267,10 @@ export function TipHost({ children }: { children: React.ReactNode }) {
   }, [row]);
 
   const isSrc = row?.da.type === 'src';
+  /* A feed readout is three lines and a list of items, so it takes the room a source
+     body takes rather than the column a row's text is cropped to. */
+  const wide = row?.kind === 'wfeed';
+  const maxWidth = wide ? 'min(560px, 94vw)' : isSrc ? 'min(720px, 96vw)' : '44ch';
 
   return (
     <>
@@ -274,11 +288,11 @@ export function TipHost({ children }: { children: React.ReactNode }) {
             ...PANEL,
             left: row.left,
             top: row.top,
-            maxWidth: isSrc ? 'min(720px, 96vw)' : '44ch',
+            maxWidth,
             padding: '8px 10px',
           }}
         >
-          {tipHead(row.da)}
+          {row.kind === 'wfeed' ? null : tipHead(row.da)}
           <div style={{ maxHeight: '46vh', overflow: 'auto', minWidth: isSrc ? 420 : 0 }}>
             {body}
           </div>

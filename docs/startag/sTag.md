@@ -2,8 +2,9 @@
 
 `sTag` is the tag layer over `db.das`: what a row should be tagged with, which seams
 produce that evidence, and how a decision becomes a `tags[]` write. Moved here from
-`docs/filter_search.md`, which keeps the read path (`f` → `iq` → rows). The rest list's
-pass and its scoring pipeline are [rstag.md](rstag.md); this document owns the evidence
+`docs/startag/filter_search.md`, which keeps the read path (`f` → `iq` → rows). The rest
+list's pass and its scoring pipeline are [rstag.md](rstag.md); this document owns the
+evidence
 those read.
 
 Two methodologies produce the evidence, and they differ in cost and in who can add one:
@@ -211,7 +212,9 @@ reuses the older vectors until the table is cleared.
 `pinTags` reads the Markdown headings of one card, strips closing hashes, and keeps
 `#`-prefixed tokens that start a line or follow whitespace. The pattern's character class
 is `[\p{L}\p{N}_]`, so a hyphen **ends** a tag: `#machine-learning` yields `machine` and
-`learning` is left as text. `pinPriorityTags` concatenates the cards and de-duplicates
+`learning` is left as text. A `{ref}` token is not a tag and proposes none — the renderer
+draws it as the document it names ([webfeed.md](../webfeed.md#the-pin-card-token-and-its-readout)).
+`pinPriorityTags` concatenates the cards and de-duplicates
 globally, in first-appearance order. Which rows count as cards is the caller's choice —
 the app uses `type === 'md' && ref.startsWith('pin')`, the predicate in
 `src/ui/cardTab.tsx`.
@@ -288,7 +291,7 @@ and `srctagApi()` publishes `applyTagAim`, `summarizeTagAim`, `textHash` and
 `mapVectorCache` so a `type='src'` row can drive them.
 
 The defaults were measured on the live table on 2026-10-10 (1499 rows, one pin card, the
-`rstext`-style score, `tid` window) — see [the aim grid](test-artifacts/srctag-sweep.md):
+`rstext`-style score, `tid` window) — see [the aim grid](../../test-artifacts/srctag-sweep.md):
 
 | case | untagged | tags kept / row | rows with a sub-tag | distinct sub-tags |
 |---|---|---|---|---|
@@ -466,10 +469,13 @@ set`, is the comparison:
   because the classifier costs one request per row;
 - `AIM_CASES`, which read one scored table through the aim pass — off, then one knob at a
   time: `aimMin` 0.2 / 0.4 / 0.7, `promoteMin` 2 / 3 / 4;
-- `RRF_CASES`, which walk the `rrf` pipeline one stage knob at a time — BM25F's `k1`, `b`
+- `RRF_CASES`, which walk the chain one stage knob at a time — BM25F's `k1`, `b`
   and field weights, the fusion's `k`, the global-term floor, the bucket half's threshold
   and its two `λ`s, and each list switched off — over the newest `SRCTAG_RRF_LIMIT` (600)
   live rows, because a stage costs O(rows × candidates);
+- `QARF_CASES`, which walk the adaptive weight over that same 600 rows: `α` 0 to 4, the
+  clip at two widths, and the theme stage's own scale switched off, each with the λ
+  distribution the paper reads its two regimes off ([rstag.md](rstag.md#the-adaptive-weight-α-by-α));
 - a second grid over one *filtered* list, the rows carrying `suffix_GoogleSearch`
   (`FILTER_CASES`), which is the reading that shows what the URL and a provenance tag do
   to a list that repeats them on every row.
@@ -543,7 +549,8 @@ carrying it merges in.
 | rest-list chips (`rstag`) | `tagRowReports(rows)` via `ui/restGrouper.restProfileMap` (its profile), or `restTagMap` for the aim-free pass | `tid` |
 | rest-list chips (`rstext`) | the same, through its own profile | `visitTime`, bucketed by domain |
 | rest-list chips (`rsfreq`/`rstrank`/`rstt`) | the same, with the pin cards' `#tag` headings as the priority tags and the aim pass on | the tuner's window, `tid` by default |
-| rest-list chips (`rrf`) | the same, through a profile whose `pipeline` is `'rrf'`, scored by `src/rstag.ts` | `visitTime`, bucketed by domain |
+| rest-list chips (`rrf`) | the same, through a profile whose `pipeline` is `'rrf'`: the chain fused with the profile's fixed weights | `visitTime`, bucketed by domain |
+| rest-list chips (`qarf`) | the same, through the profile whose `pipeline` is `'qarf'`: the same chain, fused with a weight that follows each row, from `src/qarf.ts`. This is the stored default | `visitTime`, bucketed by domain |
 | rule comparison (`run_src`) | `run_src('srctag/suggest.js')` | all four, side by side |
 
 All of them are `tagRows` with defaults; `onlyTids`, `priorityTags`, `synonyms`, `embed`,
@@ -669,17 +676,18 @@ parseable keystroke, so a half-typed `0.` is not overwritten by the value it cam
 | `aimMin`, `promote ≥`, `themes ≤` | `TagAimConfig.aimMin` and `promoteMin` / `promoteTop`, shown while aim is on |
 | `dyn` | loads the store's `srctag/*` adapters into the pass; offered only where a dynamic channel carries weight (`restDynCapable`), which is `rstag` and `rrf` |
 | `window` | `tid`, `dt`, `visitTime`, or `domain` — the last is `visitTime` restricted to the row's own hostname, the reading `rstext` is fixed on |
-| `urls` | `TagRowsOptions.urls`: whether the row's `ref` and its Markdown links feed the token bag the trie and the graph walks read. The URL is out by default for `rrf`, and `w url` is the separate weight of its BM25F field |
+| `urls` | `TagRowsOptions.urls`: whether the row's `ref` and its Markdown links feed the token bag the trie and the graph walks read. The URL is out by default for the chain groupers, and `w url` is the separate weight of its BM25F field |
 | the profile's knobs | one weight per channel that family scores with |
 | `topK`, `min` | `TagScoreConfig.topK` and `minScore` |
-| `rows` | how many of the newest rows the pass scores. `rrf` ships it empty — the box reads `all` — and scores the whole window; a cleared box commits that back rather than a number |
+| `rows` | how many of the newest rows the pass scores. The chain groupers ship it empty — the box reads `all` — and score the whole window; a cleared box commits that back rather than a number |
 | `graph w`, `damp`, `iters`, `tol`, `minLen` | the `TextRankOptions` of both graph channels, on the groupers that use them |
 | `fuzz`, `overlap` | `TrieOptions.distance` and `overlap`, on `rstt` |
-| `k1`, `b`, `w title`/`w url`/`w tags` | `Bm25Config`: the term-frequency curve and the three field weights, on `rrf` |
-| `max df` | `GlobalConfig.maxDf`: the share of the rows a term may sit on before it is dropped as a corpus-wide one, on `rrf` |
+| `k1`, `b`, `w title`/`w url`/`w tags` | `Bm25Config`: the term-frequency curve and the three field weights, on the chain groupers |
+| `max df` | `GlobalConfig.maxDf`: the share of the rows a term may sit on before it is dropped as a corpus-wide one, on the chain groupers |
 | `stop` | `GlobalConfig.stop`: the function words dropped by name. It shows the shipped list, so a reader can see what is already gone before adding to it |
-| `rrf k` | `RrfConfig.k`, the fusion's rank constant, on `rrf` |
-| `mmr λ`, `graph λ` | `BucketConfig.lambda` and `graph`, shown while aim is on, on `rrf` |
+| `rrf k` | `RrfConfig.k`, the fusion's rank constant, on the chain groupers |
+| `qarf α` | `QarfConfig.alpha`, on `qarf`: how hard the fusion weight follows each row's own specificity. 0 is `rrf` exactly, and its two bounds (`floor`/`ceil`, no boxes) are what stop one row silencing a side |
+| `mmr λ`, `graph λ` | `BucketConfig.lambda` and `graph`, shown while aim is on, on the chain groupers |
 
 Every control and every reading carries its own hover text, held in `src/ui/restHelp.ts`
 as one line per control key, per channel, per reading, per window mode, and per grouper
@@ -689,18 +697,20 @@ what each choice reads. The strip names in place what the family on screen does 
 `vizCaveat` is why `keyword hits` says the trie only lifts a curated tag under every
 grouper except `rstt`, which is the one that weighs the hit itself. The division of
 decision between the two modules is deliberate — `restGrouper.ts` holds what a knob *is*,
-`restHelp.ts` holds how to say it — and `test/restHelp.test.ts` checks the prose against
-`REST_PROFILES` and the two mode lists, so a renamed ref or a new reading fails rather
-than drifting.
+`restHelp.ts` holds how to say it — and `test/startagfeed/restHelp.test.ts` checks the
+prose against `REST_PROFILES` and the two mode lists, so a renamed ref or a new reading
+fails rather than drifting.
 
 The window switch is the whole difference between `rstrank` and `rstext`: the same
 channels, read against different evidence; `graph w` is the TextRank co-occurrence window,
-which is a different knob from the neighbour window `window` selects. `test/restGrouper.test.ts`
+which is a different knob from the neighbour window `window` selects.
+`test/startagfeed/restGrouper.test.ts`
 covers the fold (a knob the profile does not expose is left alone), the profiles
 reproducing the two read-path passes, the aim defaults and the `dyn` gate, the trie
 carrying a `rstt` row, the pin-card priority tags and their fallback, the URL toggle both
 ways, a `minLen` floor that takes a token out of the graph, and the window switch — the
-last on titles, because the URLs it once read are off. `test/restHelp.test.ts` covers the
+last on titles, because the URLs it once read are off. `test/startagfeed/restHelp.test.ts`
+covers the
 hover text: one line per grouper, reading, window mode and channel, and the `keywords`
 caveat only where the family leaves the `keyword` weight off.
 
@@ -738,7 +748,7 @@ only the tags more than one row kept and reports the remainder as `+ N kept by a
 row`; what thins the drawn bars is `topK`, `stop` and `max df`
 ([why](rstag.md#why-the-priority-reading-looks-flooded)). `priorityCoverage` returns the
 map beside the bars rather than on them, because the bars' own fields are asserted
-wholesale in `test/restVizData.test.ts`.
+wholesale in `test/startagfeed/restVizData.test.ts`.
 
 The `rstag` panel also carries the `dyn` flag's status: which adapters the store held, the
 `AdapterSet.errors` lines for the ones it did not, and the vector cache's `primed` and
@@ -757,6 +767,13 @@ the blocks `tagClusters` returned, so the rest list reads as a tag index of the 
   next; the first block opens the list and carries none.
 - The per-row chip strip is off inside a tagged block, because the head already is that
   row's tag.
+- The head line carries the cluster and not only its key: beside the head are the other tags
+  its own rows kept, most rows first, in the same chip box — a promoted `parent/theme` reads
+  as its theme, italic, the mark the per-row strip gives it. A tag fewer than two rows of
+  the cluster keep is dropped, because one row's reading is not the cluster's, and a wide
+  cluster draws the first six and counts the rest, so the rows the head opens still start on
+  its line. This is where a `#risk` block says it holds `#quant`, or a `#deepseek` block the
+  `#harness` its rows keep.
 - A tag fewer than three rows keep is not a cluster, so its rows keep their own chip strip
   in the `(tags kept by 1-2 rows)` block — the rule the panel's bars already draw by. A
   curated tag is a head however few rows it reaches, because the pin card named it.
@@ -769,37 +786,43 @@ the blocks `tagClusters` returned, so the rest list reads as a tag index of the 
 
 `tagClusters` files a row under the highest-scored tag the priority half carried, or under
 its top-ranked tag otherwise, so a row appears once however many tags it kept; the panel's
-counts above and the heads below are over the same pass. `tagTopExplanations` is what backs
-a head's hover text: the highest-scored explanation of each tag, with the report that
-carried it, which is the dimension and window `explainTag` prints the channels against.
+counts above and the heads below are over the same pass. The other tags its rows kept are
+counted per head for that head line, a row counting once per label whether it carried a
+word or the `parent/theme` the pass minted for its burst — which is what lets
+`tagClusters` read a cluster rather than a tag with rows under it. `tagTopExplanations` is
+what backs a head's hover text: the highest-scored explanation of each tag, with the report
+that carried it, which is the dimension and window `explainTag` prints the channels against.
 `rrf` is the profile that starts here, and the reading is why its `rows` box ships empty: a
 cluster is a statement about the whole window, so the tuner renders `ROWS_ALL` as an empty
 box with an `all` placeholder rather than as a number. On a table of mostly-distinct titles
 most tags are kept by one or two rows, so the threshold is what keeps the list a cluster
 list rather than a tag per row.
 
-## The `rrf` grouper (3-stage pipeline)
+## The `rrf` / `qarf` groupers (the 3-stage chain)
 
-`rrf` is the one grouper that changes pipeline rather than channel weights: candidates from
-an exact matcher, ranked by BM25F, fused by rank rather than by score, then expanded per
-burst — the classical hybrid, since an exact matcher is a recall layer and not a ranking
-one. A pre-processing step in front of the ranking stage removes the terms that look like
-evidence and are not; it reads the same idea as [keyword search](search.md)'s own
-pre-processing.
+`rrf` and `qarf` are the groupers that change pipeline rather than channel weights:
+candidates from an exact matcher, ranked by BM25F, fused by rank rather than by score, then
+expanded per burst — the classical hybrid, since an exact matcher is a recall layer and not
+a ranking one. They differ in what the fusion weighs: `rrf` uses the profile's fixed
+channel split, `qarf` a weight each row's own specificity sets, and `qarf α` 0 takes the
+first back to the second. A pre-processing step in front of the ranking stage removes the
+terms that look like evidence and are not; it reads the same idea as the
+[search box](filter_search.md#the-search-box)'s own matching.
 
 The pass machinery lives outside the UI layer. `src/rstag.ts` owns `runRestPass`,
-`restTagMap`, `restTextMap`, the caps and `RestPassSpec`; `src/ui/restGrouper.ts` keeps the
+`restTagMap`, `restTextMap`, the caps, `RestPassSpec` and the chain's stages; `src/qarf.ts`
+owns the adaptive weight and imports the chain from it; `src/ui/restGrouper.ts` keeps the
 profiles, the tuner's overrides and the `srctag/*` adapters, reaching the engine through
-the spec and its `dyn` hook. The dependency runs one way
-(`ui/restGrouper → rstag → srctag`), which is what lets the engine be tested without Dexie
-and lets the same pass run from a script later.
+the spec, its `dyn` hook and its `qarf` hook. The dependency runs one way
+(`ui/restGrouper → qarf → rstag → srctag`), which is what lets the engine be tested without
+Dexie and lets the same pass run from a script later.
 
 [rstag.md](rstag.md) owns the rest — the pass and its six steps, the four pre-processing
 rules and why they drop terms from the inputs rather than filter the result, what each
 stage knobs, which knobs actually move a reading, the measurements they were chosen from,
-the plan for `rrf` replacing the weighted sum, and the risks that came out of building it.
-The tuner strip's `k1`, `b`, `w title` / `w url` / `w tags`, `max df`, `stop`, `rrf k` and
-`mmr λ` / `graph λ` rows are that pipeline's controls.
+the plan for the chain replacing the weighted sum, and the risks that came out of building
+it. The tuner strip's `k1`, `b`, `w title` / `w url` / `w tags`, `max df`, `stop`, `rrf k`,
+`qarf α` and `mmr λ` / `graph λ` rows are that pipeline's controls.
 
 ## Review notes
 
@@ -875,9 +898,14 @@ Findings from moving and re-reading this material, worth knowing before changing
 
 ## Related
 
-- `docs/rstag.md` — the rest-list pass, the `rrf` pipeline, its knobs, measurements and
-  risks.
-- `docs/filter_search.md` — the read path these tags feed.
+- `docs/startag/ui.md` — the readings the chips sit beside: the sea, the `pinReach` bands
+  and the disc, and the bar a reader tags from.
+- `docs/startag/rstag.md` — the rest-list pass, the 3-stage chain and the adaptive weight,
+  their knobs, measurements and risks.
+- `docs/webfeed.md` — the feeds a `webfeed.md` row declares, and the `tid`-less rows they
+  hand to `tagRows`.
+- `docs/startag/filter_search.md` — the read path these tags feed.
 - `docs/recr-agloop.md` — `run_src`, the `rwr` gate, and `secret.md`.
-- `src/srctag.ts`, `src/rstag.ts`, `src/srctagRows.ts`, `src/runsrc.ts`,
+- `src/srctag.ts`, `src/rstag.ts`, `src/qarf.ts`, `src/srctagRows.ts`, `src/runsrc.ts`,
+  `src/webfeed.ts`, `src/webfeedRows.ts`,
   `src/ui/restGrouper.ts`, `src/ui/restHelp.ts`, `src/ui/tagApply.ts`.

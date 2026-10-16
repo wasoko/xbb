@@ -4,26 +4,61 @@ import ReactDOM from 'react-dom/client';
 import * as li from 'lucide-react'
 import { createHashRouter, RouterProvider, Outlet, useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { NavBar, UserBar } from './tap';
+import { SeaView } from './SeaView';
 import {VbCard} from './tabs';
 import { ErrorBoundaryOutlet, LocalErrorBoundary } from './ErrorBoundaryOutlet';
 import { FilterBar } from './FilterBar';
+import { restGraphOpen } from './restGraphWindow';
 import { Toaster } from 'sonner';
 import { installSrctagGlobal } from '../srctag';
+import { installWebfeedGlobal } from '../webfeed';
 import { registerG4Source } from '../sessionSourceG4';
+
+/**
+ * The page's own chrome. The rest list's wide view is this same page opened for the
+ * graph, so it drops the nav, the user bar and the filter bar rather than showing
+ * them beside the list and the graph.
+ *
+ * The sea is the backdrop the app floats on. The sea's own route is the one that
+ * leaves nothing over it, so that route is also the one that hands it the pointer and
+ * the one where its readouts belong; the wide view is opened to read a list and a graph
+ * together and drops the backdrop the way it drops the bars.
+ *
+ * @returns The app shell.
+ */
+function AppShell() {
+  const [search] = useSearchParams();
+  const { pathname } = useLocation();
+  const wide = restGraphOpen(search);
+  const overSea = pathname === '/';
+  return (
+    <div className="app-root">
+      {!wide && (
+        <LocalErrorBoundary>
+          <SeaView foreground={overSea} />
+        </LocalErrorBoundary>
+      )}
+      <div className="content" style={overSea ? { pointerEvents: 'none' } : undefined}>
+        <Outlet />
+      </div>
+      {!wide && (
+        <>
+          <LocalErrorBoundary>
+            <NavBar /> <UserBar />
+          </LocalErrorBoundary>
+          <LocalErrorBoundary>
+            <FilterBar tidLoc={null} />
+          </LocalErrorBoundary>
+        </>
+      )}
+    </div>
+  );
+}
 
 const router = createHashRouter([
   {
     path: '/',
-    element: 
-      <div className="app-root">
-        <div className="content">
-        <Outlet />
-        </div> <LocalErrorBoundary>
-        <NavBar /> <UserBar />  </LocalErrorBoundary> <LocalErrorBoundary>
-        <FilterBar 
-          tidLoc={null}
-        /> </LocalErrorBoundary>        
-      </div>,
+    element: <AppShell />,
     children: [
       { index: true, element: null, },
       { path: 'tabs',element: <VbCard />, errorElement: <ErrorBoundaryOutlet /> },
@@ -60,6 +95,9 @@ const router = createHashRouter([
 // A `type='src'` row cannot import this bundle: `runsrc` evaluates it from a `data:` URL,
 // which has no base for a relative specifier. The global is how a `run_src` row reaches it.
 installSrctagGlobal();
+
+// Same reason: `webfeed/extract.js` reads the feed document through this global.
+installWebfeedGlobal();
 
 // A source that is never registered is invisible to the session picker.
 registerG4Source();

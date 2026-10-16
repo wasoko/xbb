@@ -1,6 +1,7 @@
 // src/ui/restTuner.tsx
 import React, { useState } from 'react';
 import { DEFAULT_BM25, DEFAULT_BUCKETS, DEFAULT_GLOBAL, DEFAULT_RRF } from '../rstag';
+import { DEFAULT_QARF } from '../qarf';
 import { DEFAULT_TAG_AIM, DEFAULT_TEXTRANK, DEFAULT_TRIE, TAG_CHANNEL_LABEL } from '../srctag';
 import {
   REST_PROFILES, REST_VIZ_MODES, REST_WINDOW_MODES, ROWS_ALL, restAim, restDynCapable, restHyperScore,
@@ -176,6 +177,7 @@ export function RestTuner({ grouper, hyper, onChange }: RestTunerProps) {
     fields: { ...DEFAULT_BM25.fields, ...profile.bm25?.fields, ...hyper?.bm25?.fields },
   };
   const rrf = { ...DEFAULT_RRF, ...profile.rrf, ...hyper?.rrf };
+  const qarf = { ...DEFAULT_QARF, ...profile.qarf, ...hyper?.qarf };
   const buckets = { ...DEFAULT_BUCKETS, ...profile.buckets, ...hyper?.buckets };
   const global = { ...DEFAULT_GLOBAL, ...profile.global, ...hyper?.global };
   const mode = hyper?.mode ?? profile.mode;
@@ -282,6 +284,10 @@ export function RestTuner({ grouper, hyper, onChange }: RestTunerProps) {
       {(profile.rrf || hyper?.rrf) && (
         <Num label="rrf k" value={rrf.k} help={TUNER_HELP.rrfK}
           onCommit={(n) => patch({ rrf: { ...hyper?.rrf, k: Math.max(1, Math.round(n)) } })} />
+      )}
+      {(profile.qarf || hyper?.qarf) && (
+        <Num label="qarf α" value={qarf.alpha} help={TUNER_HELP.qarfAlpha}
+          onCommit={(n) => patch({ qarf: { ...hyper?.qarf, alpha: Math.max(0, n) } })} />
       )}
       {aim && (profile.buckets || hyper?.buckets) && (
         <>

@@ -20,7 +20,7 @@
 import type { Da } from '../sdb';
 import { DEFAULT_TAG_AIM, TAG_CHANNEL_LABEL, normalizeText } from '../srctag';
 import type { RowTagReport, TagExplanation, TagParts } from '../srctag';
-import type { RestGroup, RestVizMode } from './restGrouper';
+import type { RestGroup, RestSubTag, RestVizMode } from './restGrouper';
 
 /** One report per scored row, keyed by `tid`; the pass's own return type. */
 export type VizReports = Map<number, RowTagReport>;
@@ -51,6 +51,21 @@ export const VIZ_UNCLUSTERED_LABEL = '(no suggestion)';
  * because a pin card named it.
  */
 export const CLUSTER_MIN_ROWS = 3;
+
+/**
+ * Rows of one cluster that must keep a tag besides the head before the head line
+ * names it. A tag one row keeps says what that row is about, not what the cluster
+ * holds — the rule the panel's bars draw by, where a bar needs more than a single
+ * row too. On a curated head the threshold is what keeps the line its own size: a
+ * heading can reach one row and still be a block.
+ */
+export const CLUSTER_SUB_MIN_ROWS = 2;
+
+/**
+ * Sub-tags one head line draws; the rest stay in the head's hover text, so a wide
+ * cluster cannot push its own rows off the line the head opens.
+ */
+export const CLUSTER_SUB_MAX = 6;
 
 /**
  * Heading of the trailing block holding the rows of the clusters that were not
@@ -192,6 +207,49 @@ export function priorityCoverage(rows: Da[], reports: VizReports): VizPriority {
 const headTag = (report: RowTagReport): TagExplanation =>
   report.tags.find(isPriorityTag) ?? report.tags[0];
 
+/**
+ * The label a head line prints for one of its rows' other tags: the theme of a
+ * promoted `head/theme` sub-tag, whose parent the head already names, and the tag
+ * itself otherwise.
+ *
+ * @param head the cluster's head tag
+ * @param tag the other tag a row of the cluster kept
+ * @param sub whether the aim pass minted that tag
+ * @returns the label to print
+ */
+const subLabel = (head: string, tag: string, sub: boolean): string => {
+  const prefix = `${head}${DEFAULT_TAG_AIM.sep}`;
+  return sub && tag.startsWith(prefix) ? tag.slice(prefix.length) : tag;
+};
+
+/** One cluster while {@link tagClusters} fills it: its rows and the other tags they kept. */
+interface ClusterDraft {
+  tag: string;
+  priority: boolean;
+  items: Da[];
+  /** Other tag -> rows of this cluster keeping it, and whether the aim pass minted it. */
+  others: Map<string, { rows: number; sub: boolean }>;
+}
+
+/**
+ * The tags a cluster's rows kept besides its head, most rows first: what a head
+ * line lists so a reader sees what the cluster holds and not only what filed it.
+ *
+ * A promoted sub-tag and the plain tag naming the same theme count once, and the
+ * promoted one is what marks the entry, so the line cannot draw `harness` twice.
+ *
+ * @param others one entry per other tag, as {@link tagClusters} accumulated it
+ * @returns the sub-tags worth a chip, most rows first
+ */
+function clusterSubs(
+  others: Map<string, { rows: number; sub: boolean }>,
+): RestSubTag[] {
+  return [...others.entries()]
+    .filter(([, held]) => held.rows >= CLUSTER_SUB_MIN_ROWS)
+    .sort((a, b) => b[1].rows - a[1].rows || a[0].localeCompare(b[0]))
+    .map(([tag, held]) => (held.sub ? { tag, rows: held.rows, sub: true } : { tag, rows: held.rows }));
+}
+
 /** One tag's best explanation, with the report that carried it. */
 export interface VizTagDetail {
   explanation: TagExplanation;
@@ -231,15 +289,17 @@ export function tagTopExplanations(rows: Da[], reports: VizReports): Map<string,
  * heads the list the way it heads a pass. Curated tags come first, then the
  * widest clusters; a tag fewer than {@link CLUSTER_MIN_ROWS} rows keep is not a
  * cluster and its rows trail under {@link VIZ_SMALL_LABEL} instead, which is the
- * same rule the panel draws its bars by. A scored row that kept nothing and a row
- * the cap left unscored trail after that.
+ * same rule the panel draws its bars by. Each head carries the other tags its own
+ * rows kept — what the cluster holds besides what filed it — so the block reads as
+ * a cluster and not as one tag. A scored row that kept nothing and a row the cap
+ * left unscored trail after that.
  *
  * @param rows rows the list is showing
  * @param reports one report per scored row
  * @returns one block per tag worth a head, then the three trailing blocks
  */
 export function tagClusters(rows: Da[], reports: VizReports): RestGroup[] {
-  const clusters = new Map<string, { tag: string; priority: boolean; items: Da[] }>();
+  const clusters = new Map<string, ClusterDraft>();
   const unclustered: Da[] = [];
   const unscored: Da[] = [];
 
@@ -248,9 +308,33 @@ export function tagClusters(rows: Da[], reports: VizReports): RestGroup[] {
     if (!report) { unscored.push(row); continue; }
     if (report.tags.length === 0) { unclustered.push(row); continue; }
     const head = headTag(report);
-    const held = clusters.get(head.tag);
-    if (held) held.items.push(row);
-    else clusters.set(head.tag, { tag: head.tag, priority: isPriorityTag(head), items: [row] });
+    let held = clusters.get(head.tag);
+    if (!held) {
+      held = { tag: head.tag, priority: isPriorityTag(head), items: [], others: new Map() };
+      clusters.set(head.tag, held);
+    }
+    held.items.push(row);
+    /* One row counts once per label however many tags it carries it as: a row can
+       keep `harness` and the burst's minted `deepseek/harness` at the same time. */
+    const seen = new Set<string>();
+    for (const t of report.tags) {
+      if (t.tag === head.tag) continue;
+      const sub = t.origin === 'sub';
+      const label = subLabel(head.tag, t.tag, sub);
+      if (seen.has(label)) {
+        const counted = held.others.get(label);
+        if (counted) counted.sub ||= sub;
+        continue;
+      }
+      seen.add(label);
+      const counted = held.others.get(label);
+      if (counted) {
+        counted.rows++;
+        counted.sub ||= sub;
+      } else {
+        held.others.set(label, { rows: 1, sub });
+      }
+    }
   }
 
   /* A curated tag is kept as a head however few rows it reaches, because the pin
@@ -269,7 +353,9 @@ export function tagClusters(rows: Da[], reports: VizReports): RestGroup[] {
       || b.items.length - a.items.length || a.tag.localeCompare(b.tag));
 
   return [
-    ...heads.map((c) => ({ key: `tag:${c.tag}`, label: c.tag, tag: c.tag, items: c.items })),
+    ...heads.map((c) => ({
+      key: `tag:${c.tag}`, label: c.tag, tag: c.tag, items: c.items, subs: clusterSubs(c.others),
+    })),
     ...(singles.length > 0
       ? [{ key: 'singletons', label: VIZ_SMALL_LABEL, items: singles }] : []),
     ...(unclustered.length > 0
