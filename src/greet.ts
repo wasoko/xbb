@@ -280,9 +280,25 @@ export async function dl_merge (tab: Table, curSnap='', testOld=false
       stts(`upserted ${toPut.upsPK.length}`)
     return {upSnapName, toPut}
   }
+/** Continue from the snapshot just written: drop the pin, and record the file as the loaded
+ *  snapshot and the RPC partition. `db.das` holds the rows the upload carried, so the next
+ *  greet round treats the cache as current instead of downloading it back.
+ * @param name CDN filename of the snapshot */
+async function adoptSnap(name: string) {
+  const up = effSnapName(name)
+  sdb.treeCac['snap_name'] = up
+  sdb.treeCac['snap_pin'] = ''
+  greeter.snap = up
+  await sdb.db.tree.bulkPut([
+    { key: 'snap_pin', value: '' },
+    { key: 'snap_name', value: up },
+  ])
+  stts(up.replace('.cbor.pako', ''), '-snapname')
+}
 /** if non-dirty loss ie upsBase left in old snap, atomic snap TODO
  *  The snapshot carries row state only: `rec.ver` is dropped before cbor+pako, because the
- *  history is client-held and the RPC payload already delivers it.
+ *  history is client-held and the RPC payload already delivers it. A written file becomes the
+ *  working snapshot: the pin is cleared and `snap_name`/the RPC partition move to it.
  */
 export async function upSnap() {
   let st = performance.now()
@@ -301,15 +317,19 @@ export async function upSnap() {
     return fc.sideLog(stts('err:'+res.error.message, 'greet'),res) 
   const matched = res.data.filter((o: { name: string; })=> o.name.startsWith('da'));
   console.log('stale check: ',matched)
-  if(matched.length?? 0 >0)
-    if (oName== (matched[0].name as string))
-      return {status: stts(`skipped stale ${oName} count`)}
+  if (matched[0]?.name === oName) {
+    // the listing already holds this row count: the file is the working snap, no upload needed
+    await adoptSnap(oName)
+    return {status: stts(`skipped stale ${oName} count`, '-lastgreet')}
+  }
   await sanitize_md()
   const ta = (await sdb.db.das.toArray()).map(sdb.withoutVer)
   // const es = await sdb.db.vecs.toArray();
   const fileApi = sbg.storage.from('bb')
   const msg = await fc.ul(ta, fileApi, `${sess?.user.id}/da`,ta.length)
-  stts((msg.startsWith('err')? '': `✔Done upload `) +msg)
+  const ok = !msg.startsWith('err')
+  if (ok) await adoptSnap(oName)
+  stts((ok? `✔Done upload `: '') +msg, '-lastgreet')
 }
 export async function sanitize_md() {
   const tags = await sdb.db.das.where('type').equals('md').toArray();

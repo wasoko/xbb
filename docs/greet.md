@@ -54,17 +54,27 @@ Two `db.tree` values decide it:
 
 | key | writer | meaning |
 |:--|:--|:--|
-| `snap_name` | `greetOnce` | effective name of the snapshot whose rows are in `db.das`, `up-`-prefixed when an upgrade stage applied; also the `dl_merge` cache key and the RPC partition |
+| `snap_name` | `greetOnce`, `upSnap` | effective name of the snapshot whose rows are in `db.das`, `up-`-prefixed when an upgrade stage applied; also the `dl_merge` cache key and the RPC partition |
 | `snap_pin` | the settings menu | user pin: a CDN filename to keep working against, or `''` to follow the newest listing entry |
 
 `greeter.snap` is always the effective name and `pullPush` sends it as the RPC `snap_name`,
 which the server partitions on (`pg_advisory_xact_lock(hashtext(snap_name))`). A pin
 therefore selects a working namespace, not just a download.
 
-A pin never moves on its own: `dl_merge` takes the pinned filename instead of
-`list[0].name`, so a newer snapshot is listed but not loaded, and `upSnap` does not move
-the pin either. Recent filenames are cached in `treeCacOpts['snap_pin']` while the
-settings menu is open; that cache only feeds the `snap_pin` datalist and is not persisted.
+A pin never follows the listing on its own: `dl_merge` takes the pinned filename instead of
+`list[0].name`, so a newer snapshot is listed but not loaded. `upSnap` clears the pin: the
+file it writes from the current rows becomes the working snapshot, so the client continues
+from it instead of downloading it back on the next round. Recent filenames are cached in
+`treeCacOpts['snap_pin']` while the settings menu is open; that cache only feeds the
+`snap_pin` datalist and is not persisted.
+
+**Pin first when a new snapshot is not picked up.** A pinned client finishes a round clean
+while the listing already holds a newer file: `dl_merge` short-circuits on `snap cached`,
+`pullPush` runs on the pinned partition, so `snap_name` keeps the pinned name and the round
+still reports synced. Read `snap_pin` before suspecting `greet`; emptying it in the settings
+menu, or **Snap new** (which adopts the file it wrote), is what moves the client onto
+`list[0].name`. A Sync click inside the 4.3 s throttle of a running round returns `{}` and
+does no work.
 
 Switching pins goes through `applySnapPin`, which the settings `snap_pin` field commits:
 one greet round first pushes what this client still owes the current partition, then the

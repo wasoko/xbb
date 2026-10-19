@@ -10,7 +10,7 @@ import {
   keywordEntries, loadAdaptersFromStore, loadTagAdapter, markdownLinks, mergeTags, neighbourhood,
   normalizeText, parseKeywordDoc, pinPriorityTags, pinTags, planTagUpdates, rankTags, rowSources,
   rowStamp, scoreTagsForRow, sortByDim, srctagApi, tagRows, tagRowsForPinSave, tagRowsInteractive,
-  tagSweepRows, tagRowReports, tfidfVectors, textRank, tokenize, urlTokens,
+  tagSweepRows, tagRowReports, tagSurfaceForms, tfidfVectors, textRank, tokenize, urlTokens,
 } from '../src/srctag';
 import type { SparseVector, TagParts, TagRow, TagRowsOptions } from '../src/srctag';
 
@@ -221,10 +221,28 @@ describe('KeywordTagger', () => {
       .toEqual(['head', 'tail']);
   });
 
-  it('turns a hyphenated tag into a spaced surface form', () => {
+  it('turns a hyphenated tag into a spaced surface form and its words', () => {
     expect(keywordEntries(['machine-learning'])).toEqual([
-      { tag: 'machine-learning', keywords: ['machine-learning', 'machine learning'] },
+      { tag: 'machine-learning', keywords: ['machine-learning', 'machine learning', 'machine', 'learning'] },
     ]);
+  });
+
+  it('splits camelCase, underscores, and their words into surface forms', () => {
+    expect(tagSurfaceForms('turnOver_Alpha')).toEqual(
+      expect.arrayContaining(['turnOver_Alpha', 'turnover', 'alpha', 'turn over alpha', 'turn', 'over']),
+    );
+    expect(tagSurfaceForms('kelly_Ito')).toEqual(
+      expect.arrayContaining(['kelly', 'ito', 'kelly ito']),
+    );
+    expect(tagSurfaceForms('portfolioRisk')).toEqual(
+      expect.arrayContaining(['portfolio risk', 'portfolio', 'risk']),
+    );
+  });
+
+  it('matches the words of camelCase and underscore pin tags in text', () => {
+    const tagger = new KeywordTagger(keywordEntries(['turnOver_Alpha', 'kelly_Ito', 'portfolioRisk']));
+    const hits = tagger.match('turnover kelly ito portfolio risk').map((m) => m.tag);
+    expect(hits).toEqual(expect.arrayContaining(['turnOver_Alpha', 'kelly_Ito', 'portfolioRisk']));
   });
 
   it('parses the keywords.md dialect', () => {

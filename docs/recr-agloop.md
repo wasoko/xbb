@@ -113,7 +113,7 @@ missing, tombstoned, or names an unknown level.
 |---|---|---|
 | `read` | `read_file`, `search_content`, `list_dir` | reads and searches existing rows |
 | `rw` | `write_file` | creates rows (tagged `ai`), shelving the pre-edit version |
-| `rwr` | `run_src` | runs a `type='src'` body or module in page context |
+| `rwr` | `run_src` | runs a `type='src'` body or module in page context; a row whose header declares `// @requires tab` runs in the matching browser tab instead, which needs the extension |
 | `all` | `run_command` | REST calls to `## Endpoints` prefixes |
 
 `task_complete` is never gated. The level is applied twice: `filterTools` keeps
@@ -308,6 +308,10 @@ host, so the browser-visible error stands as it is.
   built-in names — a row named anything else is dropped at every level. Merging by
   name, and letting the gate name custom tools, is what the doc's "override"
   implies; neither is applied yet.
+- **R9 — a `@requires tab` row is only runnable in the extension.** `runsrc` routes it to
+  `chrome.userScripts.execute` in the tab its source names; the webapp answers
+  `not-extension`, and the extension names the user-script setting when it is off. The row
+  returns `Da`-shaped rows and writes nothing. See [extsrc.md](extsrc.md).
 - **Minor:** tool calls are sequential, so one slow tool blocks the turn;
   `usage` is only present when the provider honours
   `stream_options.include_usage`; `LLM_PROXY_TARGET` covers one provider at a

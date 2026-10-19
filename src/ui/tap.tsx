@@ -6,7 +6,7 @@ import React, { useState, useEffect, useMemo, useRef, useSyncExternalStore } fro
 import * as li from 'lucide-react'
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { sess, signinGoogle, sbg, greet, greeter, fmtSyncCnt, getGreetStat, subscribeGreetStat
+import { sess, signinGoogle, sbg, greet, fmtSyncCnt, getGreetStat, subscribeGreetStat
   , applySnapPin, dirtyLabel, listSnaps, outstandingDirty } from '../greet';
 import * as idb from '../sdb';
 import * as fc from '../fc';
@@ -448,6 +448,11 @@ export function UserBar() {
   const greetAct = useSyncExternalStore(subscribeGreetStat, getGreetStat);
   /** Pinned snapshot, `''` while the client follows the newest one. */
   const snapPin = useTreeCac<string>('snap_pin');
+  /** The loaded snapshot's row. Reading the row instead of a one-shot `stts` push keeps the
+   *  settings line in step with a greet or `upSnap` that lands while the menu stays open. */
+  const snapNameRow = useTreeCac<string>('snap_name');
+  /** Newest sync-action status (`upSnap`); `stts` is not React state, so subscribe to it. */
+  const lastAction = useSyncExternalStore(fc.subscribeStts, () => fc.getStts('-lastgreet'));
   /** Recent snapshots behind the `snap_pin` datalist, refilled on every menu open. */
   const [snapOpts, setSnapOpts] = useState<string[]>([]);
   const slowest = [...greetAct.steps].sort((a, b) => b.ms - a.ms).slice(0, 3)
@@ -797,8 +802,8 @@ export function UserBar() {
     refreshPaired();
   };
 
-  /** Cache the recent snapshots and refresh the `snap_name` line while the menu is open:
-   *  `stts` writes into `#stts-snapname`, which only exists inside the open menu. */
+  /** Refill the `snap_pin` datalist from a fresh listing while the menu is open; the
+   *  `snap_name` line reads its own live row. */
   useEffect(() => {
     if (!settingsOpen || !session) return;
     let alive = true;
@@ -808,9 +813,6 @@ export function UserBar() {
       const names = (data ?? []).map((r) => r.name);
       idb.treeCacOpts['snap_pin'] = names;
       setSnapOpts(names);
-    });
-    void idb.db.tree.get('snap_name').then((kv) => {
-      if (alive) fc.stts((greeter.snap || (kv?.value as string) || 'none').replace('.cbor.pako', ''), '-snapname');
     });
     return () => { alive = false; };
   }, [settingsOpen, session]);
@@ -940,7 +942,10 @@ export function UserBar() {
               <div style={{paddingLeft:22}}> {Object.entries(idb.treeCac).map(([key, value]) => (
               key === 'snap_name' ? (
               <div key={key} style={{flexDirection:'row',display:'flex'}}>
-                <span>snap_name: </span><div id="stts-snapname" style={{paddingLeft:2}}/>
+                <span>snap_name: </span>
+                <div id="stts-snapname" style={{paddingLeft:2}}>
+                  {String(snapNameRow || 'none').replace('.cbor.pako','')}
+                </div>
               </div> ) : (
               <div key={key} style={{flexDirection:'row',display:'flex',alignItems:'center'}}>
                 <label htmlFor={`input-tree-${key}`}> {key}: </label>
@@ -966,7 +971,7 @@ export function UserBar() {
 
               <div className="user-dropdown-item"><a href="service-terms.html" target="_blank">Service Terms</a> <a href="privacy-policy.html" target="_blank">Privacy Policy</a></div>
               <div>{snapPin ? `pinned ${snapPin.replace('.cbor.pako','')}` : 'auto: newest snap'} · {fc.BUILD_TIME}</div>
-              <div id="stts-lastgreet"/>
+              <div id="stts-lastgreet">{lastAction}</div>
               <div style={{opacity:.8}}>{greetDetail}</div>
               {syncStat?.rec && Object.entries(syncStat.rec)
                 .sort(([, a], [, b]) => new Date(b.at).getTime() - new Date(a.at).getTime())

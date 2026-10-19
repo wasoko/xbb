@@ -21,7 +21,7 @@ import * as fc from './fc';
 import { bulletKv, bulletList, splitSections, subSections } from './recrMd';
 import { GATE_REF, RECR_SOURCE_ID, RECR_TYPE, SECRET_REF, TASK_COMPLETE } from './recrConst';
 import { filterTools, gateTools, loadGate, type GateConfig } from './recrGate';
-import { runBody, type RecrScriptContext } from './runsrc';
+import { runBodyWithPath, SrcUnavailableError, type RecrScriptContext } from './runsrc';
 import {
   recrHost, buildContext, buildRequestState, defaultToolMeta,
   initDefaultPlugins,
@@ -1011,6 +1011,11 @@ function withLogs(text: string, log: ScriptLog): string {
  * gate level, not this tool, is the authorization point: only `rwr` and above
  * offer it. A module row must export a default function that takes `ctx`.
  *
+ * A row that declares `// @requires tab` runs in the matching browser tab instead
+ * (extension only) and receives `{ ref, args, console }`; a realm that cannot eval
+ * and has no compiled counterpart refuses with the steps that fix it, rather than
+ * a Content Security Policy message.
+ *
  * @param args `ref` names the script row; `args` is forwarded to the script as `ctx.args`
  * @param store store holding the script row
  * @returns the script's string result, or its JSON form, plus the lines the script
@@ -1024,12 +1029,19 @@ async function runSrc(args: Record<string, unknown>, store: IRecrStore): Promise
   const log: ScriptLog = { lines: [], total: 0 };
   const ctx: RecrScriptContext = { db, ref, args: args.args ?? {}, console: scriptConsole(log) };
   try {
-    const out = await runBody(body, ctx);
+    const { value: out, path } = await runBodyWithPath(body, ctx);
     const text = out === undefined
       ? `${ref} completed with no result`
       : (typeof out === 'string' ? out : JSON.stringify(out, null, 2));
-    return withLogs(text, log).slice(0, 8000);
+    const where = path === 'twin'
+      ? '\n\n(ran the compiled body: this page cannot eval row text)'
+      : path === 'tab' ? '\n\n(ran in a matched browser tab)' : '';
+    return withLogs(text + where, log).slice(0, 8000);
   } catch (e) {
+    if (e instanceof SrcUnavailableError) {
+      const steps = e.steps.length > 0 ? `\n${e.steps.map((s) => `- ${s}`).join('\n')}` : '';
+      return withLogs(`Error running ${ref}: ${e.message}${steps}`, log).slice(0, 8000);
+    }
     const message = e instanceof Error ? e.message : String(e);
     return withLogs(`Error running ${ref}: ${message}`, log).slice(0, 8000);
   }
@@ -1983,7 +1995,7 @@ function getDefaultToolDefs(): ToolDef[] {
     },
     {
       name: 'run_src',
-      description: 'Runs a source row (type=src) in the page, awaiting its result. A function body receives one ctx argument: { db, ref, args, console }. A body that opens a line with import/export runs as an ES module instead and must export a default function(ctx).',
+      description: 'Runs a source row (type=src) in the page, awaiting its result. A function body receives one ctx argument: { db, ref, args, console }. A body that opens a line with import/export runs as an ES module instead and must export a default function(ctx). A row whose header declares // @requires tab runs in the matching browser tab (extension only) and receives { ref, args, console }.',
       parameters: {
         type: 'object',
         properties: {

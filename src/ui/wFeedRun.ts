@@ -18,7 +18,7 @@
 import { fmtAgo } from '../fc';
 import { greet } from '../greet';
 import { daEdit, daRead, db, type Da } from '../sdb';
-import { runBody } from '../runsrc';
+import { runBodyWithPath, SrcUnavailableError } from '../runsrc';
 import {
   POST_ITEMS, W_FEED_REF, insertPosts, latestPosts, parsePostItem, parseWFeedDoc,
   postItem, postsBlock, setSetupValue,
@@ -112,9 +112,11 @@ export async function runWFeedRefresh(opts: {
     const args = sources.length > 0 ? { sources } : {};
     const body = await daRead(WEBFEED_EXTRACT_REF);
     if (body?.txt) {
-      const out = await runBody(body.txt, { db, ref: body.ref, args, console });
+      const { value: out, path } = await runBodyWithPath(body.txt, { db, ref: body.ref, args, console });
       rows = reportRows(out);
       notes.push(...notesOf(out));
+      if (path === 'twin') notes.push('ran the compiled body: this page cannot eval row text');
+      else if (path === 'tab') notes.push('ran in a browser tab');
     } else {
       /* No body row: the engine is the same reading without the script, and its own
          report is typed. */
@@ -123,6 +125,7 @@ export async function runWFeedRefresh(opts: {
       notes.push(...out.notes);
     }
   } catch (error) {
+    if (error instanceof SrcUnavailableError) notes.push(...error.steps);
     return { at, items: [], sources, notes, error: error instanceof Error ? error.message : String(error) };
   }
 

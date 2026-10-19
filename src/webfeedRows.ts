@@ -20,7 +20,8 @@
  */
 
 import { W_FEED_REF } from './wFeed';
-import { WEBFEED_REF } from './webfeed';
+import { extractFromDoc, WEBFEED_REF, type FeedDb, type FeedDocResult } from './webfeed';
+import type { BodyTwin } from './runsrc';
 import type { TagSeedRow, TagSeedTable } from './srctagRows';
 
 /** Row ref of the body that drives an extraction from the document. */
@@ -113,6 +114,53 @@ return {
   notes: out.notes,
   das: out.das.slice(0, Number(args.showRows) || 10),
 };`;
+
+/** `ctx.args` of a `run_src` call, as the report reads it. */
+const asArgs = (args: unknown): Record<string, unknown> =>
+  (typeof args === 'object' && args !== null ? args as Record<string, unknown> : {});
+
+/**
+ * The report {@link WEBFEED_EXTRACT_BODY} returns, built from the engine's own result.
+ *
+ * The body formats the per-source lines and slices `das` to `showRows`; both are part
+ * of what `run_src` hands a model, so the compiled path reproduces them exactly rather
+ * than returning the engine result unchanged.
+ *
+ * @param out result of {@link extractFromDoc}
+ * @param args the body's `ctx.args`, for `showRows`
+ * @returns the value the seeded body would have returned
+ */
+export function webFeedReport(out: FeedDocResult, args: Record<string, unknown>): unknown {
+  const sources = out.sources.map((r) => {
+    const tries = r.attempts.map((a) => {
+      const how = a.ok ? 'ok' : (a.error || 'fail');
+      return a.strategy + '(' + (a.status || '-') + ' ' + how + ' ' + a.ms + 'ms)';
+    }).join(' ');
+    return r.source + ' -> ' + (r.strategy || 'none') + ', ' + r.das.length + ' row(s)'
+      + (r.stoppedAt ? ', stopped at last check' : '') + '\n  ' + tries;
+  });
+  return {
+    ref: out.ref,
+    total: out.das.length,
+    sources,
+    notes: out.notes,
+    das: out.das.slice(0, Number(args.showRows) || 10),
+  };
+}
+
+/**
+ * Compiled counterparts of the seeded bodies, registered at boot.
+ *
+ * A row the user edited is a different string, so it never matches an entry here
+ * and cannot silently run code other than the text it holds.
+ */
+export const WEBFEED_BODY_TWINS: ReadonlyMap<string, BodyTwin> = new Map<string, BodyTwin>([
+  [WEBFEED_EXTRACT_BODY, async (ctx) => {
+    const args = asArgs(ctx.args);
+    const out = await extractFromDoc({ db: ctx.db as FeedDb, args, console: ctx.console });
+    return webFeedReport(out, args);
+  }],
+]);
 
 /**
  * The seeded feed schedule: one feed's own settings and the blocks its reads write.

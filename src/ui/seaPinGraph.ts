@@ -3,31 +3,48 @@
  *
  * The rest list asks what its pass *did* with each tag. The sea asks the other question a
  * table with several tags per row is read by: how far is a tag from the curated half. The
- * seed is the pin cards plus the newest rows, scored with `qarf` so the fused lists are the
- * adaptive ones, and the graph is built with its aliases kept — a table that spells one
- * curated tag two ways is saying something about itself, and folding the spelling away
- * hides it.
+ * seed is the pin cards plus up to `base` newest `type='tab'`/`type='tag'` rows, scored with
+ * `qarf` so the fused lists are the adaptive ones, and the graph is built with its aliases
+ * kept — a table that spells one curated tag two ways is saying something about itself, and
+ * folding the spelling away hides it.
  *
  * It is not the pass the rest list draws. That pass walks the rows a reader is looking at
- * and publishes to `restTagStore`; this one reads a window four times that size, because a
- * hop is a statement about the whole seed rather than about the rows on screen. The sea is
- * the only reader, and it is read once per mount.
+ * and publishes to `restTagStore`; this one reads the sea's own window, because a hop is a
+ * statement about the whole seed rather than about the rows on screen. The sea is the only
+ * reader, and the seed is re-read when `star.tagger.md`'s Setup block changes.
  */
 
-import { iq, treeCacReady, type Da } from '../sdb';
-import type { RowTagReport } from '../srctag';
+import { db, treeCacReady, type Da } from '../sdb';
+import { TAG_DEL, pinPriorityTags, type RowTagReport } from '../srctag';
 import { QARF_GROUPER, restProfileMap } from './restGrouper';
 import { isPinCardRow } from './cardTab';
 import { buildTagGraph, headingTags, pinReach, type GraphReach, type TagGraph } from './restGraph';
+import {
+  DEFAULT_STAR_SETUP, STAR_BASE_DEFAULT, foldAlias, isTaggerRef, resolveAliases,
+  starLimits, type StarTaggerSetup,
+} from '../starTagger';
 
 /**
- * Rows the pin reading seeds from.
+ * Rows the pin reading seeds from when no `base:` override is written.
  *
- * Four times the rest list's own page (555): a hop is a statement about the whole seed, so
- * a window a reader happens to be scrolled to would make the related and remote bands
- * depend on where they were.
+ * The taxonomies are read off `type='tab'` and `type='tag'` rows; a pin card is
+ * read separately because it supplies the roots rather than the qarf input.
  */
-export const PIN_SEED_ROWS = 2222;
+export const PIN_SEED_ROWS = STAR_BASE_DEFAULT;
+
+/** Wall-clock milliseconds one seed spent in each stage. */
+export interface StarTiming {
+  /** Parsing and resolving the tagger row; the caller measures it. */
+  config: number;
+  /** Reading pins and tab/tag rows from `db.das`. */
+  scan: number;
+  /** The qarf pass over those rows. */
+  score: number;
+  /** Building the tag graph. */
+  graph: number;
+  /** Everything above. */
+  total: number;
+}
 
 /** What one pin reading produced. */
 export interface PinGraphSeed {
@@ -43,6 +60,12 @@ export interface PinGraphSeed {
   reach: Map<string, GraphReach>;
   /** How new each node's evidence is, `1` for a tag only the newest rows kept. */
   recency: Map<string, number>;
+  /** The overrides the seed ran with. */
+  setup: StarTaggerSetup;
+  /** Pin headings after aliases were folded, as the qarf pass saw them. */
+  priorityTags: string[];
+  /** Time each stage took. */
+  timings: StarTiming;
 }
 
 /**
@@ -79,30 +102,98 @@ export function tagRecency(
   return out;
 }
 
+/** Newest `tid` first, the order the sea's vertical axis reads. */
+const byNewest = (a: Da, b: Da): number => (b.tid ?? 0) - (a.tid ?? 0);
+
+/** The pin cards the table holds, newest first. */
+async function loadPins(): Promise<Da[]> {
+  const cards = await db.das.where('type').equals('md').toArray();
+  return cards
+    .filter((row) => isPinCardRow(row) && !(row.tags ?? []).includes(TAG_DEL))
+    .sort(byNewest);
+}
+
 /**
- * Read the newest rows of the table, score them with `qarf`, and read the result by pin
- * reach.
+ * The newest `base` rows whose text feeds qarf.
  *
- * Nothing is written back: the caller owns the seed and decides whether the pass's reports
- * become the store's own.
+ * Only `type='tab'` and `type='tag'` rows are the taxonomy's evidence; a pin
+ * card supplies roots, and the tagger document itself is never an input.
  *
- * @param limit rows to read, newest first
- * @returns the pins, the rows, the reports, the graph and each node's reach
+ * @param base ceiling on rows read
+ * @returns the rows, newest first
  */
-export async function loadPinGraph(limit = PIN_SEED_ROWS): Promise<PinGraphSeed> {
+async function loadSeedRows(base: number): Promise<Da[]> {
+  const rows = await db.das.orderBy(':id').reverse()
+    .filter((row) => row.type === 'tab' || row.type === 'tag')
+    .limit(base)
+    .toArray();
+  return rows.filter((row) => !(row.tags ?? []).includes(TAG_DEL) && !isTaggerRef(row.ref));
+}
+
+/**
+ * Read pins and the newest tab/tag rows, score them with `qarf`, and read the
+ * result by pin reach.
+ *
+ * Nothing is written back: the caller owns the seed and decides whether the
+ * pass's reports become the store's own. Aliases are folded before the priority
+ * tags and the graph, and the synonyms map keeps the acronyms reachable by the
+ * trie.
+ *
+ * @param setup the tagger row's overrides; omitted leaves every default
+ * @param clock millisecond clock, injectable for a timing test
+ * @returns the pins, rows, reports, graph, reach, recency, and stage timings
+ */
+export async function loadPinGraph(
+  setup: StarTaggerSetup = DEFAULT_STAR_SETUP,
+  clock: () => number = () => performance.now(),
+): Promise<PinGraphSeed> {
   /* The settings cache is filled a tick after boot, and the priority tags come from it. */
   await treeCacReady;
+  const started = clock();
+  const limits = starLimits(setup);
+  const pins = await loadPins();
+  const rows = await loadSeedRows(limits.base);
+  const scanned = clock();
 
-  const newest = (await iq([], undefined, undefined, limit)).slice(0, limit);
-  const pins: Da[] = [];
-  const rows: Da[] = [];
-  for (const da of newest) (isPinCardRow(da) ? pins : rows).push(da);
+  const resolved = resolveAliases(setup.alias);
+  const fold = (tag: string): string => foldAlias(tag, resolved.map);
+  const priorityTags = [...new Set(pinPriorityTags(pins).map(fold))];
+  const synonyms: Record<string, string[]> = {};
+  for (const alias of Object.keys(setup.alias)) {
+    const canonical = fold(alias);
+    if (canonical !== alias) (synonyms[canonical] ??= []).push(alias);
+  }
 
-  const reports = await restProfileMap(rows, QARF_GROUPER, undefined, { pins });
-  const graph = buildTagGraph(pins, rows, reports, { keepAliases: true });
+  const qarf = {
+    ...(setup.alpha === undefined ? {} : { alpha: setup.alpha }),
+    ...(setup.floor === undefined ? {} : { floor: setup.floor }),
+    ...(setup.ceil === undefined ? {} : { ceil: setup.ceil }),
+  };
+  const scored = clock();
+  const reports = await restProfileMap(rows, QARF_GROUPER,
+    Object.keys(qarf).length > 0 ? { qarf } : undefined,
+    { pins, priorityTags, tag: { synonyms } });
+  const scoreDone = clock();
+
+  const graph = buildTagGraph(pins, rows, reports, {
+    keepAliases: true,
+    alias: fold,
+    maxNodes: limits.maxGraph,
+  });
+  const graphDone = clock();
+  const window = [...pins, ...rows].sort(byNewest);
   return {
     pins, rows, reports, graph,
     reach: pinReach(graph),
-    recency: tagRecency(graph, newest, reports),
+    recency: tagRecency(graph, window, reports),
+    setup: { ...setup, notes: [...setup.notes, ...resolved.notes] },
+    priorityTags,
+    timings: {
+      config: 0,
+      scan: scanned - started,
+      score: scoreDone - scored,
+      graph: graphDone - scoreDone,
+      total: graphDone - started,
+    },
   };
 }

@@ -91,7 +91,7 @@ export const DEFAULT_FALLBACK: FeedFallback = {
   baseDelayMs: 800,
   capDelayMs: 8000,
   timeoutMs: 15000,
-  limit: 30,
+  limit: 0,
 };
 
 /** A parsed `webfeed.md`. */

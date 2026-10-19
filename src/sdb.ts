@@ -155,7 +155,7 @@ export let treeCacOpts: Record<string, string[]> = {
   'tabSeer': ['cardtab', 'card'],
   'cardSeer': ['cs1', 'cs2'],
   // `snap_pin` options are the recent CDN snapshots, cached here by the settings menu.
-  'snap_pin': [],
+  'snap_pin': [''],
   // `rsdt`/`rsid`/`rsess`/`rstag`/`rstext`/`rsfreq`/`rstrank`/`rstt`/`rrf`/`qarf` are built in; `restGroupers/...` refs are appended from `db.das` at render.
   'restGrouper': ['rsdt', 'rsid', 'rsess', 'rstag', 'rstext', 'rsfreq', 'rstrank', 'rstt', 'rrf', 'qarf', 'none'],
   'cropWidth': ['max(33.33%, 222px)', 'max(33.33%, 155px)', '22ch', 'none'],
@@ -793,7 +793,9 @@ export interface DupMerge {
  *  reads as deleted, so no sibling may resurrect it, and nothing is filed (the text stays in the
  *  archive `clean` writes). Otherwise the rows sharing a `txt` fold together first, and each
  *  surviving text is filed under the newest-`dt` row's `cr` keyed by the stamp that row carries,
- *  which is its `modAt` when it holds a local edit and its server `dt` otherwise.
+ *  which is its `modAt` when it holds a local edit and its server `dt` otherwise. A row whose key
+ *  is already taken, or that carries no stamp, is dropped unfiled; a key already held by a
+ *  different text counts in `clash`.
  *
  *  @param group two or more rows of one `daUniq` key
  *  @returns the row to write and the rows to delete */

@@ -175,6 +175,7 @@ export function tipFittedLeft(left: number, panelRight: number, viewportWidth: n
  */
 export function TipHost({ children }: { children: React.ReactNode }) {
   const [row, setRow] = useState<(TipAnchor & { da: Da; kind?: TipKind }) | null>(null);
+  const [size, setSize] = useState({ w: 'auto', h: 'auto' });
   const openTimer = useRef<number | undefined>(undefined);
   const closeTimer = useRef<number | undefined>(undefined);
   const popover = useRef<HTMLDivElement | null>(null);
@@ -186,6 +187,7 @@ export function TipHost({ children }: { children: React.ReactNode }) {
     window.clearTimeout(openTimer.current);
     window.clearTimeout(closeTimer.current);
     setRow(null);
+    setSize({ w: 'auto', h: 'auto' });
   }, []);
   const closeSoon = useCallback(() => {
     window.clearTimeout(openTimer.current);
@@ -223,12 +225,9 @@ export function TipHost({ children }: { children: React.ReactNode }) {
     }
   }, [row]);
 
-  useEffect(() => {
-    if (!row) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [row, close]);
+  const handleDoubleClick = useCallback(() => {
+    setSize({ w: 'auto', h: 'auto' });
+  }, []);
 
   const host = {
     onMouseOver: (e: React.MouseEvent) => {
@@ -236,7 +235,14 @@ export function TipHost({ children }: { children: React.ReactNode }) {
       if (el) open(el);
       else closeSoon();
     },
-    onMouseLeave: closeSoon,
+    onMouseLeave: (e) => {
+      /* If pointer is over the resize handle, don't close. */
+      const rect = e.currentTarget.getBoundingClientRect();
+      const x = e.clientX;
+      const y = e.clientY;
+      if (x > rect.right - 20 && y > rect.bottom - 20) return;
+      closeSoon();
+    },
     onFocus: (e: React.FocusEvent) => {
       const el = (e.target as Element).closest(`[${TIP_ATTR}]`);
       if (el) open(el);
@@ -284,12 +290,18 @@ export function TipHost({ children }: { children: React.ReactNode }) {
           role="tooltip"
           onMouseEnter={cancelClose}
           onMouseLeave={close}
+          onDoubleClick={handleDoubleClick}
           style={{
             ...PANEL,
             left: row.left,
             top: row.top,
-            maxWidth,
             padding: '8px 10px',
+            resize: 'both',
+            overflow: 'auto',
+            width: size.w,
+            height: size.h,
+            minWidth: isSrc ? 420 : 'auto',
+            maxWidth: maxWidth,
           }}
         >
           {row.kind === 'wfeed' ? null : tipHead(row.da)}

@@ -20,15 +20,15 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { get_weibo_posts } from '../src/fc';
-import { runBody, type RecrScriptContext } from '../src/runsrc';
+import { get_weibo_posts } from '../../src/fc';
+import { runBody, type RecrScriptContext } from '../../src/runsrc';
 import {
   DEFAULT_FALLBACK, backoffMs, blockedText, commitFeedRows, extractFromDoc, extractSource,
   fetchWithBackoff, htmlPostItems, installWebfeedGlobal, jsonFeedItems, markdownFeedItems,
   mobileUrl, parseFeedPayload, parseWebfeedDoc, planFeedRows, planStrategies, WEBFEED_REF,
   type BackoffConfig, type FeedDa, type FeedItem, type FeedSource, type FeedTable,
-} from '../src/webfeed';
-import { WEBFEED_DOC, WEBFEED_EXTRACT_BODY } from '../src/webfeedRows';
+} from '../../src/webfeed';
+import { WEBFEED_DOC, WEBFEED_EXTRACT_BODY } from '../../src/webfeedRows';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -602,9 +602,9 @@ describe.skipIf(!LIVE)('live findings', () => {
     const answered = findings.filter((f) => f.strategy !== null);
     const summary = `${answered.length}/${findings.length} source(s) answered`;
     console.info(`\n[webfeed] ${summary}\n${lines.join('\n')}\n`);
-    await mkdir(resolve(__dirname, '../test-artifacts'), { recursive: true });
+    await mkdir(resolve(__dirname, '../../test-artifacts'), { recursive: true });
     await writeFile(
-      resolve(__dirname, '../test-artifacts/webfeed-findings.json'),
+      resolve(__dirname, '../../test-artifacts/webfeed-findings.json'),
       JSON.stringify({ summary, findings }, null, 2),
     );
 

@@ -259,7 +259,9 @@ A fixed channel split assumes the same rankers are equally informative on every 
 rest list they are not: a title of rare, specific tokens is what the exact lexical lists
 ranks well, and a title of common words — a paraphrasis of an intent — is what the
 neighbour walks and the embedding list rank well. `qarf` reads that off corpus IDF
-statistics the pass already has, following QARF (Rafeeq et al., DATA 2026):
+statistics the pass already has, following QARF (Rafeeq et al., DATA 2026). The sea's own
+seed, its `base`/`trace`/`maxGraph` overrides, and the generated taxonomy are
+[row=star.tagger.md](row=star.tagger.md)'s:
 
 $$
 \mathrm{idf}(t)=\log\frac{N}{df(t)},\qquad

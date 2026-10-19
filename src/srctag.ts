@@ -1061,11 +1061,38 @@ function optimalResolve(candidates: KeywordMatch[]): KeywordMatch[] {
   return out.sort((a, b) => a.start - b.start || a.end - b.end);
 }
 
+/** A lower-case/digit run followed by an upper-case letter, and an acronym followed by a word. */
+const CAMEL_RX = /([\p{Ll}\p{N}])(\p{Lu})/gu;
+const ACRONYM_RX = /(\p{Lu}+)(\p{Lu}\p{Ll})/gu;
+
+/**
+ * Surface forms a tag matches as text.
+ *
+ * A pinned heading writes several words in one token — `turnOver_Alpha`,
+ * `kelly_Ito`, `portfolioRisk` — so the tag itself, its separator-spaced form,
+ * its camelCase-spaced form, and the individual words each form are all matched.
+ * The forms are lowercased because the trie folds case by default; the tag keeps
+ * its written spelling.
+ *
+ * @param tag one tag
+ * @returns its surface forms, deduped, in a stable order
+ */
+export function tagSurfaceForms(tag: string): string[] {
+  const raw = String(tag ?? '').trim();
+  if (raw === '') return [];
+  const camel = raw.replace(ACRONYM_RX, '$1 $2').replace(CAMEL_RX, '$1 $2');
+  const spaced = camel.replace(/[_\-\s]+/g, ' ').trim().toLowerCase();
+  const parts = spaced.split(' ').filter((p) => p !== '' && (p.length > 1 || p === spaced));
+  const segments = raw.split(/[_\-\s]+/).map((p) => p.toLowerCase()).filter((p) => p !== '');
+  const forms = new Set<string>([raw, raw.toLowerCase(), spaced, ...parts, ...segments]);
+  return [...forms].filter((f) => f !== '');
+}
+
 /**
  * Keyword entries for a list of tags.
  *
- * Each tag contributes itself, its hyphen/underscore form as spaced words, and
- * any synonym supplied by the caller.
+ * Each tag contributes {@link tagSurfaceForms} — itself, its spaced forms, and
+ * the individual words — plus any synonym supplied by the caller.
  *
  * @param tags tags to match against text
  * @param synonyms extra surface forms per tag
@@ -1074,7 +1101,7 @@ function optimalResolve(candidates: KeywordMatch[]): KeywordMatch[] {
 export function keywordEntries(tags: string[], synonyms: Record<string, string[]> = {}): KeywordEntry[] {
   const out: KeywordEntry[] = [];
   for (const tag of tags) {
-    const forms = new Set<string>([tag, tag.replace(/[-_]+/g, ' ')]);
+    const forms = new Set<string>(tagSurfaceForms(tag));
     for (const s of synonyms[tag] ?? []) forms.add(s);
     out.push({ tag, keywords: [...forms] });
   }

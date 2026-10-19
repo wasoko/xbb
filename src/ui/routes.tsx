@@ -12,6 +12,9 @@ import { restGraphOpen } from './restGraphWindow';
 import { Toaster } from 'sonner';
 import { installSrctagGlobal } from '../srctag';
 import { installWebfeedGlobal } from '../webfeed';
+import { registerBodyTwins } from '../runsrc';
+import { WEBFEED_BODY_TWINS } from '../webfeedRows';
+import { installExtSrcRunner } from '../extsrc';
 import { registerG4Source } from '../sessionSourceG4';
 
 /**
@@ -98,6 +101,14 @@ installSrctagGlobal();
 
 // Same reason: `webfeed/extract.js` reads the feed document through this global.
 installWebfeedGlobal();
+
+// A realm that forbids eval — the extension page — runs the seeded feed body through
+// this compiled counterpart instead; an edited row no longer matches, so it refuses.
+registerBodyTwins(WEBFEED_BODY_TWINS);
+
+// Rows whose header says `@requires tab` run in the tab they name, via
+// `chrome.userScripts`; in the webapp the runner reports `not-extension` instead.
+installExtSrcRunner();
 
 // A source that is never registered is invisible to the session picker.
 registerG4Source();

@@ -30,7 +30,10 @@ import type { Da } from '../sdb';
 export type GraphReports = Map<number, RowTagReport>;
 
 /** Nodes kept, widest first; the roots and a root's neighbours always survive. */
-const MAX_NODES = 220;
+export const GRAPH_MAX_NODES = 220;
+
+/** The graph's own default, kept as the local name the layout reads. */
+const MAX_NODES = GRAPH_MAX_NODES;
 
 /** Neighbours one node keeps, strongest first. */
 const MAX_NEIGHBORS = 24;
@@ -127,6 +130,12 @@ export interface TagGraph {
   alias: Map<string, string>;
   /** Node → mean lexical share of the rows that kept it; empty on a fixed pass. */
   lambda: Map<string, number>;
+  /** Nodes that survived the cap, when the caller asked for a trace. */
+  kept?: Set<string>;
+  /** Explicit alias -> canonical tag, when the caller supplied a resolver. */
+  folded?: Map<string, string>;
+  /** Natural spelling variants merged by {@link nodeNamer}, for a trace. */
+  merged?: Map<string, string>;
 }
 
 /**
@@ -159,53 +168,69 @@ interface NodeName {
  *
  * @param roots pinned tags, whose display text wins a merge against a later variant
  * @param keepAliases whether a pin's variants become nodes of their own
- * @returns a function naming a tag, and the variant → pinned tag it stands for
+ * @param fold an explicit alias resolver, applied before the spelling comparison
+ * @returns a function naming a tag, and the alias/merge relations it recorded
  */
-function nodeNamer(roots: string[], keepAliases = false): {
+function nodeNamer(roots: string[], keepAliases = false, fold?: (tag: string) => string): {
   name: (tag: string) => string;
   alias: Map<string, string>;
+  folded: Map<string, string>;
+  merged: Map<string, string>;
 } {
   const byHead = new Map<string, NodeName[]>();
   const canon = new Map<string, string>();
   const alias = new Map<string, string>();
+  const folded = new Map<string, string>();
+  const merged = new Map<string, string>();
   const add = (display: string, norm: string) => {
     const head = norm.slice(0, 1);
     const list = byHead.get(head);
     if (list) list.push({ display, norm });
     else byHead.set(head, [{ display, norm }]);
   };
-  for (const r of roots) {
-    canon.set(normTag(r), r);
-    add(r, normTag(r));
+  const foldTag = (tag: string): string => {
+    const display = fold?.(tag) ?? tag;
+    if (display !== tag) folded.set(tag, display);
+    return display;
+  };
+  const rootNames = roots.map(foldTag);
+  for (const display of rootNames) {
+    canon.set(normTag(display), display);
+    add(display, normTag(display));
   }
 
   return {
-    alias,
+    alias, folded, merged,
     name: (tag: string): string => {
-      const norm = normTag(tag);
+      const display = foldTag(tag);
+      const norm = normTag(display);
       const held = canon.get(norm);
       if (held) {
-        if (!keepAliases || held === tag) return held;
-        alias.set(tag, held);
-        add(tag, norm);
-        return tag;
+        if (!keepAliases || held === display) {
+          if (display !== held) merged.set(display, held);
+          return held;
+        }
+        alias.set(display, held);
+        add(display, norm);
+        return display;
       }
       const near = (byHead.get(norm.slice(0, 1)) ?? [])
         .filter((n) => Math.abs(n.norm.length - norm.length) <= 2);
       for (const n of near) {
         if (termSimilarity(n.norm, norm) < MERGE_SIM) continue;
-        if (keepAliases && roots.includes(n.display)) {
-          canon.set(norm, tag);
-          alias.set(tag, n.display);
-          add(tag, norm);
-          return tag;
+        if (keepAliases && rootNames.includes(n.display)) {
+          canon.set(norm, display);
+          alias.set(display, n.display);
+          add(display, norm);
+          return display;
         }
         canon.set(norm, n.display);
+        merged.set(display, n.display);
         return n.display;
       }
-      canon.set(norm, tag);
-      add(tag, norm);
-      return tag;
+      canon.set(norm, display);
+      add(display, norm);
+      return display;
     },
   };
 }
@@ -239,19 +264,31 @@ export function headingTags(row: Da): string[] {
  *
  * The graph is capped by node weight and by neighbours per node, so a deep window
  * cannot make the layout quadratic. Pins and their direct neighbours survive the
- * cap whatever their weight, because the arrangement is built around them.
+ * default cap whatever their weight; an explicit `maxNodes` trims the set
+ * roots-first, which is what makes `maxGraph` a hard build bound.
  *
  * @param pins the pin cards, whose `#tag` headings are the roots
  * @param rows the rows the pass scored
  * @param reports the pass's reports over those rows, keyed by `tid`
- * @param opts `keepAliases` keeps a pin's variant spellings as their own nodes
+ * @param opts `keepAliases` keeps a pin's variant spellings as their own nodes;
+ *   `alias` folds explicit aliases before naming; `maxNodes` and `maxNeighbors`
+ *   bound the build (the defaults are {@link GRAPH_MAX_NODES} and 24)
  * @returns the graph, ready for {@link tagGraphLayout}
  */
 export function buildTagGraph(
-  pins: Da[], rows: Da[], reports: GraphReports, opts: { keepAliases?: boolean } = {},
+  pins: Da[], rows: Da[], reports: GraphReports,
+  opts: {
+    keepAliases?: boolean;
+    alias?: (tag: string) => string;
+    maxNodes?: number;
+    maxNeighbors?: number;
+  } = {},
 ): TagGraph {
-  const roots = pinPriorityTags(pins);
-  const { name, alias } = nodeNamer(roots, opts.keepAliases === true);
+  const rawRoots = pinPriorityTags(pins);
+  const roots = [...new Set(rawRoots.map((tag) => opts.alias?.(tag) ?? tag))];
+  const { name, alias, folded, merged } = nodeNamer(rawRoots, opts.keepAliases === true, opts.alias);
+  const maxNodes = Math.max(1, Math.round(opts.maxNodes ?? GRAPH_MAX_NODES));
+  const maxNeighbors = Math.max(0, Math.round(opts.maxNeighbors ?? MAX_NEIGHBORS));
   const weight = new Map<string, number>();
   const edges = new Map<string, Map<string, number>>();
   const kind = new Map<string, GraphNodeKind>();
@@ -319,8 +356,20 @@ export function buildTagGraph(
   for (const r of roots) for (const n of edges.get(r)?.keys() ?? []) keep.add(n);
   const widest = [...weight.entries()].sort((a, b) => b[1] - a[1]).map(([t]) => t);
   for (const t of widest) {
-    if (keep.size >= MAX_NODES) break;
+    if (keep.size >= maxNodes) break;
     keep.add(t);
+  }
+  /* A root's direct neighbours are added before the weighted tail, so a table
+     with many pins can pass the cap through that door. An explicit bound trims
+     the set to the roots first and the widest nodes after them. */
+  if (opts.maxNodes !== undefined && keep.size > maxNodes) {
+    const rootSet = new Set(roots);
+    const ordered = [...keep].sort((a, b) =>
+      (Number(rootSet.has(b)) - Number(rootSet.has(a)))
+      || ((weight.get(b) ?? 0) - (weight.get(a) ?? 0))
+      || a.localeCompare(b));
+    keep.clear();
+    for (const tag of ordered.slice(0, maxNodes)) keep.add(tag);
   }
 
   const trimmed = new Map<string, Map<string, number>>();
@@ -328,14 +377,17 @@ export function buildTagGraph(
     const near = [...(edges.get(node) ?? [])]
       .filter(([n]) => keep.has(n))
       .sort((a, b) => b[1] - a[1])
-      .slice(0, MAX_NEIGHBORS);
+      .slice(0, maxNeighbors);
     trimmed.set(node, new Map(near));
   }
 
   const lambda = new Map<string, number>();
   for (const [t, s] of share) if (s.n > 0) lambda.set(t, s.sum / s.n);
 
-  return { roots: new Set(roots), edges: trimmed, weight, name, kind, anchor, alias, lambda };
+  return {
+    roots: new Set(roots), edges: trimmed, weight, name, kind, anchor, alias, lambda,
+    kept: keep, folded, merged,
+  };
 }
 
 /**

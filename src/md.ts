@@ -97,7 +97,6 @@ useMath(mdParse)
 
 /** Instance used for display; raw HTML in `da.txt` is escaped. */
 export const mdRender: MarkdownItInstance = new MarkdownIt({ html: false, linkify: true, typographer: false })
-mdRender.disable(['table', 'strikethrough'])
 useMath(mdRender)
 
 /**

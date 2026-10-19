@@ -113,6 +113,26 @@ describe('buildTagGraph', () => {
     expect(graph.weight.size).toBe(0);
     expect(tagGraphLayout(graph).nodes).toEqual([]);
   });
+
+  it('folds an explicit alias before naming and records the fold', () => {
+    const graph = buildTagGraph([pin(['js'])], [row(1), row(2)], reportsOf(
+      report(1, [tag('javascript')]),
+      report(2, [tag('javascript')]),
+    ), {
+      keepAliases: true,
+      alias: (t) => (t === 'js' ? 'javascript' : t),
+    });
+    expect([...graph.roots]).toEqual(['javascript']);
+    expect(graph.weight.get('javascript')).toBe(2);
+    expect(graph.folded?.get('js')).toBe('javascript');
+  });
+
+  it('builds more nodes than the default cap when maxNodes asks', () => {
+    const rows = Array.from({ length: 300 }, (_, i) => row(i + 1));
+    const reports = reportsOf(...rows.map((r, i) => report(r.tid!, [tag(`t${i}`)])));
+    const graph = buildTagGraph([], rows, reports, { maxNodes: 300 });
+    expect(graph.kept?.size).toBeGreaterThan(220);
+  });
 });
 
 describe('tagGraphLayout', () => {

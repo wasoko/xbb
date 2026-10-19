@@ -7,10 +7,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const NEW_SNAP = 'tags.22.cbor.pako';
 const OLD_SNAP = 'tags.11.cbor.pako';
 
-/** CDN state the fake client serves: the listing is fixed, the payload is per test. */
+/** CDN state the fake client serves: the listing and the payload are per test. */
 const cdn = vi.hoisted(() => ({
   loaded: [] as string[],
   payload: null as Uint8Array | null,
+  /** Listing names served for `list`, newest first. */
+  names: ['tags.22.cbor.pako', 'tags.11.cbor.pako'] as string[],
+  /** Upload paths the client wrote. */
+  uploaded: [] as string[],
 }));
 
 vi.mock('@supabase/supabase-js', () => ({
@@ -22,17 +26,15 @@ vi.mock('@supabase/supabase-js', () => ({
       onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
     },
     storage: { from: () => ({
-      list: async () => ({ data: [
-        { name: NEW_SNAP, created_at: '2026-10-02T00:00:00Z' },
-        { name: OLD_SNAP, created_at: '2026-10-01T00:00:00Z' },
-      ], error: null }),
+      list: async () => ({ data: cdn.names.map((name, i) => ({
+        name, created_at: `2026-10-0${2 - i}T00:00:00Z` })), error: null }),
       download: async (path: string) => {
         cdn.loaded.push(path);
         const buf = cdn.payload;
         return { data: buf && { arrayBuffer: async () =>
           buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) }, error: null };
       },
-      upload: async () => ({ error: null }),
+      upload: async (path: string) => { cdn.uploaded.push(path); return { error: null }; },
     }) },
     rpc: async () => ({ data: {
       ok_uniqs: [], dl: [], server_now: new Date().toISOString() }, error: null }),
@@ -60,6 +62,8 @@ beforeEach(async () => {
   await sdb.db.bins.clear();
   cdn.loaded.length = 0;
   cdn.payload = null;
+  cdn.names = [NEW_SNAP, OLD_SNAP];
+  cdn.uploaded.length = 0;
   sc.greeter.snap = '';
 });
 
@@ -165,5 +169,30 @@ describe('greet under a pin', () => {
     expect(cdn.loaded).toEqual([]);
     expect((await sdb.db.tree.get('snap_name'))?.value).toBe('up-' + OLD_SNAP);
     expect(sc.greeter.snap).toBe('up-' + OLD_SNAP);
+  });
+});
+
+describe('upSnap', () => {
+  it('unpins and continues from the snapshot it wrote', async () => {
+    await sdb.db.tree.put({ key: 'snap_pin', value: OLD_SNAP });
+    await sdb.db.das.put(mkRow(1, 'a.md'));
+
+    await sc.upSnap();
+
+    expect((await sdb.db.tree.get('snap_pin'))?.value).toBe('');
+    expect((await sdb.db.tree.get('snap_name'))?.value).toBe('da.1.cbor.pako');
+    expect(sc.greeter.snap).toBe('da.1.cbor.pako');
+  });
+
+  it('adopts an existing snapshot with the same row count without re-uploading', async () => {
+    cdn.names = ['da.2.cbor.pako'];
+    await sdb.db.tree.put({ key: 'snap_pin', value: OLD_SNAP });
+    await sdb.db.das.bulkPut([mkRow(1, 'a.md'), mkRow(2, 'b.md')]);
+
+    await sc.upSnap();
+
+    expect(cdn.uploaded).toEqual([]);
+    expect((await sdb.db.tree.get('snap_pin'))?.value).toBe('');
+    expect((await sdb.db.tree.get('snap_name'))?.value).toBe('da.2.cbor.pako');
   });
 });

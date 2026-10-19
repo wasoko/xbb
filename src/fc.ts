@@ -93,6 +93,18 @@ export const sttsCB =  (message:any, _s?:any, _sr?:any) => {
   return false
 }
 export const sttsDict:{[key:string]:string} = {}
+const sttsListeners = new Set<() => void>()
+/** Subscribe to `stts` writes so a panel can repaint from the newest message.
+ * @param listener - called after every `stts` call
+ * @returns the unsubscribe function */
+export function subscribeStts(listener: () => void) {
+  sttsListeners.add(listener)
+  return () => { sttsListeners.delete(listener) }
+}
+/** The newest message one scope wrote.
+ * @param scope - the `stts` scope, e.g. `-lastgreet`
+ * @returns the message, or `''` before the scope first fires */
+export const getStts = (scope = '') => sttsDict[scope + 'STTS'] ?? ''
 export const stts = (message: string, scope = '') => {
   const stKey=scope+'STTS'
   sttsDict[stKey] = message
@@ -102,6 +114,7 @@ export const stts = (message: string, scope = '') => {
   console.info(scope,message);
   noticeStore({scope, message, level:isErr? 'error': 'info'})
   sttsCB({type: 'stts'+scope, stts: message})
+  sttsListeners.forEach(l => l())
   return message;
 }
 export const scrollToTbodyN = (tbodyRef: React.RefObject<HTMLTableSectionElement>, n:number) => {

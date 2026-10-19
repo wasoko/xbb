@@ -1,6 +1,6 @@
 # srctag sweep over the live table
 
-Recorded 2026-10-16 by `test/srctag-cdp.test.ts` against the running app on `localhost:5173`.
+Recorded 2026-10-19 by `test/srctag-cdp.test.ts` against the running app on `localhost:5173`.
 Rows, channel sets and dates come from that page’s own IndexedDB, so the numbers are
 this table’s, not a fixture’s. Re-record with:
 
@@ -12,112 +12,105 @@ npx vitest run test/srctag-cdp.test.ts --reporter=verbose --silent=false
 
 | case | dim | rows | scored | empty | sugg | dist | mean | max | prio | jaccard | ms | channels |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| tfidf | tid | 1499 | 412 | 1087 | 1098 | 566 | 0.301 | 0.958 | 344 | 1.000 | 177ms | priority 0.52 · keyword 0.26 · tfidf 0.22 |
-| textrank | tid | 1499 | 1499 | 0 | 10635 | 4898 | 0.908 | 2.250 | 213 | 0.085 | 804ms | textRank 0.90 · clusterRank 0.08 · priority 0.01 · keyword 0.01 |
-| textrank@visitTime | visitTime | 1499 | 1499 | 0 | 10636 | 4892 | 0.908 | 2.250 | 213 | 0.085 | 906ms | textRank 0.90 · clusterRank 0.08 · priority 0.01 · keyword 0.01 |
-| textrank@dt | dt | 1499 | 1499 | 0 | 10636 | 4889 | 0.908 | 2.250 | 213 | 0.085 | 759ms | textRank 0.90 · clusterRank 0.08 · priority 0.01 · keyword 0.01 |
-| textrank@domain | domain | 1499 | 1499 | 0 | 10636 | 4463 | 0.991 | 2.250 | 212 | 0.090 | 667ms | textRank 0.81 · clusterRank 0.17 · priority 0.01 · keyword 0.01 |
-| hybrid | visitTime | 1499 | 1499 | 0 | 10632 | 4873 | 0.474 | 1.421 | 313 | 0.088 | 840ms | textRank 0.85 · clusterRank 0.09 · priority 0.02 · tfidf 0.01 · keyword 0.01 |
-| rstext | domain | 1499 | 1499 | 0 | 6964 | 2478 | 0.709 | 1.750 | 287 | 0.104 | 620ms | textRank 0.69 · clusterRank 0.26 · priority 0.03 · keyword 0.01 |
-| rstext+embed | domain | 24 | 24 | 0 | 140 | 103 | 0.388 | 1.000 | 7 | 0.000 | 45ms | textRank 0.79 · clusterRank 0.14 · priority 0.05 · keyword 0.03 |
-| hybrid+embed+classify | visitTime | 24 | 24 | 0 | 140 | 106 | 0.283 | 0.750 | 7 | 0.000 | 38ms | textRank 0.82 · clusterRank 0.09 · priority 0.05 · keyword 0.03 · tfidf 0.02 |
+| tfidf | tid | 1499 | 879 | 620 | 1660 | 552 | 0.470 | 0.960 | 949 | 1.000 | 533ms | priority 0.61 · keyword 0.30 · tfidf 0.09 |
+| textrank | tid | 1499 | 1498 | 1 | 10395 | 5292 | 0.913 | 2.186 | 305 | 0.074 | 1747ms | textRank 0.90 · clusterRank 0.08 · priority 0.02 · keyword 0.01 |
+| textrank@visitTime | visitTime | 1499 | 1498 | 1 | 10396 | 5283 | 0.915 | 2.187 | 306 | 0.074 | 2254ms | textRank 0.89 · clusterRank 0.08 · priority 0.02 · keyword 0.01 |
+| textrank@dt | dt | 1499 | 1498 | 1 | 10396 | 5279 | 0.914 | 2.187 | 307 | 0.074 | 2442ms | textRank 0.89 · clusterRank 0.08 · priority 0.02 · keyword 0.01 |
+| textrank@domain | domain | 1499 | 1498 | 1 | 10396 | 4837 | 0.973 | 2.250 | 240 | 0.079 | 2997ms | textRank 0.83 · clusterRank 0.16 · priority 0.01 · keyword 0.00 |
+| hybrid | visitTime | 1499 | 1498 | 1 | 10391 | 5217 | 0.483 | 1.381 | 804 | 0.077 | 7261ms | textRank 0.81 · clusterRank 0.09 · priority 0.06 · keyword 0.03 · tfidf 0.01 |
+| rstext | domain | 1499 | 1498 | 1 | 6844 | 2684 | 0.696 | 1.750 | 720 | 0.094 | 1356ms | textRank 0.67 · clusterRank 0.22 · priority 0.08 · keyword 0.03 |
+| rstext+embed | domain | 24 | 23 | 1 | 153 | 115 | 0.425 | 1.000 | 20 | 0.000 | 30ms | textRank 0.68 · clusterRank 0.14 · priority 0.12 · keyword 0.06 |
+| hybrid+embed+classify | visitTime | 24 | 23 | 1 | 153 | 126 | 0.305 | 0.778 | 21 | 0.000 | 43ms | textRank 0.73 · priority 0.14 · keyword 0.06 · clusterRank 0.06 · tfidf 0.02 |
 
 ## hyperparameters around the rstext preset, 1499 live rows
 
 | case | dim | rows | scored | empty | sugg | dist | mean | max | prio | jaccard | ms | channels |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| rstext anchor | domain | 1499 | 1499 | 0 | 6964 | 2478 | 0.709 | 1.750 | 287 | 0.000 | 618ms | textRank 0.69 · clusterRank 0.26 · priority 0.03 · keyword 0.01 |
-| topK 4 | domain | 1499 | 1499 | 0 | 5737 | 1905 | 0.736 | 1.750 | 285 | 0.769 | 656ms | textRank 0.67 · clusterRank 0.28 · priority 0.03 · keyword 0.02 |
-| topK 16 | domain | 1499 | 1499 | 0 | 13604 | 6190 | 0.620 | 1.750 | 287 | 0.400 | 743ms | textRank 0.79 · clusterRank 0.19 · priority 0.02 · keyword 0.01 |
-| minScore 0.02 | domain | 1499 | 1499 | 0 | 7184 | 2607 | 0.698 | 1.750 | 287 | 0.951 | 759ms | textRank 0.70 · clusterRank 0.26 · priority 0.03 · keyword 0.01 |
-| minScore 0.2 | domain | 1499 | 1499 | 0 | 7179 | 2604 | 0.698 | 1.750 | 287 | 0.952 | 688ms | textRank 0.70 · clusterRank 0.26 · priority 0.03 · keyword 0.01 |
-| minScore 0.7 | domain | 1499 | 1272 | 227 | 3022 | 418 | 0.872 | 1.750 | 287 | 0.169 | 660ms | textRank 0.54 · clusterRank 0.38 · priority 0.05 · keyword 0.03 |
-| window 2 | domain | 1499 | 1499 | 0 | 6959 | 2545 | 0.704 | 1.750 | 286 | 0.925 | 469ms | textRank 0.70 · clusterRank 0.26 · priority 0.03 · keyword 0.01 |
-| window 8 | domain | 1499 | 1499 | 0 | 6972 | 2463 | 0.706 | 1.750 | 292 | 0.936 | 1109ms | textRank 0.70 · clusterRank 0.26 · priority 0.03 · keyword 0.01 |
-| rank window 2 | domain | 1499 | 1499 | 0 | 6843 | 2379 | 0.711 | 1.750 | 292 | 0.449 | 463ms | textRank 0.69 · clusterRank 0.27 · priority 0.03 · keyword 0.01 |
-| rank window 8 | domain | 1499 | 1499 | 0 | 6900 | 2466 | 0.724 | 1.750 | 299 | 0.519 | 899ms | textRank 0.69 · clusterRank 0.26 · priority 0.03 · keyword 0.01 |
-| damping 0.5 | domain | 1499 | 1499 | 0 | 7120 | 2395 | 0.744 | 1.750 | 276 | 0.841 | 435ms | textRank 0.69 · clusterRank 0.27 · priority 0.03 · keyword 0.01 |
-| damping 0.95 | domain | 1499 | 1499 | 0 | 6925 | 2557 | 0.703 | 1.750 | 288 | 0.915 | 717ms | textRank 0.70 · clusterRank 0.26 · priority 0.03 · keyword 0.01 |
-| no clusterRank | domain | 1499 | 1499 | 0 | 6513 | 3395 | 0.576 | 1.350 | 344 | 0.694 | 279ms | textRank 0.93 · priority 0.05 · keyword 0.02 |
-| no turboText | domain | 1499 | 1499 | 0 | 6941 | 2521 | 0.689 | 1.000 | 114 | 0.979 | 718ms | textRank 0.73 · clusterRank 0.27 |
-| tfidf back on | domain | 1499 | 1499 | 0 | 7060 | 2593 | 0.761 | 1.916 | 275 | 0.944 | 579ms | textRank 0.65 · clusterRank 0.24 · tfidf 0.08 · priority 0.03 · keyword 0.01 |
-| burstGap 60s | domain | 1499 | 1499 | 0 | 6964 | 2478 | 0.709 | 1.750 | 287 | 1.000 | 604ms | textRank 0.69 · clusterRank 0.26 · priority 0.03 · keyword 0.01 |
+| rstext anchor | domain | 1499 | 1498 | 1 | 6844 | 2684 | 0.696 | 1.750 | 720 | 0.000 | 5615ms | textRank 0.67 · clusterRank 0.22 · priority 0.08 · keyword 0.03 |
+| topK 4 | domain | 1499 | 1498 | 1 | 5669 | 2019 | 0.721 | 1.750 | 711 | 0.752 | 3656ms | textRank 0.64 · clusterRank 0.24 · priority 0.09 · keyword 0.04 |
+| topK 16 | domain | 1499 | 1498 | 1 | 13268 | 6703 | 0.610 | 1.750 | 726 | 0.400 | 5897ms | textRank 0.78 · clusterRank 0.15 · priority 0.04 · keyword 0.02 |
+| minScore 0.02 | domain | 1499 | 1498 | 1 | 7076 | 2825 | 0.684 | 1.750 | 720 | 0.950 | 2790ms | textRank 0.68 · clusterRank 0.22 · priority 0.07 · keyword 0.03 |
+| minScore 0.2 | domain | 1499 | 1498 | 1 | 7074 | 2825 | 0.684 | 1.750 | 720 | 0.950 | 5683ms | textRank 0.68 · clusterRank 0.22 · priority 0.07 · keyword 0.03 |
+| minScore 0.7 | domain | 1499 | 1313 | 186 | 2954 | 310 | 0.852 | 1.750 | 720 | 0.115 | 4042ms | textRank 0.47 · clusterRank 0.33 · priority 0.14 · keyword 0.06 |
+| window 2 | domain | 1499 | 1498 | 1 | 6830 | 2733 | 0.694 | 1.750 | 746 | 0.924 | 1813ms | textRank 0.67 · clusterRank 0.21 · priority 0.08 · keyword 0.03 |
+| window 8 | domain | 1499 | 1498 | 1 | 6849 | 2668 | 0.693 | 1.650 | 710 | 0.938 | 3624ms | textRank 0.68 · clusterRank 0.22 · priority 0.07 · keyword 0.03 |
+| rank window 2 | domain | 1499 | 1498 | 1 | 6704 | 2538 | 0.698 | 1.750 | 788 | 0.455 | 1257ms | textRank 0.66 · clusterRank 0.22 · priority 0.08 · keyword 0.04 |
+| rank window 8 | domain | 1499 | 1498 | 1 | 6781 | 2670 | 0.711 | 1.750 | 681 | 0.529 | 3172ms | textRank 0.68 · clusterRank 0.22 · priority 0.07 · keyword 0.03 |
+| damping 0.5 | domain | 1499 | 1498 | 1 | 7009 | 2574 | 0.726 | 1.750 | 438 | 0.833 | 2002ms | textRank 0.69 · clusterRank 0.25 · priority 0.04 · keyword 0.02 |
+| damping 0.95 | domain | 1499 | 1498 | 1 | 6814 | 2771 | 0.690 | 1.750 | 728 | 0.921 | 2881ms | textRank 0.68 · clusterRank 0.21 · priority 0.08 · keyword 0.03 |
+| no clusterRank | domain | 1499 | 1498 | 1 | 6563 | 3571 | 0.593 | 1.350 | 947 | 0.722 | 921ms | textRank 0.82 · priority 0.12 · keyword 0.06 |
+| no turboText | domain | 1499 | 1498 | 1 | 6807 | 2754 | 0.675 | 1.000 | 104 | 0.966 | 1982ms | textRank 0.74 · clusterRank 0.26 |
+| tfidf back on | domain | 1499 | 1498 | 1 | 6961 | 2813 | 0.740 | 1.943 | 685 | 0.939 | 2037ms | textRank 0.64 · clusterRank 0.20 · tfidf 0.07 · priority 0.07 · keyword 0.03 |
+| burstGap 60s | domain | 1499 | 1498 | 1 | 6844 | 2684 | 0.696 | 1.750 | 720 | 1.000 | 3207ms | textRank 0.67 · clusterRank 0.22 · priority 0.08 · keyword 0.03 |
 
 ## aim pass over 1499 live rows · priority from pin cards (1) (23 tags)
 
 | case | aimMin | promote | rows | untagged | prio | focus/row | tags/row | sub rows | sub tags | ms |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| off | 0.40 | 3 | 1499 | 0 | 267 | 4.48 | 4.48 | 0 | 0 | 0ms |
-| aimMin 0.2 | 0.20 | 3 | 1499 | 0 | 267 | 4.48 | 5.21 | 635 | 78 | 7ms |
-| aimMin 0.4 | 0.40 | 3 | 1499 | 0 | 267 | 4.48 | 5.21 | 635 | 78 | 4ms |
-| aimMin 0.7 | 0.70 | 3 | 1499 | 5 | 267 | 0.95 | 2.36 | 1154 | 56 | 3ms |
-| promoteMin 2 | 0.40 | 2 | 1499 | 0 | 267 | 4.48 | 5.61 | 897 | 246 | 7ms |
-| promoteMin 3 | 0.40 | 3 | 1499 | 0 | 267 | 4.48 | 5.21 | 635 | 78 | 3ms |
-| promoteMin 4 | 0.40 | 4 | 1499 | 0 | 267 | 4.48 | 5.02 | 474 | 41 | 3ms |
+| off | 0.40 | 3 | 1499 | 1 | 678 | 4.46 | 4.46 | 0 | 0 | 0ms |
+| aimMin 0.2 | 0.20 | 3 | 1499 | 1 | 678 | 4.46 | 4.73 | 281 | 34 | 37ms |
+| aimMin 0.4 | 0.40 | 3 | 1499 | 1 | 678 | 4.46 | 4.73 | 281 | 34 | 22ms |
+| aimMin 0.7 | 0.70 | 3 | 1499 | 313 | 678 | 1.59 | 1.99 | 359 | 36 | 21ms |
+| promoteMin 2 | 0.40 | 2 | 1499 | 1 | 678 | 4.46 | 5.07 | 528 | 132 | 12ms |
+| promoteMin 3 | 0.40 | 3 | 1499 | 1 | 678 | 4.46 | 4.73 | 281 | 34 | 14ms |
+| promoteMin 4 | 0.40 | 4 | 1499 | 1 | 678 | 4.46 | 4.61 | 143 | 12 | 21ms |
 
 ## rrf stages over the newest 600 of 1499 live rows · priority from pin cards (1) (23 tags)
 
 | case | stage | rows | scored | empty | sugg | dist | mean | max | sub rows | sub tags | jaccard | ms | channels | roots |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| preset | anchor | 600 | 591 | 9 | 2310 | 1630 | 0.643 | 5.000 | 40 | 14 | 1.000 | 193ms | bm25,clusterRank,group,priority,textRank | ai 47 · deepseek 39 · 前消 16 · youtube 13 · com 12 · dsh 12 |
-| urls on | bm25f | 600 | 599 | 1 | 3309 | 1504 | 2.475 | 38.000 | 255 | 32 | 0.525 | 335ms | bm25,clusterRank,group,priority,textRank | google 188 · gx 161 · opera 113 · ai 108 · gemini 102 · utf 96 |
-| k1 0.5 | bm25f | 600 | 591 | 9 | 2398 | 1653 | 0.780 | 8.000 | 87 | 24 | 0.954 | 217ms | bm25,clusterRank,group,priority,textRank | ai 46 · deepseek 39 · youtube 39 · md 33 · 千问 30 · google 19 |
-| k1 3 | bm25f | 600 | 591 | 9 | 2398 | 1646 | 0.780 | 8.000 | 87 | 24 | 0.958 | 218ms | bm25,clusterRank,group,priority,textRank | ai 46 · deepseek 39 · youtube 39 · md 33 · 千问 30 · google 19 |
-| b 0 | bm25f | 600 | 591 | 9 | 2398 | 1654 | 0.780 | 8.000 | 87 | 24 | 0.952 | 212ms | bm25,clusterRank,group,priority,textRank | ai 46 · deepseek 39 · youtube 39 · md 33 · 千问 30 · google 19 |
-| b 1 | bm25f | 600 | 591 | 9 | 2398 | 1650 | 0.780 | 8.000 | 87 | 24 | 0.956 | 188ms | bm25,clusterRank,group,priority,textRank | ai 46 · deepseek 39 · youtube 39 · md 33 · 千问 30 · google 19 |
-| title only | bm25f | 600 | 591 | 9 | 2297 | 1630 | 0.630 | 5.000 | 40 | 13 | 0.996 | 154ms | bm25,clusterRank,group,priority,textRank | ai 47 · deepseek 26 · 前消 16 · youtube 13 · com 12 · 匙補 12 |
-| tags only | bm25f | 600 | 595 | 5 | 1235 | 17 | 11.233 | 14.000 | 564 | 6 | 0.007 | 149ms | bm25,clusterRank,group,priority,textRank | com 496 · youtube 496 · AI 167 · deepseek 39 · md 12 · LLM 6 |
-| url field back | bm25f | 600 | 591 | 9 | 2398 | 1650 | 0.780 | 8.000 | 87 | 24 | 0.957 | 189ms | bm25,clusterRank,group,priority,textRank | ai 46 · deepseek 39 · youtube 39 · md 33 · 千问 30 · google 19 |
-| k 1 | fusion | 600 | 600 | 0 | 874 | 453 | 1.270 | 5.000 | 117 | 11 | 0.270 | 147ms | bm25,clusterRank,group,priority,textRank | ai 99 · sleep 85 · AI 43 · deepseek 25 · 前消 15 · youtube 13 |
-| k 10 | fusion | 600 | 590 | 10 | 2046 | 1478 | 0.575 | 5.000 | 36 | 11 | 0.868 | 151ms | bm25,clusterRank,group,priority,textRank | ai 35 · deepseek 25 · 前消 16 · youtube 13 · 匙補 12 · md 11 |
-| k 200 | fusion | 600 | 591 | 9 | 2310 | 1633 | 0.657 | 5.000 | 40 | 14 | 0.982 | 195ms | bm25,clusterRank,group,priority,textRank | ai 47 · deepseek 39 · 前消 16 · youtube 13 · dsh 12 · 匙補 12 |
-| maxDf 1 (floor off) | global | 600 | 591 | 9 | 2310 | 1630 | 0.643 | 5.000 | 40 | 14 | 1.000 | 143ms | bm25,clusterRank,group,priority,textRank | ai 47 · deepseek 39 · 前消 16 · youtube 13 · com 12 · dsh 12 |
-| maxDf 0.2 | global | 600 | 591 | 9 | 2310 | 1630 | 0.643 | 5.000 | 40 | 14 | 1.000 | 142ms | bm25,clusterRank,group,priority,textRank | ai 47 · deepseek 39 · 前消 16 · youtube 13 · com 12 · dsh 12 |
-| stop off | global | 600 | 591 | 9 | 2328 | 1633 | 0.643 | 5.000 | 40 | 14 | 0.963 | 166ms | bm25,clusterRank,group,priority,textRank | ai 47 · deepseek 39 · 前消 16 · vs 13 · youtube 13 · com 12 |
-| stop + maxDf 1 | global | 600 | 591 | 9 | 2328 | 1633 | 0.643 | 5.000 | 40 | 14 | 0.963 | 162ms | bm25,clusterRank,group,priority,textRank | ai 47 · deepseek 39 · 前消 16 · vs 13 · youtube 13 · com 12 |
-| no bm25 | signals | 600 | 597 | 3 | 1299 | 148 | 3.603 | 7.000 | 437 | 11 | 0.085 | 164ms | clusterRank,group,priority,textRank | sleep 358 · management 356 · AI 167 · deepseek 39 · wasgs 21 · 前消 12 |
-| no priority | signals | 600 | 591 | 9 | 2286 | 1635 | 0.862 | 5.000 | 28 | 12 | 0.993 | 174ms | bm25,clusterRank,group,textRank | ai 47 · 前消 16 · dsh 14 · youtube 13 · com 12 · 匙補 12 |
-| no graph | signals | 600 | 591 | 9 | 2278 | 1698 | 0.557 | 5.000 | 28 | 8 | 0.801 | 63ms | bm25,group,priority | AI 48 · deepseek 25 · 前消 16 · ai 14 · youtube 13 · com 11 |
-| no buckets | buckets | 600 | 591 | 9 | 2239 | 1616 | 0.540 | 1.000 | 0 | 0 | 0.991 | 147ms | bm25,clusterRank,priority,textRank | ai 47 · deepseek 13 · youtube 13 · com 12 · md 11 · 千问 10 |
-| mmr λ 0 | buckets | 600 | 591 | 9 | 2310 | 1630 | 0.643 | 5.000 | 40 | 14 | 1.000 | 143ms | bm25,clusterRank,group,priority,textRank | ai 47 · deepseek 39 · 前消 16 · youtube 13 · com 12 · dsh 12 |
-| mmr λ 1 | buckets | 600 | 591 | 9 | 2310 | 1630 | 0.643 | 5.000 | 40 | 14 | 1.000 | 148ms | bm25,clusterRank,group,priority,textRank | ai 47 · deepseek 39 · 前消 16 · youtube 13 · com 12 · dsh 12 |
-| graph λ 0 | buckets | 600 | 591 | 9 | 2310 | 1630 | 0.643 | 5.000 | 40 | 14 | 1.000 | 159ms | bm25,clusterRank,group,priority,textRank | ai 47 · deepseek 39 · 前消 16 · youtube 13 · com 12 · dsh 12 |
-| promote ≥ 2 | buckets | 600 | 591 | 9 | 2459 | 1672 | 0.719 | 5.000 | 131 | 56 | 0.973 | 148ms | bm25,clusterRank,group,priority,textRank | ai 105 · deepseek 39 · 前消 16 · api 14 · youtube 13 · com 12 |
-| promote ≥ 5 | buckets | 600 | 591 | 9 | 2267 | 1620 | 0.595 | 5.000 | 23 | 4 | 0.994 | 142ms | bm25,clusterRank,group,priority,textRank | ai 47 · deepseek 26 · 前消 16 · youtube 13 · com 12 · md 11 |
-| themes ≤ 1 | buckets | 600 | 591 | 9 | 2279 | 1624 | 0.605 | 5.000 | 40 | 8 | 0.996 | 148ms | bm25,clusterRank,group,priority,textRank | ai 47 · deepseek 26 · youtube 13 · com 12 · md 11 · 前消 11 |
+| preset | anchor | 600 | 599 | 1 | 2202 | 1501 | 1.983 | 34.000 | 79 | 12 | 1.000 | 760ms | bm25,clusterRank,group,priority,textRank | youtube 129 · ai 31 · 博正 30 · md 29 · seer 23 · 千问 15 |
+| urls on | bm25f | 600 | 600 | 0 | 3162 | 1405 | 1.922 | 31.000 | 230 | 38 | 0.500 | 1278ms | bm25,clusterRank,group,priority,textRank | google 165 · gx 162 · opera 160 · youtube 125 · chat 93 · utf 93 |
+| k1 0.5 | bm25f | 600 | 599 | 1 | 2232 | 1512 | 0.933 | 7.000 | 94 | 17 | 0.963 | 573ms | bm25,clusterRank,group,priority,textRank | youtube 129 · 千问 37 · ai 31 · 博正 30 · md 29 · seer 23 |
+| k1 3 | bm25f | 600 | 599 | 1 | 2232 | 1510 | 0.928 | 7.000 | 94 | 17 | 0.960 | 547ms | bm25,clusterRank,group,priority,textRank | youtube 129 · 千问 37 · ai 31 · 博正 30 · md 29 · seer 23 |
+| b 0 | bm25f | 600 | 599 | 1 | 2232 | 1515 | 0.934 | 7.000 | 94 | 17 | 0.965 | 1053ms | bm25,clusterRank,group,priority,textRank | youtube 129 · 千问 37 · ai 31 · 博正 30 · md 29 · seer 23 |
+| b 1 | bm25f | 600 | 599 | 1 | 2232 | 1511 | 0.927 | 7.000 | 94 | 17 | 0.967 | 889ms | bm25,clusterRank,group,priority,textRank | youtube 129 · 千问 37 · ai 31 · 博正 30 · md 29 · seer 23 |
+| title only | bm25f | 600 | 592 | 8 | 2068 | 1490 | 0.594 | 7.000 | 20 | 4 | 0.986 | 478ms | bm25,clusterRank,group,priority,textRank | youtube 43 · ai 32 · 博正 21 · seer 16 · 千问 15 · com 12 |
+| tags only | bm25f | 600 | 555 | 45 | 1169 | 45 | 106.233 | 189.000 | 510 | 23 | 0.013 | 582ms | bm25,clusterRank,group,priority,textRank | dup 412 · rejected 401 · AI 86 · suffix_DeepSeek 45 · suffix_GoogleSearch 41 · md 32 |
+| url field back | bm25f | 600 | 599 | 1 | 2232 | 1511 | 0.934 | 7.000 | 94 | 17 | 0.970 | 700ms | bm25,clusterRank,group,priority,textRank | youtube 129 · 千问 37 · ai 31 · 博正 30 · md 29 · seer 23 |
+| k 1 | fusion | 600 | 587 | 13 | 934 | 443 | 4.215 | 34.000 | 132 | 12 | 0.283 | 471ms | bm25,clusterRank,group,priority,textRank | youtube 129 · ai 69 · fixmechange 60 · AI 30 · 博正 30 · md 28 |
+| k 10 | fusion | 600 | 598 | 2 | 1971 | 1348 | 2.107 | 34.000 | 79 | 12 | 0.862 | 536ms | bm25,clusterRank,group,priority,textRank | youtube 129 · 博正 30 · md 28 · ai 25 · seer 23 · 千问 15 |
+| k 200 | fusion | 600 | 599 | 1 | 2202 | 1501 | 1.996 | 34.000 | 79 | 12 | 0.970 | 742ms | bm25,clusterRank,group,priority,textRank | youtube 129 · ai 33 · 博正 30 · md 29 · seer 23 · 千问 15 |
+| maxDf 1 (floor off) | global | 600 | 599 | 1 | 2202 | 1501 | 1.983 | 34.000 | 79 | 12 | 1.000 | 580ms | bm25,clusterRank,group,priority,textRank | youtube 129 · ai 31 · 博正 30 · md 29 · seer 23 · 千问 15 |
+| maxDf 0.2 | global | 600 | 591 | 9 | 2067 | 1493 | 0.593 | 7.000 | 20 | 4 | 0.993 | 543ms | bm25,clusterRank,group,priority,textRank | youtube 43 · ai 31 · 博正 21 · seer 16 · 千问 15 · com 12 |
+| stop off | global | 600 | 599 | 1 | 2224 | 1505 | 1.970 | 34.000 | 79 | 12 | 0.962 | 640ms | bm25,clusterRank,group,priority,textRank | youtube 129 · ai 31 · 博正 30 · md 29 · seer 23 · vs 20 |
+| stop + maxDf 1 | global | 600 | 599 | 1 | 2224 | 1505 | 1.970 | 34.000 | 79 | 12 | 0.962 | 703ms | bm25,clusterRank,group,priority,textRank | youtube 129 · ai 31 · 博正 30 · md 29 · seer 23 · vs 20 |
+| no bm25 | signals | 600 | 545 | 55 | 1073 | 131 | 1.986 | 7.000 | 336 | 8 | 0.074 | 770ms | clusterRank,group,priority,textRank | access 278 · telegram 278 · AI 67 · youtube 42 · suffix_DeepSeek 30 · 博正 19 |
+| no priority | signals | 600 | 597 | 3 | 2724 | 1511 | 1.886 | 34.000 | 78 | 12 | 0.987 | 663ms | bm25,clusterRank,group,textRank | dup 164 · youtube 129 · fixed 112 · merged 107 · fixmechange 96 · ai 32 |
+| no graph | signals | 600 | 598 | 2 | 2748 | 1556 | 1.651 | 34.000 | 87 | 16 | 0.798 | 264ms | bm25,group,priority | dup 176 · youtube 125 · fixed 115 · merged 109 · fixmechange 98 · AI 38 |
+| no buckets | buckets | 600 | 598 | 2 | 2574 | 1500 | 0.493 | 1.000 | 0 | 0 | 0.987 | 652ms | bm25,clusterRank,priority,textRank | dup 152 · fixed 112 · merged 107 · fixmechange 96 · youtube 43 · ai 32 |
+| mmr λ 0 | buckets | 600 | 599 | 1 | 2202 | 1501 | 2.003 | 35.000 | 79 | 12 | 0.997 | 517ms | bm25,clusterRank,group,priority,textRank | youtube 129 · ai 31 · 博正 30 · md 29 · seer 23 · 千问 15 |
+| mmr λ 1 | buckets | 600 | 599 | 1 | 2202 | 1501 | 1.983 | 34.000 | 79 | 12 | 1.000 | 679ms | bm25,clusterRank,group,priority,textRank | youtube 129 · ai 31 · 博正 30 · md 29 · seer 23 · 千问 15 |
+| graph λ 0 | buckets | 600 | 599 | 1 | 2202 | 1501 | 1.983 | 34.000 | 79 | 12 | 0.999 | 685ms | bm25,clusterRank,group,priority,textRank | youtube 129 · ai 31 · 博正 30 · md 29 · seer 23 · 千问 15 |
+| promote ≥ 2 | buckets | 600 | 599 | 1 | 2332 | 1543 | 1.972 | 34.000 | 163 | 54 | 0.972 | 584ms | bm25,clusterRank,group,priority,textRank | youtube 129 · ai 44 · 博正 34 · 千问 31 · md 29 · seer 25 |
+| promote ≥ 5 | buckets | 600 | 599 | 1 | 2157 | 1495 | 1.944 | 34.000 | 63 | 6 | 0.996 | 682ms | bm25,clusterRank,group,priority,textRank | youtube 129 · ai 31 · 博正 18 · seer 16 · 千问 15 · com 12 |
+| themes ≤ 1 | buckets | 600 | 599 | 1 | 2123 | 1495 | 1.295 | 34.000 | 79 | 6 | 0.996 | 576ms | bm25,clusterRank,group,priority,textRank | youtube 86 · ai 31 · 博正 21 · md 20 · seer 16 · 千问 15 |
 
 ## qarf alpha over the newest 600 of 1499 live rows · priority from pin cards (1) (23 tags)
 
 | case | rows | empty | sugg | dist | λ̄ | σλ | λ clip | sub rows | sub tags | jaccard | ms |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| α 0 (= rrf) | 600 | 9 | 2310 | 1630 | 0.667 | 0.000 | 0.00 | 40 | 14 | 1.000 | 148 |
-| α 0.5 | 600 | 9 | 2304 | 1629 | 0.591 | 0.136 | 0.02 | 37 | 12 | 0.959 | 207 |
-| α 1 (default) | 600 | 9 | 2312 | 1622 | 0.541 | 0.202 | 0.06 | 41 | 14 | 0.923 | 246 |
-| α 2 | 600 | 9 | 2314 | 1613 | 0.491 | 0.268 | 0.17 | 42 | 14 | 0.883 | 202 |
-| α 4 | 600 | 9 | 2314 | 1612 | 0.468 | 0.315 | 0.37 | 42 | 14 | 0.844 | 208 |
-| α 1, clip 0.2/0.8 | 600 | 9 | 2312 | 1621 | 0.549 | 0.186 | 0.10 | 41 | 14 | 0.925 | 211 |
-| α 1, clip 0.01/0.99 | 600 | 9 | 2311 | 1621 | 0.537 | 0.210 | 0.03 | 41 | 14 | 0.923 | 187 |
-| α 1, floor 0.3 | 600 | 9 | 2312 | 1622 | 0.562 | 0.163 | 0.17 | 41 | 14 | 0.925 | 200 |
-| α 1, ceil 0.7 | 600 | 9 | 2312 | 1624 | 0.533 | 0.194 | 0.27 | 41 | 14 | 0.916 | 192 |
-| α 0.5, clip 0.2/0.8 | 600 | 9 | 2304 | 1629 | 0.594 | 0.127 | 0.03 | 37 | 12 | 0.959 | 197 |
-| α 1, no burst | 600 | 9 | 2312 | 1622 | 0.541 | 0.202 | 0.06 | 41 | 14 | 0.923 | 189 |
+| α 0 (= rrf) | 600 | 1 | 2202 | 1501 | 0.667 | 0.000 | 0.00 | 79 | 12 | 1.000 | 560 |
+| α 0.5 | 600 | 1 | 2111 | 1495 | 0.567 | 0.165 | 0.00 | 40 | 10 | 0.952 | 726 |
+| α 1 (default) | 600 | 1 | 2124 | 1482 | 0.516 | 0.221 | 0.13 | 46 | 12 | 0.918 | 765 |
+| α 2 | 600 | 1 | 2119 | 1474 | 0.470 | 0.270 | 0.22 | 36 | 9 | 0.859 | 1550 |
+| α 4 | 600 | 1 | 2192 | 1467 | 0.443 | 0.314 | 0.40 | 36 | 9 | 0.824 | 699 |
+| α 1, clip 0.2/0.8 | 600 | 1 | 2219 | 1485 | 0.530 | 0.195 | 0.16 | 89 | 15 | 0.920 | 866 |
+| α 1, clip 0.01/0.99 | 600 | 1 | 2123 | 1481 | 0.508 | 0.237 | 0.01 | 46 | 12 | 0.918 | 837 |
+| α 1, floor 0.3 | 600 | 1 | 2223 | 1488 | 0.549 | 0.166 | 0.21 | 89 | 16 | 0.922 | 960 |
+| α 1, ceil 0.7 | 600 | 1 | 2123 | 1482 | 0.510 | 0.214 | 0.31 | 46 | 12 | 0.910 | 2381 |
+| α 0.5, clip 0.2/0.8 | 600 | 1 | 2206 | 1498 | 0.571 | 0.155 | 0.09 | 83 | 13 | 0.954 | 804 |
+| α 1, no burst | 600 | 1 | 2124 | 1482 | 0.516 | 0.221 | 0.13 | 46 | 12 | 0.918 | 1482 |
 
-## rrf over the 377 live rows carrying suffix_GoogleSearch · the pattern every row of the list repeats
+## rrf over the 398 live rows carrying suffix_GoogleSearch · the pattern every row of the list repeats
 
 | case | stage | rows | scored | empty | sugg | dist | mean | max | sub rows | sub tags | jaccard | ms | channels | roots |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| urls on, w url 1 | filtered | 377 | 377 | 0 | 2347 | 706 | 14.752 | 120.000 | 235 | 15 | 1.000 | 344ms | bm25,clusterRank,group,priority,textRank | gx 461 · opera 290 · google 270 · utf 227 · gws 129 · serp 42 |
-| urls off, w url 1 | filtered | 377 | 374 | 3 | 1574 | 1256 | 0.543 | 4.000 | 7 | 3 | 0.439 | 157ms | bm25,clusterRank,group,priority,textRank | database 12 · risk 7 · convexity 6 · macro 5 · system 5 · 3d 4 |
-| urls off, w url 0 | filtered | 377 | 374 | 3 | 1574 | 1259 | 0.544 | 4.000 | 7 | 3 | 0.439 | 110ms | bm25,clusterRank,group,priority,textRank | ideas 12 · risk 7 · convexity 6 · macro 5 · 3d 4 · ai 4 |
-| urls off, w url 0, floor on | filtered | 377 | 374 | 3 | 1574 | 1259 | 0.544 | 4.000 | 7 | 3 | 0.439 | 131ms | bm25,clusterRank,group,priority,textRank | ideas 12 · risk 7 · convexity 6 · macro 5 · 3d 4 · ai 4 |
-| urls off, w url 0, floor on, f= named | filtered | 377 | 374 | 3 | 1570 | 1256 | 0.544 | 4.000 | 7 | 3 | 0.438 | 133ms | bm25,clusterRank,group,priority,textRank | ideas 12 · risk 7 · convexity 6 · macro 5 · 3d 4 · ai 4 |
-
-## dynamic channels against a local provider, 24 live rows
-
-| case | dim | rows | scored | empty | sugg | dist | mean | max | prio | jaccard | ms | channels |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| rstext+embed | domain | 24 | 24 | 0 | 140 | 121 | 0.788 | 1.500 | 5 | 0.000 | 134ms | embed 0.53 · textRank 0.41 · clusterRank 0.04 · priority 0.02 · keyword 0.01 |
-| hybrid+embed+classify | visitTime | 24 | 24 | 0 | 152 | 123 | 0.488 | 1.034 | 5 | 0.000 | 123ms | embed 0.46 · textRank 0.45 · clusterRank 0.02 · suggest 0.02 · priority 0.02 · keyword 0.01 · tfidf 0.01 |
+| urls on, w url 1 | filtered | 398 | 398 | 0 | 2407 | 789 | 10.230 | 101.000 | 214 | 15 | 1.000 | 1659ms | bm25,clusterRank,group,priority,textRank | gx 432 · opera 308 · google 257 · utf 221 · gws 136 · serp 55 |
+| urls off, w url 1 | filtered | 398 | 394 | 4 | 1642 | 1421 | 0.535 | 3.000 | 6 | 3 | 0.429 | 468ms | bm25,clusterRank,group,priority,textRank | database 9 · ai 7 · convexity 6 · risk 6 · index 5 · macro 5 |
+| urls off, w url 0 | filtered | 398 | 394 | 4 | 1642 | 1422 | 0.535 | 3.000 | 6 | 3 | 0.429 | 337ms | bm25,clusterRank,group,priority,textRank | ideas 9 · ai 7 · convexity 6 · risk 6 · index 5 · macro 5 |
+| urls off, w url 0, floor on | filtered | 398 | 394 | 4 | 1642 | 1422 | 0.535 | 3.000 | 6 | 3 | 0.429 | 352ms | bm25,clusterRank,group,priority,textRank | ideas 9 · ai 7 · convexity 6 · risk 6 · index 5 · macro 5 |
+| urls off, w url 0, floor on, f= named | filtered | 398 | 394 | 4 | 1638 | 1420 | 0.535 | 3.000 | 6 | 3 | 0.429 | 395ms | bm25,clusterRank,group,priority,textRank | ideas 9 · ai 7 · convexity 6 · index 6 · risk 6 · macro 5 |
 
 ## aim pass
 

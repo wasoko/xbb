@@ -20,7 +20,7 @@ tags rows (the omnibox and the settings rows).
 ## Where it sits
 
 ```
-src/ui/seaPinGraph.ts   loadPinGraph: pins + the newest PIN_SEED_ROWS, scored with qarf
+src/ui/seaPinGraph.ts   loadPinGraph: pins + up to `base` tab/tag rows, scored with qarf
         │  PinGraphSeed { pins, rows, reports, graph, reach, recency }
         ▼
 src/ui/restGraph.ts     buildTagGraph · pinReach · tagGraphLayout   (tags, not pixels)
@@ -82,18 +82,20 @@ near 180 the frustum spans hundreds of grid steps, a grid finer than a screen ca
 
 ### The seed
 
-`seaPinGraph.loadPinGraph()` reads the pin cards plus the newest `PIN_SEED_ROWS` (2222) rows,
-four times the rest list's own page, because a hop is a statement about the whole window
+`seaPinGraph.loadPinGraph(setup)` reads the pin cards plus up to `base` (5000 by default)
+`type='tab'` and `type='tag'` rows, because a hop is a statement about the whole window
 rather than about the rows a reader happens to have scrolled to. It scores them with the
 `qarf` profile and returns `PinGraphSeed`: the pins, the rows, one report per scored row, the
 graph over them with a pin's variant spellings kept apart, each node's reach and each tag's
-`recency` (where the newest row that kept it sits in the window).
+`recency` (where the newest row that kept it sits in the window). The overrides and the
+generated taxonomy live in `star.tagger.md`; see
+[row=star.tagger.md](row=star.tagger.md).
 
-It is read once per `SeaView` mount, whatever route is showing, and its reports become
-`restTagStore`'s first pass so the omnibox's suggestion zone has hints before the rest list
-has ever run; the list's own pass then publishes over it. A seed that never lands writes the
-reason into the readout's legend instead of the bands, so an empty sky reads as an unread
-table.
+The row is read with `useLiveQuery`, so editing its `## Setup` re-seeds the sea and writing
+the generated `## Taxonomy` does not. Its reports become `restTagStore`'s first pass so the
+omnibox's suggestion zone has hints before the rest list has ever run; the list's own pass
+then publishes over it. A seed that never lands writes the reason into the readout's legend
+instead of the bands, so an empty sky reads as an unread table.
 
 ### The packing
 

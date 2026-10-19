@@ -40,6 +40,25 @@ async function writeHistory(history: NoticeHistory): Promise<void> {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
 }
 
+const noticeListeners = new Set<() => void>()
+/** Subscribe to notice history writes, so an open panel repaints instead of waiting for a
+ *  remount.
+ * @param listener - called after every `noticeStore` write
+ * @returns the unsubscribe function */
+export function subscribeNotices(listener: () => void) {
+  noticeListeners.add(listener)
+  return () => { noticeListeners.delete(listener) }
+}
+
+/** The stored history, read synchronously for a panel that paints on subscription. */
+function readHistorySync(): NoticeHistory {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as NoticeHistory;
+  } catch {
+    return {};
+  }
+}
+
 // ─── Local error log (fallback sink, webapp-safe) ─────────────────────────────
 
 export const logStoreSlice = (error: unknown): void => {
@@ -161,10 +180,13 @@ export async function noticeStore(
     logStoreSlice(e);
   }
 
-  // 2. Notification
+  // 2. Live panels (the bell menu while it is open)
+  noticeListeners.forEach((l) => l());
+
+  // 3. Notification
   fireToast(payload, options);
 
-  // 3. Supabase Realtime broadcast (fire-and-forget, opt-in)
+  // 4. Supabase Realtime broadcast (fire-and-forget, opt-in)
   if (broadcast && channel) {
     void broadcastNotice(payload, channel);
   }
@@ -195,12 +217,9 @@ export function NotificationDropdown() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    try {
-      const data = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}');
-      setHistory(data || {});
-    } catch {
-      setHistory({});
-    }
+    const read = () => setHistory(readHistorySync());
+    read();
+    return subscribeNotices(read);
   }, []);
 
   const toggleGroup = (id: string) => {
