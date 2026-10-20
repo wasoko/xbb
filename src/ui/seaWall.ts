@@ -4,8 +4,10 @@
  * The pinned headings hold a column at the front, the first of them exactly at sea level under
  * the star; every other pinned heading is stacked below it. The other tags tile one continuous
  * arc around the rest of the cylinder, ordered by the pin whose cluster they answer for, so the
- * canvas fills the wall instead of leaving a strip empty. Above the horizon the same canvas is
- * mirrored as a reflection: the same tags, dark and unlabelled, catching the star's light.
+ * canvas fills the wall instead of leaving a strip empty. Every cell — the pinned column
+ * included — scatters the rows that kept it as link points, and no cell lists its rows as text.
+ * Above the horizon the same canvas is mirrored as a reflection: the same tags, dark and
+ * unlabelled, catching the star's light.
  *
  * Nothing is sampled or invented. A region exists because the table holds the tag, and a link
  * point exists because a row carried it. Spacing is the renderer's business; this module lays
@@ -65,7 +67,7 @@ export interface WallRegion {
   reflection: boolean;
   /** The one pin at rise 0 that carries the star. */
   star: boolean;
-  /** Whether the region draws its name; a small cell waits for a hover instead. */
+  /** Whether the region draws its name; only a reflection does not. */
   label: boolean;
   /** The pinned heading this region answers for. */
   pin?: string;
@@ -74,8 +76,6 @@ export interface WallRegion {
   rows: SeaRow[];
   /** The rows drawn as points inside the region. */
   points: WallPoint[];
-  /** The rows annotated under a pinned heading. */
-  annotations: SeaRow[];
 }
 
 /** The wall, ready for a renderer. */
@@ -94,14 +94,6 @@ export interface SeaWall {
 
 /** How a wall is built. */
 export interface WallOptions extends SeaRegionOptions {
-  /** Row points one region carries at most; defaults to 6. */
-  pointsPerTag?: number;
-  /** Pinned rows annotated under their heading; defaults to 4. */
-  annotations?: number;
-  /** Row points a pinned heading carries, so its cell is not a lone name. */
-  pinPoints?: number;
-  /** Narrowest cell, in degrees, that draws its name; defaults to 15. */
-  labelDeg?: number;
   /** Cloud tags kept before the tail is left to the hover card; defaults to 220. */
   maxClouds?: number;
 }
@@ -218,27 +210,37 @@ function tileClouds(
 /**
  * Scatter a region's rows inside the wall it owns.
  *
+ * Every row is placed: the point count is the evidence, and a crowded cell is the renderer's
+ * business, not a reason to drop a link. The rows are laid on a jittered grid shaped like the
+ * cell, so a sparse cell spreads its few stars apart and a dense one fills its area evenly.
+ *
  * @param region the rectangle
  * @param rows the rows to place
- * @param limit how many to place
  * @param above whether the points belong to the reflected half
  * @returns the placed points
  */
 function scatter(
   region: { tag: string; lon0: number; lon1: number; rise0: number; rise1: number },
-  rows: readonly SeaRow[], limit: number, above: boolean,
+  rows: readonly SeaRow[], above: boolean,
 ): WallPoint[] {
   const rng = mulberry32(hashTag(region.tag));
   const width = region.lon1 - region.lon0;
   const height = region.rise1 - region.rise0;
   const padX = Math.min(width * 0.18, 4);
   const padY = Math.min(height * 0.18, 4);
+  const innerW = Math.max(0, width - padX * 2);
+  const innerH = Math.max(0, height - padY * 2);
+  const n = rows.length;
+  const cols = Math.max(1, Math.min(n, Math.round(Math.sqrt(n * Math.max(1e-6, width / Math.max(1e-6, height))))));
+  const band = Math.max(1, Math.ceil(n / cols));
   const out: WallPoint[] = [];
-  for (const row of rows.slice(0, limit)) {
-    const lon = region.lon0 + padX + (width - padX * 2) * rng();
-    const rise = region.rise0 + padY + (height - padY * 2) * rng();
+  rows.forEach((row, i) => {
+    const col = i % cols;
+    const line = Math.floor(i / cols);
+    const lon = region.lon0 + padX + innerW * ((col + rng()) / cols);
+    const rise = region.rise1 - padY - innerH * ((line + rng()) / band);
     out.push({
-      key: `${region.tag}:${row.key}:${lon.toFixed(3)}`,
+      key: `${region.tag}:${row.key}`,
       tag: region.tag,
       ref: row.ref,
       text: row.text,
@@ -248,7 +250,7 @@ function scatter(
       lon,
       rise,
     });
-  }
+  });
   return out;
 }
 
@@ -269,11 +271,7 @@ export function buildWall(
   const stats = new Map(tags.map((tag) => [tag.tag, tag]));
   const reach = pinReach(graph);
   const recency = (tag: string): number => opts.recency?.(tag) ?? 0.5;
-  const labelDeg = opts.labelDeg ?? 11;
   const maxClouds = opts.maxClouds ?? 220;
-  const pointLimit = opts.pointsPerTag ?? 6;
-  const annotationLimit = opts.annotations ?? 4;
-  const pinPoints = opts.pinPoints ?? 2;
 
   const reachOf = (tag: string): AnyNodeKind =>
     reach.get(tag) ?? (graph.roots.has(tag) ? 'pinned' : 'own');
@@ -305,7 +303,8 @@ export function buildWall(
     const bottom = cursor - (height + room);
     const cellW = aliases.length > 0 ? shape.pinCol / aliases.length : 0;
     aliases.forEach((alias, i) => {
-      entries.push({
+      const aliasRows = [...rowsOf(alias)];
+      const region: WallRegion = {
         key: alias,
         tag: alias,
         reach: 'alias',
@@ -324,13 +323,16 @@ export function buildWall(
         label: true,
         pin,
         labelText: `#${cropText(alias, WALL_TAG_CROP)}`,
-        rows: [...rowsOf(alias)],
+        rows: aliasRows,
         points: [],
-        annotations: [],
-      });
+      };
+      /* A spelling is still a cell with rows: its links are stars like any other tag's. */
+      region.points = scatter(region, aliasRows, false);
+      points.push(...region.points);
+      entries.push(region);
     });
     const isStar = pin === pinTags[0];
-    entries.push({
+    const region: WallRegion = {
       key: pin,
       tag: pin,
       reach: 'pinned',
@@ -350,8 +352,12 @@ export function buildWall(
       labelText: `#${cropText(pin, WALL_TAG_CROP)}`,
       rows,
       points: [],
-      annotations: rows.slice(0, annotationLimit),
-    });
+    };
+    /* The curated heading is a cell like the rest: its evidence hangs under it as points,
+       not as a list of links. */
+    region.points = scatter(region, rows, false);
+    points.push(...region.points);
+    entries.push(region);
     cursor = bottom - shape.shelfGap;
   }
 
@@ -392,7 +398,6 @@ export function buildWall(
   let below = 0;
   const regionOf = (cloud: Cloud, rect: Placed): WallRegion => {
     const rows = [...rowsOf(cloud.tag)];
-    const width = rect.lon1 - rect.lon0;
     return {
       key: cloud.tag,
       tag: cloud.tag,
@@ -411,24 +416,23 @@ export function buildWall(
       above: false,
       reflection: false,
       star: false,
-      label: width >= labelDeg,
+      label: true,
       ...(cloud.pin === undefined ? {} : { pin: cloud.pin }),
       labelText: `#${cropText(cloud.tag, WALL_TAG_CROP)}`,
       rows,
       points: [],
-      annotations: [],
     };
   };
 
   for (const item of placed) {
     const region = regionOf(item.cloud, item);
-    region.points = scatter(region, region.rows, pointLimit, false);
+    region.points = scatter(region, region.rows, false);
     points.push(...region.points);
     below = Math.min(below, region.rise0);
     entries.push(region);
 
     /* The reflection: the same rectangle over the horizon, dark and unlabelled. It carries
-       no points and no annotation, because it is the canvas's light, not a second reading. */
+       no points, because it is the canvas's light, not a second reading. */
     const mirrored: WallRegion = {
       ...region,
       key: `${region.tag}~`,
@@ -438,7 +442,6 @@ export function buildWall(
       reflection: true,
       label: false,
       points: [],
-      annotations: [],
     };
     above = Math.max(above, mirrored.rise1);
     entries.push(mirrored);

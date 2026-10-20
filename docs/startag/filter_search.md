@@ -29,7 +29,7 @@ Dexie applies a collection `filter()` before `limit()`, so the tombstone drop is
 |---|---|---|
 | `tabSeer` | `'card'` | `BadCardTab` (`src/ui/tabs.tsx:41`), fixed 555-row window |
 | `tabSeer` | anything else | `CardTab` (`src/ui/cardTab.tsx`), window grows by page |
-| `cardSeer` | `'cs1'` | pin rows render `Cs1Renderer` (`src/ui/cs1.tsx`): a heading's `#tag` buttons select the tag and its `{ref}` tokens open the row in the editor (a missing `*.feed.md` opens on its template, unpersisted), with a feed ref previewing the feed ([webfeed.md](../webfeed.md#the-pin-card-token-and-its-readout)) |
+| `cardSeer` | `'cs1'` | pin rows render `Cs1Renderer` (`src/ui/cs1.tsx`): a heading's `#tag` buttons select the tag and its `{ref}` tokens open the row in the editor (a missing `*.feed.md` opens on its template, unpersisted), with a feed ref previewing the feed ([srcfeed.md](../srcfeed.md#the-pin-card-token-and-its-readout)) |
 | `cardSeer` | `'cs2'` | pin rows render the cropped preview row (`Cs2Renderer`) |
 | `restGrouper` | `'rsdt'` (the block-only default) | rest rows split into one block per exact `dt`, newest first (`src/ui/restGrouper.ts`) |
 | `restGrouper` | `'rsid'` | `rsdt` plus one visit-time subgroup per exact `rec.visitTime` inside each date block; rows without a visit time stay under the date heading |
@@ -154,7 +154,7 @@ is what a link row shows. A row may instead register a `kind` and get that kind'
 own body: the cs1 `{w.feed.md}` token renders the feed readout in place of the row,
 so the preview shows the schedule, the sources read and the stored items rather than
 the markdown of the document that holds them
-([webfeed.md](../webfeed.md#the-pin-card-token-and-its-readout)). The first line carries
+([srcfeed.md](../srcfeed.md#the-pin-card-token-and-its-readout)). The first line carries
 the sync ages, `tid: <n>` when the row has one, and the row's tags as chips colored
 by `getColorChar11` — the same color `cs1` gives that tag's button.
 

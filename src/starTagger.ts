@@ -3,8 +3,8 @@
  * the taxonomy section the sea writes back.
  *
  * The dialect is deliberately small and local. It shares no parser with
- * `wFeed.ts`: a `##` opens a section, `key: value` lines under `## Setup` are the
- * overrides, and `## Taxonomy` is generated. A missing key leaves the existing
+ * `srcfeed.ts`: a `##` opens a section, `key: value` lines under `## Setup` are
+ * the overrides, and `## Taxonomy` is generated. A missing key leaves the existing
  * qarf profile in force, so a fresh row changes nothing until the user adds a
  * line.
  *

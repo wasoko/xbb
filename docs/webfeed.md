@@ -1,23 +1,29 @@
 # Web feeds (webfeed)
 
-`webfeed` reads the dynamic rows a `webfeed.md` row declares and hands them back
+`webfeed` reads the dynamic rows a source entry declares and hands them back
 with `tid` unset. A feed item exists only on the wire, so nothing is written until
 a caller pins, tags or clicks a row and commits it — the same split
 [sTag.md](startag/sTag.md) keeps between scoring and writing.
+
+The entries live in `srcfeed.md` and the read runs through `src/srcfeed.ts`; a
+`webfeed.md` an installation already holds is still read, through the legacy
+adapter in `srcfeed.ts`. An entry with a `Src:` row is read by that row (a site
+adapter or a tab adapter); an entry without one follows the strategy walk below.
 
 ## Where it sits
 
 | Piece | File | Owns |
 |---|---|---|
-| Engine | `src/webfeed.ts` | the document dialect, the strategy walk, backoff, the payload readers, the row plan, the commit port |
-| Rows | `src/webfeedRows.ts` | the seeded document, the `webfeed/extract.js` body, the seed and clear helpers |
+| Engine | `src/srcfeedWeb.ts` | the document dialect, the strategy walk, backoff, the payload readers, the row plan, the commit port |
+| Rows | `src/srcfeedRows.ts` | the legacy bodies, the seeds, and the compiled twins |
 | Global | `src/ui/routes.tsx` | `installWebfeedGlobal()` at boot, so a `type='src'` row can reach the engine |
-| Test | `test/webfeed.test.ts` | the dialect, the strategies, the readers, the body, and the live findings table |
-| Schedule | `src/wFeed.ts` | the `*.feed.md` dialect: its `## Setup` and its `## Posts as of …` blocks |
-| Read | `src/ui/wFeedRun.ts` | one read of those sources, and the block it writes back |
-| Readout | `src/ui/WFeedTip.tsx` | the hover preview the pin card's `{w.feed.md}` token shows |
+| Test | `test/startagfeed/srcfeedWeb.test.ts` | the dialect, the strategies, the readers, the body, and the live findings table |
+| Schedule | `src/srcfeed.ts` | the `*.feed.md` dialect: its `## Setup` and its `## Posts as of …` blocks |
+| Registry | `src/srcfeed.ts` | `srcfeed.md`: one entry per source, naming its `Src:` row |
+| Read | `src/srcfeed.ts` | one read of the entries a feed names, and the block it writes back |
+| Readout | `src/ui/FeedTip.tsx` | the hover preview the pin card's `{w.feed.md}` token shows |
 | Tokens | `src/ui/cs1Token.ts`, `src/ui/cs1.tsx` | `{ref}` and `#tag` tokens split out of a pin card heading |
-| Schedule test | `test/startagfeed/wFeed.test.ts`, `test/startagfeed/wFeedRun.test.ts` | the dialect's write rules, and one read end to end |
+| Schedule test | `test/startagfeed/srcfeedDoc.test.ts`, `test/startagfeed/srcfeedRun.test.ts` | the dialect's write rules, and one read end to end |
 
 The engine imports nothing from the app — no `sdb`, no Dexie, no DOM — the way
 `src/srctag.ts` does not: rows are accepted structurally as `FeedDa`, the `fetch`
@@ -74,7 +80,6 @@ starts a list whose `- x: y` lines continue it.
 * Base delay ms: 800
 * Cap delay ms: 8000
 * Timeout ms: 15000
-* Limit: 30
 ```
 
 | Field | Where | Meaning |
@@ -86,12 +91,12 @@ starts a list whose `- x: y` lines continue it.
 | `* Mobile:` | block | mirror to request as the `mobile` strategy; empty derives one from the id the block's URL names |
 | `* Proxy Headers:` | block | headers the `proxy` request adds, one `- name: value` per line; a block whose page is read for its posts asks the proxy for HTML here |
 | `* Tags:` | block | tags each row carries, added to the `feed` tag every row gets |
-| `* Limit:` | block | rows kept from this source |
+| `* Limit:` | block | rows kept from this source; omit to use the fallback, `0` keeps every row |
 | `* Proxy URL:` | `## Fallback` | proxy root, `https://r.jina.ai/` by default |
 | `* Retries:` | `## Fallback` | extra tries after the first, per request |
 | `* Base delay ms:` / `* Cap delay ms:` | `## Fallback` | the backoff's base and ceiling |
 | `* Timeout ms:` | `## Fallback` | per-request abort |
-| `* Limit:` | `## Fallback` | the default cap |
+| `* Limit:` | `## Fallback` | rows kept per source when the block names none; `0` keeps every row |
 
 A block with no `URL:` is ignored, and an unknown label is skipped, so a
 hand-edited document still parses. `ctx.args` overrides the document at call time
@@ -104,8 +109,8 @@ block or a URL the document does not hold.
 `webfeed.md` holds what a feed needs in order to be read at all; a `.feed.md` row holds the
 other half — when the next read is due, which blocks it reads, and what the last reads
 found. The dialect belongs to the suffix, not to one name: `w.feed.md` is what the seeder
-writes (`src/webfeedRows.ts`, `W_FEED_DOC`), and any other `*.feed.md` a pin card points at
-is read the same way. It is read through `src/wFeed.ts` (`isFeedRef`, `parseWFeedDoc`),
+writes (`src/srcfeed.ts`, `W_FEED_DOC`), and any other `*.feed.md` a pin card points at
+is read the same way. It is read through `src/srcfeed.ts` (`isFeedRef`, `parseWFeedDoc`),
 whose dialect is `webfeed.md`'s in the other direction: `##` opens a section and the
 section's own lines carry the values.
 
@@ -137,19 +142,25 @@ the user's own prose
 A section whose name opens with `Posts` is one read's output, and its heading's stamp is
 the read's time. A read inserts its block **directly under `## Setup`** — the newest
 first, older blocks below it — or at the end of the document when there is nothing after
-`Setup`; `next:` moves in place. The sources themselves are never repeated here, which is
+`Setup`; `next:` moves in place. A read that finds no item newer than the previous
+block writes no block but still moves `next:`. The sources themselves are never repeated here, which is
 what keeps one URL or API in one place.
 
-The paragraph list a read keeps is `POST_ITEMS` (6) items, newest first across sources,
-as `- **<block>** <item> — <ref>` lines. Nothing else is written: the rows `webfeed`
-returns stay rows, and this document is the only record of them.
+A read keeps only the items newer than the newest post stored in the previous
+`## Posts as of …` block: it matches that post in the new feed and trims from
+there, newest first across sources, as `- **<block>** <item> — <ref>` lines.
+Nothing else is written: the rows `webfeed` returns stay rows, and this document
+is the only record of them. The readout labels an earlier failed strategy as
+`fallback failed: …` when a later one answered, and says `read failed` only when
+no source answered. A `*.feed.md` read asks for every row and ignores `* Limit:`;
+the previous post, not a fixed count, bounds what it stores.
 
 **A ref with no row yet.** `feedDraft(ref)` is the text such a ref opens with: the same
 template, titled after the ref (`x.feed.md` opens as `# x.feed`). The editor uses it for a
 tab whose ref has no row (`src/ui/editor.tsx`), so the buffer holds a feed document from the
 first keystroke and **nothing is persisted** until the user saves it — the preview shows the
 same template behind `no row yet — the editor opens on this template`, and a read
-(`runWFeedRefresh({ ref })`) writes the row the
+(`runSrcFeed({ ref, store })`) writes the row the
 first time it has items to store.
 
 ## The pin card token and its readout
@@ -161,17 +172,19 @@ rather than on a blank draft, so a card can point at a feed it wants written. Th
 the document's own readout:
 
 - every other ref previews as the row it names;
-- any `{*.feed.md}` previews the feed (`src/ui/WFeedTip.tsx`): the frequency, when the next
+- any `{*.feed.md}` previews the feed (`src/ui/FeedTip.tsx`): the frequency, when the next
   read is due, the `webfeed.md` blocks it reads and the host of each (`wallstreetcn.com`) —
   the blocks that answered when `sources:` is empty, and a `not in webfeed.md` note when the
   document names one that no longer exists — and the items of the newest
   `## Posts as of …` block, or, while the row does not exist, the template the editor opens on;
 - its `refresh` button runs one read now, into that ref.
 
-One read (`src/ui/wFeedRun.ts`) runs the `webfeed/extract.js` row's own body through
-`runsrc`, so the script a user edits is the script that runs, and falls back to
-`extractFromDoc` when that row is gone. It writes only when a source answered with at
-least one item, so a source that refused every strategy leaves the document — and its due
+One read (`src/srcfeed.ts`) resolves each named entry: an entry with a `Src:` row
+runs that row through `runsrc` (the row text, its compiled twin, or the matching tab
+when the row says `@requires tab`), and an entry without one is read by the built-in
+walk (`extractSource`) — the script row a user edits is the one a `Src:` entry names,
+not a hidden engine default. It writes only when a source answered with at least one
+item, so a source that refused every strategy leaves the document — and its due
 time — as it was. A document whose `next` has passed is read once by itself when the
 preview opens (at most once per five minutes per ref), so a stale feed catches up as soon
 as it is looked at. The written row is pushed like any edit.
@@ -281,16 +294,10 @@ all: `srctag.tagRows(rows)` accepts a `tid`-less row structurally.
 
 ## Reading a feed from a script
 
-Seeding is explicit, exactly as it is for the `srctag/*` rows:
-
-```ts
-import { seedWebfeedRows } from './src/webfeedRows';
-import { db } from './src/sdb';
-await seedWebfeedRows(db.das);   // keeps any live row the user already has
-```
-
-A live row is never overwritten, and `clearWebfeedRows` tombstones what was
-written so the removal syncs. With the rows in place, a chat can drive one
+A fresh installation seeds `srcfeed.md` and its adapters; see
+[srcfeed.md](srcfeed.md) for `seedSrcFeedRows`. An installation that still holds
+`webfeed.md` reads it through the legacy adapter, and its `webfeed/extract.js`
+row still runs. With the rows in place, a chat can drive one
 extraction through `run_src` — which needs gate level `rwr` or above
 ([recr-agloop.md](recr-agloop.md)):
 
@@ -299,18 +306,19 @@ run_src { ref: 'webfeed/extract.js', args: { sources: ['wallstreetcn'], limit: 5
 ```
 
 The body returns a report rather than the rows — one line per source with the
-strategy that answered, its attempts, and the first few rows — because `run_src`
-hands a string back to the model. The rows themselves are one call away on the
+strategy that answered, its attempts, an `answered` list, and the first few rows —
+because `run_src` hands a string back to the model. The rows themselves are one
+call away on the
 page: `webfeed.extractFromDoc({ db, args })`.
 
 ## The live findings
 
-`test/webfeed.test.ts` reads the four seeded sources over the real network and
+`test/startagfeed/srcfeedWeb.test.ts` reads the four seeded sources over the real network and
 writes `test-artifacts/webfeed-findings.json`. It is opt-in, because a feed that
 never answers costs its whole timeout:
 
 ```sh
-WEBBFEED_E2E=1 npx vitest run test/webfeed.test.ts
+WEBBFEED_E2E=1 npx vitest run test/startagfeed/srcfeedWeb.test.ts
 ```
 
 Measured 2026-10-15:
@@ -361,4 +369,4 @@ retry budget of the live run.
 - `docs/recr-agloop.md` — `run_src`, the `rwr` gate, and the `secret.md` dialect
   this document borrows.
 - `docs/startag/rstag.md` — the rest-list pass over tagged rows.
-- `src/webfeed.ts`, `src/webfeedRows.ts`, `src/runsrc.ts`, `test/webfeed.test.ts`.
+- `src/srcfeedWeb.ts`, `src/srcfeedRows.ts`, `src/runsrc.ts`, `test/startagfeed/srcfeedWeb.test.ts`.

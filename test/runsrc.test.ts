@@ -12,8 +12,8 @@ import {
   SrcUnavailableError, type RecrScriptContext,
 } from '../src/runsrc';
 import { needsTab, rowMeta } from '../src/rowMeta';
-import { WEBFEED_BODY_TWINS, WEBFEED_EXTRACT_BODY, webFeedReport } from '../src/webfeedRows';
-import type { FeedAttempt, FeedDa, FeedDocResult } from '../src/webfeed';
+import { SRCFEED_BODY_TWINS, WEBFEED_EXTRACT_BODY, webFeedReport } from '../src/srcfeedRows';
+import type { FeedAttempt, FeedDa, FeedDocResult } from '../src/srcfeedWeb';
 
 /** `ctx` of a `run_src` call, with the test's own console. */
 const ctx = (args: unknown = {}): RecrScriptContext =>
@@ -121,7 +121,7 @@ describe('feed twin parity', () => {
   };
 
   it('is registered for the seeded body text', () => {
-    expect(WEBFEED_BODY_TWINS.has(WEBFEED_EXTRACT_BODY)).toBe(true);
+    expect(SRCFEED_BODY_TWINS.has(WEBFEED_EXTRACT_BODY)).toBe(true);
   });
 
   it('reproduces the body report, including showRows and the source lines', async () => {

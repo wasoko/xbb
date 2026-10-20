@@ -1,6 +1,6 @@
 /**
- * webfeed.test.ts — the `webfeed.md` dialect, the strategy walk, the payload
- * readers, and the `webfeed/extract.js` body.
+ * srcfeedWeb.test.ts — the built-in web walk: the legacy `webfeed.md` dialect, the
+ * strategy walk, the payload readers, and the `webfeed/extract.js` body.
  *
  * The last describe is the live measurement the module exists for: it reads the
  * four seeded sources over the real network and prints which strategy answered
@@ -11,7 +11,7 @@
  *
  * It is opt-in because a request to a feed that never answers costs its timeout:
  *
- *   WEBBFEED_E2E=1 npx vitest run test/webfeed.test.ts
+ *   WEBBFEED_E2E=1 npx vitest run test/startagfeed/srcfeedWeb.test.ts
  *
  * `WEBBFEED_E2E_STRICT=1` turns "some source answered" into an assertion, and
  * `WEBBFEED_E2E_RETRIES` moves the live run's retry budget.
@@ -27,8 +27,8 @@ import {
   fetchWithBackoff, htmlPostItems, installWebfeedGlobal, jsonFeedItems, markdownFeedItems,
   mobileUrl, parseFeedPayload, parseWebfeedDoc, planFeedRows, planStrategies, WEBFEED_REF,
   type BackoffConfig, type FeedDa, type FeedItem, type FeedSource, type FeedTable,
-} from '../../src/webfeed';
-import { WEBFEED_DOC, WEBFEED_EXTRACT_BODY } from '../../src/webfeedRows';
+} from '../../src/srcfeedWeb';
+import { WEBFEED_DOC, WEBFEED_EXTRACT_BODY } from '../../src/srcfeedRows';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -37,7 +37,7 @@ afterEach(() => {
 
 const source = (over: Partial<FeedSource> = {}): FeedSource => ({
   name: 'demo', url: 'https://demo.test/page', type: 'url', apis: [], session: '',
-  mobile: '', proxy: '', proxyHeaders: {}, tags: ['feed'], limit: 0, ...over,
+  mobile: '', proxy: '', proxyHeaders: {}, tags: ['feed'], ...over,
 });
 
 /** One stub response per URL substring; every call is recorded, headers included. */
@@ -153,7 +153,7 @@ describe('parseWebfeedDoc', () => {
     expect(doc.sources[3].apis[0]).toContain('containerid=2304132337530130');
     expect(doc.fallback.proxy).toBe('https://r.jina.ai/');
     expect(doc.fallback.retries).toBe(2);
-    expect(doc.fallback.limit).toBe(30);
+    expect(doc.fallback.limit).toBe(0);
   });
 
   it('keeps the defaults for what the document leaves out', () => {
@@ -167,6 +167,14 @@ describe('parseWebfeedDoc', () => {
     const doc = parseWebfeedDoc('## Sources\n\n### empty\n* Type: url\n\n### b\n* URL: https://b.test/\n');
 
     expect(doc.sources.map((s) => s.name)).toEqual(['b']);
+  });
+
+  it('keeps a block whose only request is an API', () => {
+    const doc = parseWebfeedDoc('## Sources\n\n### api\n* API:\n  - lives: https://api.test/lives\n');
+
+    expect(doc.sources.map((s) => s.name)).toEqual(['api']);
+    expect(doc.sources[0].url).toBe('');
+    expect(doc.sources[0].apis).toEqual(['https://api.test/lives']);
   });
 });
 
@@ -297,6 +305,19 @@ describe('payload readers', () => {
     expect(items[0].txt).toBe('[转发 2 · 评论 0 · 赞 9] 【纯代码跑出的爆款动画】这个开源项目整理了数百条提示词与案例。');
     expect(items[0].dt?.toISOString()).toBe('2026-10-16T04:43:00.000Z');
     expect(items[1].txt).toBe('[转发 1 · 评论 3 · 赞 4] 转发时写的评论 转发自 某号 被转发的原文');
+  });
+
+  it('keeps a post without an href under one ref while its counts tick', () => {
+    const page = (count: string): string => `<html><body>
+  <a class="post-link">
+    <div class="post-text">一条没有链接的正文，用来检查计数变化时的身份。</div>
+    <div class="post-actions"><div class="action"><span>${count}</span></div></div>
+  </a></body></html>`;
+    const first = htmlPostItems(page('2'), 'https://www.sina.cn/media/1234567890');
+    const second = htmlPostItems(page('9'), 'https://www.sina.cn/media/1234567890');
+
+    expect(first[0].ref).toBe(second[0].ref);
+    expect(first[0].txt).not.toBe(second[0].txt);
   });
 
   it('reads an HTML body for its posts rather than for its stylesheet', () => {
@@ -525,12 +546,13 @@ describe('webfeed/extract.js', () => {
     const doc = '## Sources\n\n### a\n* URL: https://demo.test/page\n* API:\n  - x: https://api.test/1\n';
 
     const out = await runBody(body, ctx([docRow(doc)], { retries: 0 })) as {
-      ref: string; total: number; sources: string[]; das: FeedDa[];
+      ref: string; total: number; sources: string[]; answered: string[]; das: FeedDa[];
     };
 
     expect(out.ref).toBe(WEBFEED_REF);
     expect(out.total).toBe(2);
     expect(out.sources[0]).toContain('a -> api, 2 row(s)');
+    expect(out.answered).toEqual(['a']);
     expect(out.das[0].tid).toBeUndefined();
   });
 

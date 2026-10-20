@@ -341,7 +341,7 @@ is where the contracts are:
   readings are chosen in.
 - [rstag.md](rstag.md) — the pass and the 3-stage chain, the knobs, the measurements, the risks.
 - [filter_search.md](filter_search.md) — the read path the chips and the omnibox feed.
-- [webfeed.md](../webfeed.md) — the feeds that hand `tid`-less rows to `tagRows`.
+- [srcfeed.md](../srcfeed.md) — the feeds that hand `tid`-less rows to `tagRows`.
 - [greet.md](../greet.md) — the settings tree a bar row writes.
 - `src/ui/restGraph.ts`, `src/ui/restGraphWindow.ts`, `src/ui/TagGraph.tsx`,
   `src/ui/restCue.ts`, `src/ui/seaSky.ts`, `src/ui/seaRegion.ts`, `src/ui/seaStars.ts`,

@@ -4,11 +4,10 @@ Opening prompt for a new implementation session. Read this file to the end, then
 [`docs/script-post.md`](script-post.md) for the gathered CSP facts and the ScriptCat prior art.
 Do not re-litigate the decisions in §2; they follow from that doc.
 
-> **Status (2026-10-19): implemented, with the scope corrections in §2.6 and §9.** `tabsrc`
-> was dropped: `extSrc` is one more case of `run_src`, so there is no separate tool, runner
-> name, or UI entry, and `recr` already offers it at `rwr`. The shipped code is
-> `src/rowMeta.ts`, `src/runsrc.ts` (routing), `src/extsrc.ts`, `src/extsrcRows.ts`; the
-> current-state doc is [extsrc.md](extsrc.md).
+> **Status (2026-10-20): superseded in part by `srcfeed`.** The header routing, the tab
+> runner and the refusal catalogue still ship, now as `src/srcfeedTab.ts`; `extsrc.md` is
+> a legacy input to `srcfeed`'s registry adapter, and the current-state doc is
+> [srcfeed.md](srcfeed.md). The decisions in §2.6 and §9 still hold.
 
 ## 1. Facts already established (do not rediscover)
 
@@ -22,8 +21,8 @@ Do not re-litigate the decisions in §2; they follow from that doc.
 - Four `runBody` call sites: `src/ui/wFeedRun.ts:115`, `src/srctag.ts:2444` via
   `loadAdaptersFromStore:2468`, `src/ui/restGrouper.ts:1004`, `src/recr.ts:1027`.
 - `WEBFEED_EXTRACT_BODY` (`src/webfeedRows.ts`) is a function body whose only call is
-  `globalThis.webfeed.extractFromDoc({ db: ctx.db, args, console })`; `POST_ITEMS = 6`
-  (`src/wFeed.ts:49`) is under that body's default `showRows: 10`.
+  `globalThis.webfeed.extractFromDoc({ db: ctx.db, args, console })`; its report still
+  slices `das` to `showRows` for `run_src`, while `runWFeedRefresh` asks for every row.
 - `tabext/ext/manifest.json` already declares the `userScripts` permission and `<all_urls>`.
 - ScriptCat's essence, with links and file paths: `docs/script-post.md` §Prior art.
 

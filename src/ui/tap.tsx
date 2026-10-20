@@ -453,6 +453,8 @@ export function UserBar() {
   const snapNameRow = useTreeCac<string>('snap_name');
   /** Newest sync-action status (`upSnap`); `stts` is not React state, so subscribe to it. */
   const lastAction = useSyncExternalStore(fc.subscribeStts, () => fc.getStts('-lastgreet'));
+  /** Newest hourly perf warning, or `''` while every reading is inside its threshold. */
+  const perfStts = useSyncExternalStore(fc.subscribeStts, () => fc.getStts('-perf'));
   /** Recent snapshots behind the `snap_pin` datalist, refilled on every menu open. */
   const [snapOpts, setSnapOpts] = useState<string[]>([]);
   const slowest = [...greetAct.steps].sort((a, b) => b.ms - a.ms).slice(0, 3)
@@ -972,6 +974,7 @@ export function UserBar() {
               <div className="user-dropdown-item"><a href="service-terms.html" target="_blank">Service Terms</a> <a href="privacy-policy.html" target="_blank">Privacy Policy</a></div>
               <div>{snapPin ? `pinned ${snapPin.replace('.cbor.pako','')}` : 'auto: newest snap'} · {fc.BUILD_TIME}</div>
               <div id="stts-lastgreet">{lastAction}</div>
+              {perfStts && <div id="stts-perf" style={{ color: '#f59e0b' }}>{perfStts}</div>}
               <div style={{opacity:.8}}>{greetDetail}</div>
               {syncStat?.rec && Object.entries(syncStat.rec)
                 .sort(([, a], [, b]) => new Date(b.at).getTime() - new Date(a.at).getTime())

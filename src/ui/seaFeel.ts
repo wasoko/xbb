@@ -191,6 +191,43 @@ export function createRig(): SeaRig {
   };
 }
 
+/** The pose the renderer draws, in the units its own view state takes. */
+export interface SeaPose {
+  /** Rise the camera is level with, in degrees. */
+  camY: number;
+  /** Content rotation, in radians. */
+  phi: number;
+  /** Camera pitch, in degrees. */
+  pitch: number;
+  /** Camera roll, in degrees. */
+  roll: number;
+  /** Vertical field of view, in degrees. */
+  fov: number;
+}
+
+/** Per-frame pose changes smaller than these move the image by less than a pixel. */
+export const SEA_IDLE = {
+  camY: 0.004, phi: 1e-4, pitch: 0.001, roll: 0.001, fov: 0.001,
+} as const;
+
+/**
+ * Whether two poses differ too little for a new frame to change the image.
+ *
+ * The springs converge exponentially, so without this test they would keep the sea drawing
+ * forever; the bounds are a fraction of the smallest screen distance one pose unit covers.
+ *
+ * @param prev the pose of the last drawn frame
+ * @param next the pose this frame would draw
+ * @returns true when the frame can be skipped
+ */
+export function poseSettled(prev: SeaPose, next: SeaPose): boolean {
+  return Math.abs(next.camY - prev.camY) <= SEA_IDLE.camY
+    && Math.abs(next.phi - prev.phi) <= SEA_IDLE.phi
+    && Math.abs(next.pitch - prev.pitch) <= SEA_IDLE.pitch
+    && Math.abs(next.roll - prev.roll) <= SEA_IDLE.roll
+    && Math.abs(next.fov - prev.fov) <= SEA_IDLE.fov;
+}
+
 /** What one frame is told about the world around the rig. */
 export interface RigStep {
   /** Seconds since the last frame. */

@@ -105,14 +105,23 @@ export function subscribeStts(listener: () => void) {
  * @param scope - the `stts` scope, e.g. `-lastgreet`
  * @returns the message, or `''` before the scope first fires */
 export const getStts = (scope = '') => sttsDict[scope + 'STTS'] ?? ''
-export const stts = (message: string, scope = '') => {
+/**
+ * Show a status line and file it as a notice on the same scope.
+ *
+ * @param message the line; one beginning `err` is logged as an error
+ * @param scope the topic, e.g. `-lastgreet`
+ * @param level the notice level; absent derives it from the `err` prefix
+ * @returns the message
+ */
+export const stts = (message: string, scope = '',
+  level?: 'status' | 'info' | 'warning' | 'error') => {
   const stKey=scope+'STTS'
   sttsDict[stKey] = message
   const isErr = message.slice(0,3).toLowerCase().startsWith("err")
   if (isErr)
     console.error(scope,message);
   console.info(scope,message);
-  noticeStore({scope, message, level:isErr? 'error': 'info'})
+  noticeStore({scope, message, level:level ?? (isErr? 'error': 'info')})
   sttsCB({type: 'stts'+scope, stts: message})
   sttsListeners.forEach(l => l())
   return message;

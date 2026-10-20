@@ -311,7 +311,7 @@ host, so the browser-visible error stands as it is.
 - **R9 — a `@requires tab` row is only runnable in the extension.** `runsrc` routes it to
   `chrome.userScripts.execute` in the tab its source names; the webapp answers
   `not-extension`, and the extension names the user-script setting when it is off. The row
-  returns `Da`-shaped rows and writes nothing. See [extsrc.md](extsrc.md).
+  returns `Da`-shaped rows and writes nothing. See [srcfeed.md](srcfeed.md).
 - **Minor:** tool calls are sequential, so one slow tool blocks the turn;
   `usage` is only present when the provider honours
   `stream_options.include_usage`; `LLM_PROXY_TARGET` covers one provider at a

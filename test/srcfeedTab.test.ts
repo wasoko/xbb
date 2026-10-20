@@ -1,16 +1,17 @@
 // @vitest-environment happy-dom
 /**
- * extsrc.test.ts — the extension-only `run_src` case: the document dialect, the
- * header, the refusal catalogue, and the body that reads a live tab.
+ * srcfeedTab.test.ts — the tab port of a feed source: the header, the refusal
+ * catalogue, and the body that reads a live tab.
  *
  * The body is exercised by evaluating the wrapper `chrome.userScripts` would be
  * given, against a happy-dom document: the wrapper is the same string either way.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
+import { parseExtSrcDoc } from '../src/srcfeed';
+import { EXTSRC_DOC, EXTSRC_EXTRACT_BODY } from '../src/srcfeedRows';
 import {
-  extEnv, extFailure, isExtensionPage, parseExtSrcDoc, resetExtEnv, wrapTabBody,
-} from '../src/extsrc';
-import { EXTSRC_DOC, EXTSRC_EXTRACT_BODY } from '../src/extsrcRows';
+  isExtensionPage, resetTabEnv, tabEnv, tabFailure, wrapTabBody,
+} from '../src/srcfeedTab';
 import { rowMeta } from '../src/rowMeta';
 
 /** What one wrapped body resolves to. */
@@ -34,10 +35,10 @@ async function runInTab(source: Record<string, unknown>): Promise<WrappedResult>
 
 beforeEach(() => {
   document.body.innerHTML = '';
-  resetExtEnv();
+  resetTabEnv();
 });
 
-describe('document dialect', () => {
+describe('legacy document dialect', () => {
   it('reads the seeded sources', () => {
     const sources = parseExtSrcDoc(EXTSRC_DOC);
     expect(sources.map(s => s.name)).toEqual(['gemini', 'deepseek']);
@@ -61,7 +62,7 @@ describe('row header', () => {
 
 describe('refusal catalogue', () => {
   it('names the setting, the steps and the reference when user scripts are off', () => {
-    const f = extFailure('user-scripts-off', { ref: 'extsrc/extract.js' });
+    const f = tabFailure('user-scripts-off', { ref: 'extdom/dsc' });
     const steps = f.steps.join('\n');
     expect(f.message).toBe('Allow User Scripts is off for this extension');
     expect(steps).toContain('chrome://extensions');
@@ -71,30 +72,30 @@ describe('refusal catalogue', () => {
   });
 
   it('carries the probe reason when it has one', () => {
-    const f = extFailure('user-scripts-off', { ref: 'r', reason: 'no such permission' });
+    const f = tabFailure('user-scripts-off', { ref: 'r', reason: 'no such permission' });
     expect(f.message).toContain('no such permission');
   });
 
   it('names the pattern when no tab matches', () => {
-    const f = extFailure('no-tab', { ref: 'r', url: 'https://e.test/*' });
+    const f = tabFailure('no-tab', { ref: 'r', url: 'https://e.test/*' });
     expect(f.message).toBe('no open tab matches https://e.test/*');
     expect(f.steps[0]).toContain('Open https://e.test/*');
   });
 
   it('uses the source prompt when the page needs a manual step', () => {
-    const f = extFailure('needs-user', { ref: 'r', prompt: 'open the history sidebar' });
+    const f = tabFailure('needs-user', { ref: 'r', prompt: 'open the history sidebar' });
     expect(f.message).toBe('open the history sidebar');
   });
 
   it('names the extension when the webapp runs a tab row', () => {
-    expect(extFailure('not-extension', { ref: 'extsrc/extract.js' }).message).toContain('needs the extension');
+    expect(tabFailure('not-extension', { ref: 'extdom/dsc' }).message).toContain('needs the extension');
   });
 });
 
 describe('environment', () => {
   it('reports a webapp, not an extension page', async () => {
     expect(isExtensionPage()).toBe(false);
-    await expect(extEnv()).resolves.toMatchObject({ extension: false, userScripts: false });
+    await expect(tabEnv()).resolves.toMatchObject({ extension: false, userScripts: false });
   });
 });
 

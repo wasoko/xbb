@@ -8,8 +8,8 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  PITCH_NOTCHES, SEA_FEEL, createRig, damp, fogDensity, leanedPitch, notch, notchIndex,
-  notchPitch, seaLevel, springStep, stepRig, wheelScroll, wheelZoom,
+  PITCH_NOTCHES, SEA_FEEL, SEA_IDLE, createRig, damp, fogDensity, leanedPitch, notch, notchIndex,
+  notchPitch, poseSettled, seaLevel, springStep, stepRig, wheelScroll, wheelZoom,
 } from '../../src/ui/seaFeel';
 
 describe('damp', () => {
@@ -141,5 +141,31 @@ describe('scroll and yaw', () => {
     }
     expect(rig.roll).toBe(0);
     expect(leanedPitch(rig, true)).toBe(rig.pitch);
+  });
+});
+
+describe('pose settle', () => {
+  const pose = { camY: 12, phi: 0.4, pitch: -12, roll: 2, fov: 48 };
+
+  it('accepts an unchanged pose', () => {
+    expect(poseSettled(pose, { ...pose })).toBe(true);
+  });
+
+  it('accepts a change below the pixel bound on every axis', () => {
+    expect(poseSettled(pose, {
+      camY: pose.camY + SEA_IDLE.camY,
+      phi: pose.phi + SEA_IDLE.phi,
+      pitch: pose.pitch + SEA_IDLE.pitch,
+      roll: pose.roll + SEA_IDLE.roll,
+      fov: pose.fov + SEA_IDLE.fov,
+    })).toBe(true);
+  });
+
+  it('refuses a change above the pixel bound on any axis', () => {
+    expect(poseSettled(pose, { ...pose, camY: pose.camY + SEA_IDLE.camY * 2 })).toBe(false);
+    expect(poseSettled(pose, { ...pose, phi: pose.phi + SEA_IDLE.phi * 2 })).toBe(false);
+    expect(poseSettled(pose, { ...pose, pitch: pose.pitch + SEA_IDLE.pitch * 2 })).toBe(false);
+    expect(poseSettled(pose, { ...pose, roll: pose.roll + SEA_IDLE.roll * 2 })).toBe(false);
+    expect(poseSettled(pose, { ...pose, fov: pose.fov + SEA_IDLE.fov * 2 })).toBe(false);
   });
 });

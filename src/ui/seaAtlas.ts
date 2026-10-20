@@ -150,10 +150,10 @@ function paint(
   ctx.font = fontOf(item);
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
-  ctx.shadowColor = 'rgba(0, 4, 9, 0.92)';
-  ctx.shadowBlur = Math.max(2, item.fontPx * 0.34);
-  ctx.lineWidth = Math.max(1, item.fontPx * 0.1);
-  ctx.strokeStyle = 'rgba(0, 4, 9, 0.7)';
+  ctx.shadowColor = 'rgba(0, 4, 9, 0.85)';
+  ctx.shadowBlur = Math.max(2, item.fontPx * 0.2);
+  ctx.lineWidth = Math.max(1, item.fontPx * 0.055);
+  ctx.strokeStyle = 'rgba(0, 4, 9, 0.8)';
   ctx.strokeText(item.text, x + PAD, y + slot.h / 2);
   ctx.shadowBlur = 0;
   ctx.fillStyle = '#ffffff';

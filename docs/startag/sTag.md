@@ -213,7 +213,7 @@ reuses the older vectors until the table is cleared.
 `#`-prefixed tokens that start a line or follow whitespace. The pattern's character class
 is `[\p{L}\p{N}_]`, so a hyphen **ends** a tag: `#machine-learning` yields `machine` and
 `learning` is left as text. A `{ref}` token is not a tag and proposes none — the renderer
-draws it as the document it names ([webfeed.md](../webfeed.md#the-pin-card-token-and-its-readout)).
+draws it as the document it names ([srcfeed.md](../srcfeed.md#the-pin-card-token-and-its-readout)).
 `pinPriorityTags` concatenates the cards and de-duplicates
 globally, in first-appearance order. Which rows count as cards is the caller's choice —
 the app uses `type === 'md' && ref.startsWith('pin')`, the predicate in
@@ -902,10 +902,10 @@ Findings from moving and re-reading this material, worth knowing before changing
   and the disc, and the bar a reader tags from.
 - `docs/startag/rstag.md` — the rest-list pass, the 3-stage chain and the adaptive weight,
   their knobs, measurements and risks.
-- `docs/webfeed.md` — the feeds a `webfeed.md` row declares, and the `tid`-less rows they
+- `docs/srcfeed.md` — the feeds a `srcfeed.md` entry declares, and the `tid`-less rows they
   hand to `tagRows`.
 - `docs/startag/filter_search.md` — the read path these tags feed.
 - `docs/recr-agloop.md` — `run_src`, the `rwr` gate, and `secret.md`.
 - `src/srctag.ts`, `src/rstag.ts`, `src/qarf.ts`, `src/srctagRows.ts`, `src/runsrc.ts`,
-  `src/webfeed.ts`, `src/webfeedRows.ts`,
+  `src/srcfeed.ts`, `src/srcfeedWeb.ts`, `src/srcfeedRows.ts`,
   `src/ui/restGrouper.ts`, `src/ui/restHelp.ts`, `src/ui/tagApply.ts`.

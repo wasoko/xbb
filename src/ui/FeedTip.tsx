@@ -1,10 +1,10 @@
 /**
- * WFeedTip.tsx — the hover preview a pin card's `{w.feed.md}` token shows.
+ * FeedTip.tsx — the hover preview a pin card's `{*.feed.md}` token shows.
  *
  * The token is a ref, so its preview is the row's own feed: when the next read is due
- * and at what frequency, which `webfeed.md` blocks it reads and from which host, and
- * the few newest items the last read stored. The `refresh` button runs one read now
- * (`ui/wFeedRun.ts`); a document whose `next` has already passed is read once by
+ * and at what frequency, which `srcfeed.md` entries it reads and from which host, and
+ * the items the last read stored. The `refresh` button runs one read now
+ * (`src/srcfeed.ts`); a document whose `next` has already passed is read once by
  * itself when the preview opens, so a stale feed catches up as soon as it is looked at.
  *
  * The body reads the row through a live query, so the read's own write lands back in
@@ -15,13 +15,12 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { cleanDomain, fmtAgo } from '../fc';
 import { daRead, type Da } from '../sdb';
-import { isFeedRef, latestPosts, nextRefreshAt, parseWFeedDoc } from '../wFeed';
-import { parseWebfeedDoc } from '../webfeed';
-import { feedDraft } from '../webfeedRows';
 import {
-  reportLine, runWFeedRefresh, storedItems, untilText,
-  type WFeedItem, type WFeedRunReport,
-} from './wFeedRun';
+  feedDraft, isFeedRef, latestPosts, loadSrcRegistry, nextRefreshAt, parseWFeedDoc,
+  reportLine, runSrcFeed, storedItems, untilText,
+  type SrcFeedItem, type SrcFeedReport,
+} from '../srcfeed';
+import { sdbSrcFeedStore } from '../srcfeedStore';
 
 /** Items the preview lists; the block itself keeps more. */
 const TIP_ITEMS = 5;
@@ -46,19 +45,19 @@ const BUTTON: React.CSSProperties = {
 };
 
 /**
- * The feed readout of one `w.feed.md`.
+ * The feed readout of one `*.feed.md`.
  *
  * @param props.feedRef - the ref the preview belongs to; `w.feed.md` unless a document
  *   of the same dialect is pointed at under another name
  * @returns the schedule, the sources read, the stored items, and a refresh control
  */
-export function WFeedTip({ feedRef }: { feedRef: string }) {
+export function FeedTip({ feedRef }: { feedRef: string }) {
   /* `null` while the row has not been read, so an absent row is told from a pending read. */
   const held = useLiveQuery(async () => ({ row: await daRead(feedRef) }), [feedRef], null);
-  /* Same sentinel for the config: it is what says whether the blocks below are still
+  /* Same sentinel for the registry: it is what says whether the entries below are still
      being read or are simply not there. */
-  const config = useLiveQuery(async () => ({ row: await daRead('webfeed.md', 'md') }), [], null);
-  const [report, setReport] = useState<WFeedRunReport | null>(null);
+  const config = useLiveQuery(async () => ({ registry: await loadSrcRegistry(sdbSrcFeedStore()) }), [], null);
+  const [report, setReport] = useState<SrcFeedReport | null>(null);
   const [busy, setBusy] = useState(false);
 
   const row: Da | undefined = held?.row;
@@ -67,15 +66,13 @@ export function WFeedTip({ feedRef }: { feedRef: string }) {
   const missing = held !== null && row === undefined;
   const source = row?.txt ?? (isFeedRef(feedRef) ? feedDraft(feedRef) : '');
   const doc = useMemo(() => parseWFeedDoc(source), [source]);
-  const items: WFeedItem[] = useMemo(() => storedItems(doc), [doc]);
-  /* Hosts come from `webfeed.md`, so the readout can name where items are read from even
+  const items: SrcFeedItem[] = useMemo(() => storedItems(doc), [doc]);
+  /* Hosts come from `srcfeed.md`, so the readout can name where items are read from even
      before this document has been read once. */
   const hosts = useMemo(
-    () => (config?.row?.txt
-      ? parseWebfeedDoc(config.row.txt).sources
-        .map((s) => ({ name: s.name, host: s.url ? cleanDomain(s.url) : '' }))
-      : []),
-    [config?.row?.txt],
+    () => (config?.registry.entries ?? [])
+      .map((entry) => ({ name: entry.name, host: entry.url ? cleanDomain(entry.url) : '' })),
+    [config],
   );
   const last = latestPosts(doc);
   const at = nextRefreshAt(doc);
@@ -84,7 +81,7 @@ export function WFeedTip({ feedRef }: { feedRef: string }) {
   const read = useCallback(async () => {
     setBusy(true);
     try {
-      setReport(await runWFeedRefresh({ ref: feedRef, now: new Date() }));
+      setReport(await runSrcFeed({ ref: feedRef, now: new Date(), store: sdbSrcFeedStore() }));
     } finally {
       setBusy(false);
     }
@@ -101,7 +98,7 @@ export function WFeedTip({ feedRef }: { feedRef: string }) {
     void read();
   }, [pending, due, feedRef, read]);
 
-  /* The blocks `## Setup` names: the ones `webfeed.md` declares, and the ones it does not,
+  /* The entries `## Setup` names: the ones `srcfeed.md` declares, and the ones it does not,
      which the line below reports by name rather than silently reading nothing. */
   const chosen = doc.setup.sources;
   const named = chosen.length === 0
@@ -139,16 +136,16 @@ export function WFeedTip({ feedRef }: { feedRef: string }) {
           </span>
         ))}
         {named.length === 0 && (config === null
-          ? <span style={KEY}>reading webfeed.md…</span>
+          ? <span style={KEY}>reading srcfeed.md…</span>
           : (
             <span style={KEY}>
               {chosen.length > 0
-                ? `${chosen.join(', ')} not in webfeed.md (it declares ${hosts.map((h) => h.name).join(', ') || 'no block'})`
-                : 'webfeed.md declares no source'}
+                ? `${chosen.join(', ')} not in srcfeed.md (it declares ${hosts.map((h) => h.name).join(', ') || 'no entry'})`
+                : 'srcfeed.md declares no source'}
             </span>
           ))}
         {missingSources.length > 0 && named.length > 0 && (
-          <span style={KEY}>· not in webfeed.md: {missingSources.join(', ')}</span>
+          <span style={KEY}>· not in srcfeed.md: {missingSources.join(', ')}</span>
         )}
       </div>
       <div style={LINE}>

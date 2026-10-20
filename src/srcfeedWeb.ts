@@ -1,7 +1,9 @@
 /**
- * webfeed.ts — extract the dynamic, unpersisted rows a `webfeed.md` row declares.
+ * srcfeedWeb.ts — extract the dynamic, unpersisted rows a source entry declares.
  *
- * A feed's items exist only on the wire, so every extracted row carries
+ * This is the built-in walk `srcfeed` uses for an entry that names no `Src:` row:
+ * an `api`, `cookied`, `direct`, `mobile` or `proxy` request, tried in the written
+ * order. A feed's items exist only on the wire, so every extracted row carries
  * `tid === undefined`: nothing is written until a caller pins, tags or clicks a
  * row and commits it through {@link commitFeedRows}. That is the split `srctag`
  * uses — the engine owns the reading, the caller owns the write.
@@ -33,7 +35,7 @@
  *
  * Like `srctag.ts` this file imports nothing from the app: no `sdb`, no Dexie, no
  * DOM. The `webfeed.md` row, the `type='src'` body that drives it, and the seed
- * helper that writes both live in `src/webfeedRows.ts`, and the browser's global
+ * helper that writes both live in `src/srcfeedRows.ts`, and the browser's global
  * is publishing {@link webfeedApi} (`installWebfeedGlobal`).
  */
 
@@ -68,8 +70,8 @@ export interface FeedSource {
   proxyHeaders: Record<string, string>;
   /** Tags every extracted row carries, before the caller's own. */
   tags: string[];
-  /** Cap on rows kept from this source. */
-  limit: number;
+  /** Cap on rows kept from this source; undefined uses the fallback limit. */
+  limit?: number;
 }
 
 /** The `## Fallback` block: retry budget and the default proxy. */
@@ -80,7 +82,7 @@ export interface FeedFallback {
   baseDelayMs: number;
   capDelayMs: number;
   timeoutMs: number;
-  /** Rows kept per source when the block names no `* Limit:`. */
+  /** Rows kept per source when the block names no `* Limit:`; 0 keeps every row. */
   limit: number;
 }
 
@@ -111,7 +113,8 @@ const ITEM_LINE = /^\s+-\s*(.+)$/;
  * The dialect is the one `secret.md` uses (`srctagRows.ts` reads it the same
  * way): `##` opens a section, `###` opens a block, `* Label:` starts a list, and
  * the `- x: y` / `- y` lines under it continue it. An unknown `* Label:` is
- * ignored rather than fatal, so a hand-edited document still parses.
+ * ignored rather than fatal, so a hand-edited document still parses. A block with
+ * neither `* URL:` nor `* API:` is skipped; an API-only block is read by its API.
  *
  * @param md the document text
  * @returns the sources in written order and the fallback settings
@@ -124,7 +127,8 @@ export function parseWebfeedDoc(md: string): WebfeedDoc {
   let list = '';
 
   const closeSource = () => {
-    if (src && src.url) sources.push(src);
+    /* An entry with only `* API:` is valid: its requests are all it needs. */
+    if (src && (src.url || src.apis.length > 0)) sources.push(src);
     src = undefined;
   };
 
@@ -135,7 +139,7 @@ export function parseWebfeedDoc(md: string): WebfeedDoc {
       closeSource();
       src = {
         name: h3[1], url: '', type: 'url', apis: [], session: '',
-        mobile: '', proxy: '', proxyHeaders: {}, tags: ['feed'], limit: 0,
+        mobile: '', proxy: '', proxyHeaders: {}, tags: ['feed'],
       };
       list = '';
       continue;
@@ -630,6 +634,22 @@ function actionLine(counts: string[]): string {
   return parts.length === 0 ? '' : `[${parts.join(' · ')}] `;
 }
 
+/** A leading `[转发 2 · 评论 0 · 赞 9] ` line, the numbers `post-actions` shows. */
+const ACTION_LINE_RX = /^\[[^\]]*(?:转发|评论|赞)[^\]]*\]\s*/;
+
+/**
+ * An item's text without the action line it leads with.
+ *
+ * The counts tick between two reads of one post, so a match that has no URL to
+ * compare keeps the post's own text and drops the counts.
+ *
+ * @param txt item text as {@link htmlPostItems} returns it
+ * @returns the text without a leading action line
+ */
+export function stripActionLine(txt: string): string {
+  return txt.replace(ACTION_LINE_RX, '');
+}
+
 /**
  * The stamp a `2026-10-16 12:43` post writes, as the page renders its own clock.
  *
@@ -653,7 +673,8 @@ function postTime(text: string): Date | undefined {
  * Nothing here is keyed on an account id, so one reader serves any media page.
  *
  * The row's text leads with the numbers, because a capped row would otherwise cut
- * them off the end of a post.
+ * them off the end of a post. A post without an `href` falls back to a hash of its
+ * body, not of those counts, so the same post keeps its `ref` after a tick.
  *
  * @param html the page as it was served
  * @param url the page's URL, the base its `href` is resolved against
@@ -669,7 +690,7 @@ export function htmlPostItems(html: string, url: string): FeedItem[] {
     const body = [text, quote === '' ? '' : `转发自 ${quote}`].filter((part) => part !== '').join(' ');
     const txt = `${actionLine(actionCounts(block))}${body}`;
     const href = mark[0].match(/\bhref="([^"]*)"/i)?.[1] ?? '';
-    return [{ ref: href === '' ? `${url}#${shortHash(txt)}` : new URL(href, url).href, txt, dt: postTime(divText(block, 'time')) }];
+    return [{ ref: href === '' ? `${url}#${shortHash(body)}` : new URL(href, url).href, txt, dt: postTime(divText(block, 'time')) }];
   });
 }
 
@@ -731,8 +752,13 @@ export interface FeedRowPlan {
 /** How many characters of an item's text a row keeps. */
 export const FEED_TXT_CAP = 400;
 
-/** Collapse whitespace and cap the length, so one long post cannot dominate a row. */
-function capTxt(txt: string): string {
+/**
+ * Collapse whitespace and cap one item's text, so one long post cannot dominate a row.
+ *
+ * @param txt item text as read
+ * @returns the text a row keeps
+ */
+export function capTxt(txt: string): string {
   const one = txt.replace(/\s+/g, ' ').trim();
   return one.length > FEED_TXT_CAP ? `${one.slice(0, FEED_TXT_CAP - 1)}…` : one;
 }
@@ -933,7 +959,7 @@ export async function extractSource(
     }
     const plan = planFeedRows(items, source, step.strategy, {
       existing: opts.existing,
-      limit: opts.limit,
+      limit: opts.limit ?? source.limit ?? fallback.limit,
       stopAtKnown: opts.stopAtKnown,
       now: opts.now,
     });
@@ -1013,7 +1039,7 @@ async function existingRows(db: FeedDb, source: FeedSource): Promise<FeedDa[]> {
  * `retries` / `baseDelayMs` / `timeoutMs` / `proxy` move the fallback settings.
  *
  * A missing document is a normal state — it throws here, because a caller asked
- * for feeds it did not seed, and `seedWebfeedRows` is the step that fixes it.
+ * for feeds it did not seed, and `seedSrcFeedRows` is the step that fixes it.
  *
  * @param input the tables to read, the `run_src` args, and a log sink
  * @returns every source's rows, every attempt, and the notes
@@ -1033,7 +1059,6 @@ export async function extractFromDoc(input: FeedDocInput): Promise<FeedDocResult
     retries: typeof args.retries === 'number' ? args.retries : doc.fallback.retries,
     baseDelayMs: typeof args.baseDelayMs === 'number' ? args.baseDelayMs : doc.fallback.baseDelayMs,
     timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : doc.fallback.timeoutMs,
-    limit: typeof args.limit === 'number' ? args.limit : doc.fallback.limit,
   };
 
   const wanted = arr(args.sources);
@@ -1041,7 +1066,7 @@ export async function extractFromDoc(input: FeedDocInput): Promise<FeedDocResult
     ? {
       name: typeof args.name === 'string' ? args.name : 'adhoc',
       url: args.url, type: typeof args.type === 'string' ? args.type : 'url',
-      apis: [], session: '', mobile: '', proxy: '', proxyHeaders: {}, tags: ['feed'], limit: 0,
+      apis: [], session: '', mobile: '', proxy: '', proxyHeaders: {}, tags: ['feed'],
     } satisfies FeedSource
     : undefined;
   const sources = doc.sources
@@ -1055,7 +1080,11 @@ export async function extractFromDoc(input: FeedDocInput): Promise<FeedDocResult
   const results: FeedExtractResult[] = [];
   for (const source of sources) {
     const existing = given ?? (input.db ? await existingRows(input.db, source) : []);
-    const res = await extractSource(source, fallback, { ...args, existing, limit: fallback.limit });
+    const res = await extractSource(source, fallback, {
+      ...args,
+      existing,
+      limit: typeof args.limit === 'number' ? args.limit : undefined,
+    });
     log.info(`[webfeed] ${source.name}: ${res.strategy ?? 'no strategy'} -> ${res.das.length} row(s)`);
     results.push(res);
   }

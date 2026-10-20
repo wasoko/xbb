@@ -38,8 +38,9 @@ import { useTabSyncState } from './tabSync';
 import { tabVisual, type TabSyncState } from './tabState';
 import { planPersist, reapplyBuffer } from './reapply';
 import { DiffTab } from './diffTab';
-import { feedDraft } from '../webfeedRows';
-import { isFeedRef } from '../wFeed';
+import { feedDraft, isFeedRef, SRCFEED_REF } from '../srcfeed';
+import { SRCFEED_DOC } from '../srcfeedRows';
+import { readOrSeedSrcFeed } from '../srcfeedStore';
 import { subscribeNav } from './navStore';
 
 /**
@@ -47,14 +48,19 @@ import { subscribeNav } from './navStore';
  *
  * A `*.feed.md` ref is a feed document, so it opens on the template that ref's kind starts
  * from — schedule, the default source, and no read behind it — and the row is written only
- * when the user saves it. Every other missing ref opens on the placeholder as before.
+ * when the user saves it. `srcfeed.md` opens on the seeded registry template; opening it
+ * also writes that row (and the adapters it names) when no row of the ref exists, which is
+ * how a pin card's `{srcfeed.md}` bootstraps a fresh installation. Every other missing ref
+ * opens on the placeholder as before.
  *
  * @param ref - the tab's ref
  * @returns the buffer to open the tab with
  */
-const draftText = (ref: string): string => (isFeedRef(ref)
-  ? feedDraft(ref)
-  : `// ${ref}\n// New content`);
+const draftText = (ref: string): string => (ref === SRCFEED_REF
+  ? SRCFEED_DOC
+  : isFeedRef(ref)
+    ? feedDraft(ref)
+    : `// ${ref}\n// New content`);
 
 interface ArtfactProps {
   openTabs: string[];
@@ -302,7 +308,7 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
           continue;
         }
         if (!newContents[tab]) {
-          const row = await daRead(tab);
+          const row = await readOrSeedSrcFeed(tab);
           newContents[tab] = row?.txt ?? draftText(tab);
           fresh[tab] = newContents[tab];
           draftNext[tab] = !row;
@@ -320,7 +326,7 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
       const fetched: Record<string, string> = {};
       for (const tab of openTabs) {
         if (parseDiffRef(tab) || parseRecrTabRef(tab)) continue;
-        const row = await daRead(tab);
+        const row = await readOrSeedSrcFeed(tab);
         if (row) fetched[tab] = row.txt;
       }
       if (Object.keys(fetched).length === 0) return;

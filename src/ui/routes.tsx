@@ -10,11 +10,14 @@ import { ErrorBoundaryOutlet, LocalErrorBoundary } from './ErrorBoundaryOutlet';
 import { FilterBar } from './FilterBar';
 import { restGraphOpen } from './restGraphWindow';
 import { Toaster } from 'sonner';
+import { stts } from '../fc';
+import { startPerfWatch } from '../perfWatch';
 import { installSrctagGlobal } from '../srctag';
-import { installWebfeedGlobal } from '../webfeed';
+import { installWebfeedGlobal } from '../srcfeedWeb';
+import { installSrcFeedGlobal } from '../srcfeed';
 import { registerBodyTwins } from '../runsrc';
-import { WEBFEED_BODY_TWINS } from '../webfeedRows';
-import { installExtSrcRunner } from '../extsrc';
+import { SRCFEED_BODY_TWINS } from '../srcfeedRows';
+import { installSrcFeedTabRunner } from '../srcfeedTab';
 import { registerG4Source } from '../sessionSourceG4';
 
 /**
@@ -102,16 +105,23 @@ installSrctagGlobal();
 // Same reason: `webfeed/extract.js` reads the feed document through this global.
 installWebfeedGlobal();
 
-// A realm that forbids eval — the extension page — runs the seeded feed body through
-// this compiled counterpart instead; an edited row no longer matches, so it refuses.
-registerBodyTwins(WEBFEED_BODY_TWINS);
+// And `srcdom/*` adapters read their site through this one.
+installSrcFeedGlobal();
+
+// A realm that forbids eval — the extension page — runs a seeded body through this
+// compiled counterpart instead; an edited row no longer matches, so it refuses.
+registerBodyTwins(SRCFEED_BODY_TWINS);
 
 // Rows whose header says `@requires tab` run in the tab they name, via
 // `chrome.userScripts`; in the webapp the runner reports `not-extension` instead.
-installExtSrcRunner();
+installSrcFeedTabRunner();
 
 // A source that is never registered is invisible to the session picker.
 registerG4Source();
+
+// The hourly resource sample: a crossing lands in the settings status line and, on the
+// `-perf` topic, in the notice list.
+startPerfWatch((message) => { stts(message, '-perf', 'warning'); });
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

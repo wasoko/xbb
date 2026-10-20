@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { getColorChar11, sideLog } from '../fc';
 import { iq, type Da } from '../sdb';
-import { isFeedRef } from '../wFeed';
+import { isFeedRef } from '../srcfeed';
 import { headingMatchRuns, splitHeadingParts, type HeadingPart } from './cs1Token';
 import { setTip, TIP_ATTR } from './Tip';
 

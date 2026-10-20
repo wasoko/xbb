@@ -20,10 +20,9 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { tagRgb } from './restCue';
-import { buildTextAtlas, cellSize, type AtlasSlot, type TextAtlas } from './seaAtlas';
+import { buildTextAtlas, type AtlasSlot, type TextAtlas } from './seaAtlas';
 import type { AnyNodeKind } from './restGraph';
 import type { TagRelation } from './seaTags';
-import type { SeaRow } from './seaTags';
 import type { SeaWall, WallPoint, WallRegion } from './seaWall';
 import { regionOnWall } from './seaWall';
 import { wrapLon } from './seaSky';
@@ -34,20 +33,18 @@ const UNIT = (WALL_RADIUS * Math.PI) / 180;
 const RAD = Math.PI / 180;
 const DEG = 180 / Math.PI;
 
-/** Label sizes on screen, in CSS pixels. */
-const PIN_LABEL_H = 30;
-const REGION_LABEL_H = 20;
-const ROW_LABEL_H = 17;
-const PIN_LABEL_TOP = 12;
-const ROW_TOP = PIN_LABEL_TOP + PIN_LABEL_H + 6;
-const ROW_STEP = ROW_LABEL_H + 4;
-const ROW_INDENT = 0;
+/** Label bake sizes, in texture pixels: a region's name is drawn as large as its cell allows. */
+const LABEL_FONT_PIN = 112;
+const LABEL_FONT_CLOUD = 80;
 
 /** Instances one atlas page may hold. */
 const PAGE_INSTANCES = 1024;
 
-/** Points' atlas limit: one point per row, all rows of the live wall. */
-const MAX_POINTS = 8192;
+/**
+ * Screen distance, in CSS pixels, at which two stars stop being separate targets: a pointer or
+ * a finger cannot tell them apart below it, so a region denser than this shows as a cloud.
+ */
+const POINT_RESOLVE = 16;
 
 /** The colours of the two halves of the sky, and the star. */
 const SKY_BELOW = new THREE.Color(0x0a1620);
@@ -94,8 +91,6 @@ export interface SeaViewState {
 export interface SeaHover {
   region?: WallRegion;
   point?: WallPoint;
-  /** A row annotated under a pinned heading. */
-  annotation?: { region: WallRegion; row: SeaRow };
 }
 
 /** What the pointer found, nearest first. */
@@ -113,21 +108,9 @@ interface LabelPage {
   anchor: Float32Array;
   uv: Float32Array;
   tint: Float32Array;
-  px: Float32Array;
-  off: Float32Array;
+  deg: Float32Array;
+  cell: Float32Array;
   attrs: THREE.InstancedBufferAttribute[];
-}
-
-/** A label's metadata, so a click can find the annotation it is over. */
-interface LabelMeta {
-  region: WallRegion;
-  row?: SeaRow;
-  lon: number;
-  rise: number;
-  offX: number;
-  offY: number;
-  w: number;
-  h: number;
 }
 
 /** One label instance, before it is grouped into its atlas page. */
@@ -135,21 +118,23 @@ interface LabelEntry {
   slot: AtlasSlot;
   lon: number;
   rise: number;
-  offX: number;
-  offY: number;
-  w: number;
-  h: number;
+  /** The region's base size, in degrees; spacing does not resize the text. */
+  degW: number;
+  degH: number;
+  /** The baked cell's own size, in texture pixels. */
+  cellW: number;
+  cellH: number;
   tint: [number, number, number];
   alpha: number;
 }
 
-/** The billboards' vertex shader: a wall anchor, a pixel size, and a pixel offset. */
+/** The billboards' vertex shader: a label fitted to the region it names. */
 const LABEL_VERTEX = `
   attribute vec2 iAnchor;
   attribute vec4 iUv;
   attribute vec4 iTint;
-  attribute vec2 iPx;
-  attribute vec2 iOff;
+  attribute vec2 iDeg;
+  attribute vec2 iCell;
 
   uniform vec2 uSpacing;
   uniform vec3 uCamLocal;
@@ -166,10 +151,17 @@ const LABEL_VERTEX = `
     float dist = length(toCam);
     vec3 flatTo = vec3(toCam.x, 0.0, toCam.z);
     vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), normalize(flatTo)));
+    /* World units one CSS pixel covers at the wall; a degree of rise is the same distance at
+       every longitude, so the cell's screen size follows from its own degrees. The cell is
+       fitted to fill whichever of the two the text reaches first. */
     float k = uPxToWorld * min(dist, 220.0);
+    float regionW = (iDeg.x * ${RAD.toFixed(12)} * ${WALL_RADIUS.toFixed(1)}) / k;
+    float regionH = (iDeg.y * ${UNIT.toFixed(12)}) / k;
+    float fit = min(regionW / iCell.x, regionH / iCell.y) * 0.92;
+    vec2 px = iCell * fit;
     vec3 world = anchor
-      + right * ((iOff.x + position.x * iPx.x) * k)
-      - vec3(0.0, 1.0, 0.0) * ((iOff.y + position.y * iPx.y) * k);
+      + right * ((position.x - 0.5) * px.x * k)
+      - vec3(0.0, 1.0, 0.0) * ((position.y - 0.5) * px.y * k);
 
     vUv = vec2(mix(iUv.x, iUv.z, position.x), mix(iUv.y, iUv.w, position.y));
     vTint = iTint;
@@ -196,11 +188,13 @@ const FILL_VERTEX = `
   attribute vec4 iRect;
   attribute vec4 iTint;
   attribute float iAbove;
+  attribute float iCurated;
 
   uniform vec2 uSpacing;
 
   varying vec4 vTint;
   varying float vAbove;
+  varying float vCurated;
   varying vec2 vUv;
   varying float vLon;
 
@@ -211,6 +205,7 @@ const FILL_VERTEX = `
     vLon = lon;
     vTint = iTint;
     vAbove = iAbove;
+    vCurated = iCurated;
     vec3 p = vec3(sin(lon) * ${WALL_RADIUS.toFixed(1)}, rise * ${UNIT.toFixed(12)}, cos(lon) * ${WALL_RADIUS.toFixed(1)});
     gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
   }
@@ -220,6 +215,7 @@ const FILL_VERTEX = `
 const FILL_FRAGMENT = `
   varying vec4 vTint;
   varying float vAbove;
+  varying float vCurated;
   varying vec2 vUv;
   varying float vLon;
 
@@ -228,12 +224,14 @@ const FILL_FRAGMENT = `
     float border = 1.0 - smoothstep(0.0, 0.05, edge);
     float star = pow(max(0.0, cos(vLon)), 8.0);
 
-    vec3 belowFill = vTint.rgb * (0.11 + 0.06 * star);
-    vec3 aboveFill = vTint.rgb * (0.02 + 0.07 * star);
+    /* The cells are a quiet ground: a tint barely above the sky, with the curated column a
+       shade warmer so the centre still reads as the curated half. */
+    vec3 belowFill = vTint.rgb * (mix(0.02, 0.035, vCurated) + 0.015 * star);
+    vec3 aboveFill = vTint.rgb * (0.004 + 0.015 * star);
     vec3 fill = mix(belowFill, aboveFill, vAbove);
-    vec3 edgeCol = vTint.rgb * mix(0.55, 0.14 + 0.5 * star, vAbove);
+    vec3 edgeCol = vTint.rgb * mix(0.08, 0.05 + 0.15 * star, vAbove);
     vec3 col = mix(fill, edgeCol, border * 0.9);
-    float alpha = mix(0.62, 0.7, vAbove) + border * 0.15;
+    float alpha = mix(0.08, 0.24, vAbove) + border * 0.03;
     gl_FragColor = vec4(col, alpha);
   }
 `;
@@ -244,13 +242,17 @@ const POINT_VERTEX = `
   attribute float aSize;
   attribute vec3 aColor;
   attribute float aAlpha;
+  attribute vec2 aCell;
+  attribute float aCount;
 
   uniform vec2 uSpacing;
   uniform vec2 uPointer;
   uniform float uDpr;
+  uniform float uPxToWorld;
 
   varying vec3 vColor;
   varying float vAlpha;
+  varying float vCloud;
 
   void main() {
     float lon = aAnchor.x * uSpacing.x * ${RAD.toFixed(12)};
@@ -263,22 +265,41 @@ const POINT_VERTEX = `
       1.0 - smoothstep(0.0, 0.018, distance(ndc, uPointer)),
       (1.0 - smoothstep(0.0, 0.12, length(ndc))) * 0.35
     );
-    gl_PointSize = aSize * uDpr * (1.0 + lift * 1.4);
+    /* How far apart this region's own stars land on screen: its area in pixels divided over
+       the points that fill it. Past the pointer's resolution the cell is a cloud, not a set
+       of targets, so every star softens and spreads into one continuous glow. */
+    float perPx = uPxToWorld * max(0.1, -mv.z);
+    float cellPx = sqrt((aCell.x * ${RAD.toFixed(12)} * ${WALL_RADIUS.toFixed(1)}) * (aCell.y * ${UNIT.toFixed(12)})) / perPx;
+    float spacingPx = cellPx / sqrt(max(1.0, aCount));
+    float crowd = 1.0 - smoothstep(${(POINT_RESOLVE * 0.45).toFixed(1)}, ${POINT_RESOLVE.toFixed(1)}, spacingPx);
+    float sizePx = mix(aSize, clamp(spacingPx * 2.6, 3.0, 64.0), crowd);
+    gl_PointSize = sizePx * uDpr * (1.0 + lift * 1.4);
     vColor = aColor;
-    vAlpha = aAlpha * (0.75 + lift * 1.6);
+    vAlpha = aAlpha * (0.75 + lift * 1.6) * mix(1.0, 0.45, crowd);
+    vCloud = crowd;
     gl_Position = clip;
   }
 `;
 
-/** The points' fragment shader: a soft dot. */
+/** The points' fragment shader: a four-ray star, washed into a cloud where a cell is crowded. */
 const POINT_FRAGMENT = `
   varying vec3 vColor;
   varying float vAlpha;
+  varying float vCloud;
+
   void main() {
     vec2 d = gl_PointCoord - vec2(0.5);
-    float r2 = dot(d, d);
-    if (r2 > 0.25) discard;
-    gl_FragColor = vec4(vColor, vAlpha * smoothstep(0.25, 0.0, r2));
+    float r = length(d) * 2.0;
+    if (r > 1.0) discard;
+    float core = smoothstep(0.5, 0.0, r);
+    float halo = smoothstep(1.0, 0.0, r) * 0.4;
+    float rays = max(0.0, 1.0 - abs(d.x) * 12.0) * max(0.0, 1.0 - abs(d.y) * 2.0)
+      + max(0.0, 1.0 - abs(d.y) * 12.0) * max(0.0, 1.0 - abs(d.x) * 2.0);
+    float star = core * 0.9 + rays * 0.65 + halo;
+    float cloud = pow(max(0.0, 1.0 - r), 1.6);
+    float a = mix(star, cloud, vCloud);
+    if (a < 0.02) discard;
+    gl_FragColor = vec4(vColor, vAlpha * a);
   }
 `;
 
@@ -411,24 +432,6 @@ function reachTint(reach: AnyNodeKind, tag: string): [number, number, number] {
   ];
 }
 
-/** Whether a projected point is inside a convex quad. */
-function inQuad(q: Float64Array, x: number, y: number): boolean {
-  let sign = 0;
-  for (let i = 0; i < 4; i++) {
-    const j = (i + 1) % 4;
-    const ax = q[i * 2];
-    const ay = q[i * 2 + 1];
-    const bx = q[j * 2];
-    const by = q[j * 2 + 1];
-    const cross = (bx - ax) * (y - ay) - (by - ay) * (x - ax);
-    if (cross === 0) continue;
-    const side = cross > 0 ? 1 : -1;
-    if (sign === 0) sign = side;
-    else if (side !== sign) return false;
-  }
-  return sign !== 0;
-}
-
 /** The scene, its wall, and the arithmetic a pointer needs to meet a region. */
 export class SeaRenderer {
   private readonly renderer: THREE.WebGLRenderer;
@@ -457,7 +460,6 @@ export class SeaRenderer {
   private wall: SeaWall | null = null;
   private atlas: TextAtlas | null = null;
   private pages: LabelPage[] = [];
-  private labels: LabelMeta[] = [];
 
   private width = 1;
   private height = 1;
@@ -465,6 +467,8 @@ export class SeaRenderer {
   private spacing = new THREE.Vector2(1, 1);
 
   private hover: SeaHover | null = null;
+  /** Bumped by every call that changes what the next frame would draw. */
+  private sceneRevision = 0;
 
   /* Scratch objects, so a frame and a pick do not allocate. */
   private readonly camLocal = new THREE.Vector3();
@@ -475,7 +479,6 @@ export class SeaRenderer {
   private readonly corner = new THREE.Vector3();
   private readonly projected = new THREE.Vector3();
   private readonly cameraSpace = new THREE.Vector3();
-  private readonly quad = new Float64Array(8);
   private readonly ray = new THREE.Raycaster();
   private readonly ndc = new THREE.Vector2();
   private readonly rayLocal = new THREE.Ray();
@@ -666,30 +669,34 @@ export class SeaRenderer {
     this.buildFills(wall);
     this.buildLabels(wall);
     this.buildPoints(wall);
+    this.markDirty();
   }
 
-  /** The atlas requests the wall needs: a name per region and a title per annotation. */
+  /** The count of scene changes since the renderer was built; the frame loop draws when it
+   *  differs from the revision of the last drawn frame. */
+  get revision(): number {
+    return this.sceneRevision;
+  }
+
+  /** Record that the next frame would draw something new. */
+  private markDirty(): void {
+    this.sceneRevision++;
+  }
+
+  /** The atlas requests the wall needs: one fitted name per region. */
   private requests(wall: SeaWall): { key: string; text: string; fontPx: number; bold?: boolean }[] {
     const out = new Map<string, { key: string; text: string; fontPx: number; bold?: boolean }>();
     for (const region of wall.regions) {
+      if (region.reflection) continue;
       const key = `t:${region.tag}`;
-      if (!out.has(key)) {
-        out.set(key, {
-          key, text: region.labelText,
-          fontPx: region.reach === 'pinned' ? 34 : 26,
-          bold: region.reach === 'pinned',
-        });
-      }
-      if (region.reach !== 'pinned') continue;
-      for (const row of region.annotations) {
-        const rowKey = `r:${row.key}`;
-        if (out.has(rowKey)) continue;
-        out.set(rowKey, {
-          key: rowKey,
-          text: `${row.action === 'link' ? '↗' : '✎'} ${row.label}`,
-          fontPx: 20,
-        });
-      }
+      if (out.has(key)) continue;
+      const curated = region.reach === 'pinned' || region.reach === 'alias';
+      out.set(key, {
+        key,
+        text: region.labelText,
+        fontPx: curated ? LABEL_FONT_PIN : LABEL_FONT_CLOUD,
+        bold: curated,
+      });
     }
     return [...out.values()];
   }
@@ -722,6 +729,7 @@ export class SeaRenderer {
     const rect = new Float32Array(regions.length * 4);
     const tint = new Float32Array(regions.length * 4);
     const above = new Float32Array(regions.length);
+    const curated = new Float32Array(regions.length);
     regions.forEach((region, i) => {
       rect[i * 4] = region.lon0;
       rect[i * 4 + 1] = region.lon1;
@@ -733,10 +741,12 @@ export class SeaRenderer {
       tint[i * 4 + 2] = b;
       tint[i * 4 + 3] = 1;
       above[i] = region.above ? 1 : 0;
+      curated[i] = region.reach === 'pinned' || region.reach === 'alias' ? 1 : 0;
     });
     base.setAttribute('iRect', new THREE.InstancedBufferAttribute(rect, 4));
     base.setAttribute('iTint', new THREE.InstancedBufferAttribute(tint, 4));
     base.setAttribute('iAbove', new THREE.InstancedBufferAttribute(above, 1));
+    base.setAttribute('iCurated', new THREE.InstancedBufferAttribute(curated, 1));
     base.instanceCount = regions.length;
 
     const mesh = new THREE.Mesh(base, this.fillMaterial);
@@ -746,49 +756,28 @@ export class SeaRenderer {
     this.content.add(mesh);
   }
 
-  /** The label pages: a region's name at its middle, a pin's rows under its heading. */
+  /** The label pages: every tag's name fitted to the region it owns. */
   private buildLabels(wall: SeaWall): void {
-    this.labels = [];
     if (this.atlas === null) return;
     const atlas = this.atlas;
     const entries: LabelEntry[] = [];
-    const add = (
-      slot: AtlasSlot, lon: number, rise: number, offX: number, offY: number,
-      w: number, h: number, tint: [number, number, number], alpha: number, meta: LabelMeta,
-    ): void => {
-      entries.push({ slot, lon, rise, offX, offY, w, h, tint, alpha });
-      this.labels.push(meta);
-    };
 
     for (const region of wall.regions) {
+      if (region.reflection) continue;
       const slot = atlas.slots.get(`t:${region.tag}`);
       if (slot === undefined) continue;
-      const pinned = region.reach === 'pinned';
-      const size = cellSize(slot, pinned ? PIN_LABEL_H : REGION_LABEL_H, 100);
-      const lon = (region.lon0 + region.lon1) / 2;
-      const tint = reachTint(region.reach, region.tag);
-      if (pinned) {
-        const rise = region.rise1;
-        const offX = -size.w / 2;
-        add(slot, lon, rise, offX, PIN_LABEL_TOP, size.w, size.h, tint, 0.98,
-          { region, lon, rise, offX, offY: PIN_LABEL_TOP, w: size.w, h: size.h });
-        region.annotations.forEach((row, i) => {
-          const rowSlot = atlas.slots.get(`r:${row.key}`);
-          if (rowSlot === undefined) return;
-          const rowSize = cellSize(rowSlot, ROW_LABEL_H, 160);
-          const rowX = ROW_INDENT - rowSize.w / 2;
-          const rowY = ROW_TOP + i * ROW_STEP;
-          const rowTint = row.action === 'link' ? LINK_TINT : EDITOR_TINT;
-          add(rowSlot, lon, rise, rowX, rowY, rowSize.w, rowSize.h, rowTint, 0.92,
-            { region, row, lon, rise, offX: rowX, offY: rowY, w: rowSize.w, h: rowSize.h });
-        });
-      } else {
-        const rise = (region.rise0 + region.rise1) / 2;
-        const offX = -size.w / 2;
-        const offY = -size.h / 2;
-        add(slot, lon, rise, offX, offY, size.w, size.h, tint, region.above ? 0.38 : 0.9,
-          { region, lon, rise, offX, offY, w: size.w, h: size.h });
-      }
+      const curated = region.reach === 'pinned' || region.reach === 'alias';
+      entries.push({
+        slot,
+        lon: (region.lon0 + region.lon1) / 2,
+        rise: (region.rise0 + region.rise1) / 2,
+        degW: region.lon1 - region.lon0,
+        degH: region.rise1 - region.rise0,
+        cellW: slot.w,
+        cellH: slot.h,
+        tint: reachTint(region.reach, region.tag),
+        alpha: curated ? 0.055 : 0.045,
+      });
     }
 
     const grouped = new Map<number, LabelEntry[]>();
@@ -814,8 +803,8 @@ export class SeaRenderer {
     const anchor = new Float32Array(PAGE_INSTANCES * 2);
     const uv = new Float32Array(PAGE_INSTANCES * 4);
     const tint = new Float32Array(PAGE_INSTANCES * 4);
-    const px = new Float32Array(PAGE_INSTANCES * 2);
-    const off = new Float32Array(PAGE_INSTANCES * 2);
+    const deg = new Float32Array(PAGE_INSTANCES * 2);
+    const cell = new Float32Array(PAGE_INSTANCES * 2);
     const attrs: THREE.InstancedBufferAttribute[] = [];
     const attr = (array: Float32Array, size: number): THREE.InstancedBufferAttribute => {
       const a = new THREE.InstancedBufferAttribute(array, size);
@@ -826,8 +815,8 @@ export class SeaRenderer {
     geometry.setAttribute('iAnchor', attr(anchor, 2));
     geometry.setAttribute('iUv', attr(uv, 4));
     geometry.setAttribute('iTint', attr(tint, 4));
-    geometry.setAttribute('iPx', attr(px, 2));
-    geometry.setAttribute('iOff', attr(off, 2));
+    geometry.setAttribute('iDeg', attr(deg, 2));
+    geometry.setAttribute('iCell', attr(cell, 2));
 
     for (let i = 0; i < count; i++) {
       const item = entries[i];
@@ -841,10 +830,10 @@ export class SeaRenderer {
       tint[i * 4 + 1] = item.tint[1];
       tint[i * 4 + 2] = item.tint[2];
       tint[i * 4 + 3] = item.alpha;
-      px[i * 2] = item.w;
-      px[i * 2 + 1] = item.h;
-      off[i * 2] = item.offX;
-      off[i * 2 + 1] = item.offY;
+      deg[i * 2] = item.degW;
+      deg[i * 2 + 1] = item.degH;
+      cell[i * 2] = item.cellW;
+      cell[i * 2 + 1] = item.cellH;
     }
 
     const material = new THREE.ShaderMaterial({
@@ -868,7 +857,7 @@ export class SeaRenderer {
     mesh.renderOrder = 3;
     this.content.add(mesh);
     this.pages.push({
-      mesh, geometry, material, count, anchor, uv, tint, px, off, attrs,
+      mesh, geometry, material, count, anchor, uv, tint, deg, cell, attrs,
     });
   }
 
@@ -883,21 +872,34 @@ export class SeaRenderer {
     const live = wall.points;
     if (live.length === 0) return;
 
-    const count = Math.min(live.length, MAX_POINTS);
-    const anchor = new Float32Array(MAX_POINTS * 2);
-    const size = new Float32Array(MAX_POINTS);
-    const color = new Float32Array(MAX_POINTS * 3);
-    const alpha = new Float32Array(MAX_POINTS);
+    const count = live.length;
+    const anchor = new Float32Array(count * 2);
+    const size = new Float32Array(count);
+    const color = new Float32Array(count * 3);
+    const alpha = new Float32Array(count);
+    const cell = new Float32Array(count * 2);
+    const cellCount = new Float32Array(count);
+    /* A point's cell and its cell's point count decide when it is a star and when it is one
+       fleck of a cloud; both come from the region the point was scattered into. */
+    const owners = new Map<string, WallRegion>();
+    for (const region of wall.regions) {
+      if (region.reflection) continue;
+      owners.set(region.tag, region);
+    }
     for (let i = 0; i < count; i++) {
       const point = live[i];
       anchor[i * 2] = point.lon;
       anchor[i * 2 + 1] = point.rise;
-      size[i] = point.above ? 2.4 : 3.4;
+      size[i] = point.above ? 5 : 11;
       const tint = point.action === 'link' ? LINK_TINT : EDITOR_TINT;
       color[i * 3] = tint[0];
       color[i * 3 + 1] = tint[1];
       color[i * 3 + 2] = tint[2];
-      alpha[i] = point.above ? 0.4 : 0.88;
+      alpha[i] = point.above ? 0.55 : 1;
+      const owner = owners.get(point.tag);
+      cell[i * 2] = owner === undefined ? 1 : owner.lon1 - owner.lon0;
+      cell[i * 2 + 1] = owner === undefined ? 1 : owner.rise1 - owner.rise0;
+      cellCount[i] = owner === undefined ? 1 : Math.max(1, owner.points.length);
     }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(count * 3), 3));
@@ -905,6 +907,8 @@ export class SeaRenderer {
     geometry.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
     geometry.setAttribute('aColor', new THREE.BufferAttribute(color, 3));
     geometry.setAttribute('aAlpha', new THREE.BufferAttribute(alpha, 1));
+    geometry.setAttribute('aCell', new THREE.BufferAttribute(cell, 2));
+    geometry.setAttribute('aCount', new THREE.BufferAttribute(cellCount, 1));
     geometry.setDrawRange(0, count);
 
     const material = new THREE.ShaderMaterial({
@@ -912,6 +916,7 @@ export class SeaRenderer {
         uSpacing: { value: this.spacing },
         uPointer: { value: new THREE.Vector2(2, 2) },
         uDpr: { value: 1 },
+        uPxToWorld: { value: 0.002 },
       },
       vertexShader: POINT_VERTEX,
       fragmentShader: POINT_FRAGMENT,
@@ -952,7 +957,11 @@ export class SeaRenderer {
    * @param y rise multiplier
    */
   setSpacing(x: number, y: number): void {
-    this.spacing.set(Math.min(3, Math.max(0.3, x)), Math.min(3, Math.max(0.3, y)));
+    const nextX = Math.min(3, Math.max(0.3, x));
+    const nextY = Math.min(3, Math.max(0.3, y));
+    if (nextX === this.spacing.x && nextY === this.spacing.y) return;
+    this.spacing.set(nextX, nextY);
+    this.markDirty();
   }
 
   /**
@@ -980,6 +989,7 @@ export class SeaRenderer {
     this.starMaterial.uniforms.uPxToWorld.value = pxToWorld;
     (this.sky.material as THREE.ShaderMaterial).uniforms.uCamLocal.value.copy(this.camLocal);
     if (this.pointsMaterial !== null) {
+      this.pointsMaterial.uniforms.uPxToWorld.value = pxToWorld;
       this.pointsMaterial.uniforms.uDpr.value = Math.min(2, window.devicePixelRatio || 1);
     }
   }
@@ -994,6 +1004,7 @@ export class SeaRenderer {
     this.hover = hover;
     this.buildRelations(hover, relations);
     this.buildHighlight(hover);
+    this.markDirty();
   }
 
   /** The hovered tag's relation arcs, drawn along the wall. */
@@ -1072,20 +1083,6 @@ export class SeaRenderer {
         push(point.lon + Math.cos(a0) * radius, point.rise + Math.sin(a0) * radius, LINK_TINT);
         push(point.lon + Math.cos(a1) * radius, point.rise + Math.sin(a1) * radius, LINK_TINT);
       }
-    } else if (hover.annotation !== undefined) {
-      const region = hover.annotation.region;
-      const tint = reachTint(region.reach, region.tag);
-      const cols = 14;
-      for (let i = 0; i < cols; i++) {
-        const t0 = i / cols;
-        const t1 = (i + 1) / cols;
-        const lon0 = region.lon0 + (region.lon1 - region.lon0) * t0;
-        const lon1 = region.lon0 + (region.lon1 - region.lon0) * t1;
-        push(lon0, region.rise0, tint);
-        push(lon1, region.rise0, tint);
-        push(lon0, region.rise1, tint);
-        push(lon1, region.rise1, tint);
-      }
     } else if (hover.region !== undefined) {
       const region = hover.region;
       const tint = reachTint(region.reach, region.tag);
@@ -1118,7 +1115,7 @@ export class SeaRenderer {
   }
 
   /**
-   * Find the region, point or annotation under a pointer.
+   * Find the region or point under a pointer.
    *
    * @param px pointer x, in CSS pixels from the canvas' left edge
    * @param py pointer y, in CSS pixels from the canvas' top edge
@@ -1131,18 +1128,9 @@ export class SeaRenderer {
     this.content.updateMatrixWorld(true);
     this.inverse.copy(this.content.matrixWorld).invert();
 
-    /* An annotation under the pointer is the most specific target there is. */
-    for (const meta of this.labels) {
-      if (meta.row === undefined) continue;
-      if (!this.labelRect(meta)) continue;
-      if (inQuad(this.quad, px, py)) {
-        return { region: meta.region, annotation: { region: meta.region, row: meta.row }, distance: 0 };
-      }
-    }
-
-    /* Then a point, within a forgiving radius. */
+    /* A star is the target: its glow is wider than its core, so the hit radius is too. */
     let bestPoint: WallPoint | undefined;
-    let bestDistance = 11 * 11;
+    let bestDistance = 16 * 16;
     for (const point of this.wall.points) {
       wallPoint(point.lon * this.spacing.x, point.rise * this.spacing.y, this.corner);
       this.corner.applyMatrix4(this.content.matrixWorld);
@@ -1184,36 +1172,6 @@ export class SeaRenderer {
     return { region, distance: 0 };
   }
 
-  /** Project one label instance and write its screen quad. */
-  private labelRect(meta: LabelMeta): boolean {
-    wallPoint(meta.lon * this.spacing.x, meta.rise * this.spacing.y, this.corner);
-    this.toCam.copy(this.camLocal).sub(this.corner);
-    this.flat.set(this.toCam.x, 0, this.toCam.z);
-    if (this.flat.lengthSq() < 1e-8) return false;
-    this.flat.normalize();
-    this.right.crossVectors(new THREE.Vector3(0, 1, 0), this.flat).normalize();
-    const dist = this.toCam.length();
-    const k = (2 * Math.tan((this.view.fov * RAD) / 2)) / Math.max(1, this.height) * Math.min(dist, 220);
-    const x0 = this.corner.x + this.right.x * meta.offX * k;
-    const y0 = this.corner.y - meta.offY * k;
-    const z0 = this.corner.z + this.right.z * meta.offX * k;
-    const bx = this.right.x * meta.w * k;
-    const bz = this.right.z * meta.w * k;
-    const ch = meta.h * k;
-    const at = (index: number, x: number, y: number, z: number): boolean => {
-      this.cameraSpace.set(x, y, z).applyMatrix4(this.camera.matrixWorldInverse);
-      if (this.cameraSpace.z > -0.05) return false;
-      this.projected.set(x, y, z).project(this.camera);
-      this.quad[index] = (this.projected.x * 0.5 + 0.5) * this.width;
-      this.quad[index + 1] = (-this.projected.y * 0.5 + 0.5) * this.height;
-      return true;
-    };
-    return at(0, x0, y0, z0)
-      && at(2, x0 + bx, y0, z0 + bz)
-      && at(4, x0 + bx, y0 - ch, z0 + bz)
-      && at(6, x0, y0 - ch, z0);
-  }
-
   /**
    * Give the dots a screen-space cursor to brighten around.
    *
@@ -1223,8 +1181,11 @@ export class SeaRenderer {
   setPointer(x: number, y: number): void {
     if (this.pointsMaterial === null) return;
     const pointer = this.pointsMaterial.uniforms.uPointer.value as THREE.Vector2;
-    if (x < 0) pointer.set(2, 2);
-    else pointer.set((x / Math.max(1, this.width)) * 2 - 1, -(y / Math.max(1, this.height)) * 2 + 1);
+    const nx = x < 0 ? 2 : (x / Math.max(1, this.width)) * 2 - 1;
+    const ny = x < 0 ? 2 : -(y / Math.max(1, this.height)) * 2 + 1;
+    if (pointer.x === nx && pointer.y === ny) return;
+    pointer.set(nx, ny);
+    this.markDirty();
   }
 
   /**
@@ -1245,6 +1206,7 @@ export class SeaRenderer {
     if (this.pointsMaterial !== null) {
       this.pointsMaterial.uniforms.uDpr.value = Math.min(2, window.devicePixelRatio || 1);
     }
+    this.markDirty();
   }
 
   /**
@@ -1272,6 +1234,7 @@ export class SeaRenderer {
   setReduced(reduced: boolean): void {
     this.post.uniforms.uGrain.value = reduced ? 0 : 0.03;
     this.post.uniforms.uVignette.value = reduced ? 0.3 : 0.5;
+    this.markDirty();
   }
 
   /** Release every GPU resource this scene owns. */

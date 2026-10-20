@@ -23,7 +23,7 @@ import { oneDark } from '@codemirror/theme-one-dark';
 import { dtMs, fmtAgo, getColorChar11 } from '../fc';
 import type { Da } from '../sdb';
 import { hydrateMath, renderMd } from '../md';
-import { WFeedTip } from './WFeedTip';
+import { FeedTip } from './FeedTip';
 
 /** Marker attribute the delegated listener looks for. */
 export const TIP_ATTR = 'data-tip';
@@ -252,7 +252,7 @@ export function TipHost({ children }: { children: React.ReactNode }) {
 
   const body = useMemo(() => {
     if (!row) return null;
-    if (row.kind === 'wfeed') return <WFeedTip feedRef={row.da.ref} />;
+    if (row.kind === 'wfeed') return <FeedTip feedRef={row.da.ref} />;
     if (row.da.type === 'md') {
       return <div className="tip-md" dangerouslySetInnerHTML={{ __html: cachedHtml(row.da.txt) }} />;
     }

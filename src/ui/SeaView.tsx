@@ -34,11 +34,13 @@ import {
   NO_RELATIONS, type SeaAction, type SeaRelations, type SeaRow, type TagRelation,
 } from './seaTags';
 import {
-  SEA_FEEL, createRig, leanedPitch, notch, stepRig, wheelScroll, wheelZoom, type SeaRig,
+  SEA_FEEL, createRig, leanedPitch, notch, poseSettled, stepRig, wheelScroll,
+  type SeaPose, type SeaRig,
 } from './seaFeel';
 import { SEA_MOMENTUM_KEY } from './seaMotion';
 import { SeaRenderer, type SeaHover, type SeaWallPick } from './seaRender';
-import { buildWall, type SeaWall, type WallRegion } from './seaWall';
+import { noteSeaFrame } from '../perfWatch';
+import { buildWall, type WallRegion } from './seaWall';
 import type { TagGraph } from './restGraph';
 
 /** Pointer travel under this, in pixels, is a click rather than a drag. */
@@ -53,6 +55,19 @@ const DEG_PER_UNIT = 2;
 /** Smallest and largest wall spacing a pinch may ask for. */
 const SPACING_MIN = 0.35;
 const SPACING_MAX = 3;
+
+/** Degrees per radian, for the compass bearing. */
+const DEG = 180 / Math.PI;
+
+/** The compass's own size, in CSS pixels: a round map-style control. */
+const COMPASS_SIZE = 76;
+
+/** Where the compass hangs: the map-control corner, above the app's dock. */
+const COMPASS: React.CSSProperties = {
+  position: 'fixed', right: 16, bottom: 158, zIndex: 2, width: COMPASS_SIZE,
+  height: COMPASS_SIZE, cursor: 'pointer', pointerEvents: 'auto',
+  filter: 'drop-shadow(0 4px 14px rgba(0,0,0,0.6))',
+};
 
 /** The pointer's last position, for the card the lock keeps open. */
 const NO_POINTER = { x: 24, y: 24 };
@@ -169,9 +184,10 @@ export function SeaView({ foreground }: { foreground: boolean }) {
   const navigate = useNavigate();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const mountRef = useRef<HTMLDivElement | null>(null);
+  const compassRef = useRef<HTMLCanvasElement | null>(null);
+  const resetRef = useRef<() => void>(() => {});
   const rendererRef = useRef<SeaRenderer | null>(null);
   const rigRef = useRef<SeaRig>(createRig());
-  const wallRef = useRef<SeaWall | null>(null);
   const rowsRef = useRef<Map<string, SeaRow[]>>(new Map());
   const graphRef = useRef<TagGraph | null>(null);
   const relationsRef = useRef<SeaRelations>(NO_RELATIONS);
@@ -205,7 +221,16 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     [seed],
   );
   const graph = useMemo(
-    () => seed?.graph ?? graphFromTags(tags, doc.relations),
+    () => {
+      const base = seed?.graph ?? graphFromTags(tags, doc.relations);
+      /* The generated table is the durable reading, so a pinned reach there roots the wall
+         even when the pin cards themselves are not readable in this profile. */
+      const pinned = tags.filter((tag) => tag.reach === 'pinned').map((tag) => tag.tag);
+      if (pinned.every((tag) => base.roots.has(tag))) return base;
+      const roots = new Set(base.roots);
+      for (const tag of pinned) roots.add(tag);
+      return { ...base, roots };
+    },
     [seed, tags, doc.relations],
   );
   const wall = useMemo(
@@ -214,7 +239,7 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       : buildWall(graph, tags, (tag) => rowsByTag.get(tag) ?? [], {
         /* The wall opens at the feel's narrow field of view, so the column is narrower than
            the old wide-wall packing and the strips come into view beside it. */
-        pinCol: 46,
+        pinCol: 32,
         shelfGap: 5,
         areaPerRow: 4,
         minW: 12,
@@ -229,7 +254,6 @@ export function SeaView({ foreground }: { foreground: boolean }) {
   useEffect(() => { rowsRef.current = rowsByTag; }, [rowsByTag]);
   useEffect(() => { graphRef.current = graph; }, [graph]);
   useEffect(() => { relationsRef.current = doc.relations; }, [doc.relations]);
-  useEffect(() => { wallRef.current = wall; }, [wall]);
   useEffect(() => { lockedRef.current = locked; }, [locked]);
   useEffect(() => {
     if (!foreground) setHover(null);
@@ -366,8 +390,6 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     }
     rendererRef.current = renderer;
     applyRef.current();
-    /* TEMP: inspect the wall from the browser while tuning. */
-    (window as unknown as { __sea?: unknown }).__sea = { renderer, wall: () => wallRef.current, rig: rigRef.current };
 
     const rig = rigRef.current;
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -400,6 +422,10 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     let yawSpeed = 0;
     let scrollSpeed = 0;
     let hoverAt = 0;
+    let clickTimer: number | null = null;
+    let lastClickAt = 0;
+    let lastClickX = 0;
+    let lastClickY = 0;
     const pointers = new Map<number, { x: number; y: number }>();
     let pinch: { dx: number; dy: number } | null = null;
 
@@ -441,14 +467,40 @@ export function SeaView({ foreground }: { foreground: boolean }) {
         setCursor(false);
         return;
       }
-      applyHover({ region: hit.region, point: hit.point, annotation: hit.annotation }, clientX, clientY);
+      applyHover({ region: hit.region, point: hit.point }, clientX, clientY);
       setCursor(true);
+    };
+
+    /** Return to the origin meridian and sea level, with the star ahead. */
+    const resetPose = (): void => {
+      rig.scrollTarget = 0;
+      rig.vScroll = 0;
+      rig.yawTarget = 0;
+      rig.vYaw = 0;
+      if (rig.pitchIndex !== 2) {
+        rig.pitchIndex = 2;
+        rig.pitchFrom = rig.pitch;
+        rig.pitchTo = 0;
+        rig.pitchT = 0;
+      }
+      lockedRef.current = null;
+      setLocked(null);
+      setHover(null);
+      renderer.setHover(null, []);
     };
 
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
-      if (event.ctrlKey || event.metaKey) wheelZoom(rig, event.deltaY);
-      else wheelScroll(rig, event.deltaY * 2);
+      if (event.ctrlKey || event.metaKey) {
+        /* Ctrl or ⌘ with the wheel opens the vertical spacing only; the labels keep their
+           size, so the wall reads as a wider or tighter canvas rather than a zoomed view. */
+        const spacing = spacingRef.current;
+        spacing.y = Math.min(SPACING_MAX, Math.max(SPACING_MIN,
+          spacing.y * Math.exp(-event.deltaY * 0.0015)));
+        renderer.setSpacing(spacing.x, spacing.y);
+        return;
+      }
+      wheelScroll(rig, event.deltaY * 2);
     };
 
     const onPointerDown = (event: PointerEvent) => {
@@ -535,19 +587,37 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       if (!dragging) return;
       dragging = false;
       if (moved <= CLICK_SLOP) {
+        const now = performance.now();
+        const isDouble = now - lastClickAt < 300
+          && Math.hypot(event.clientX - lastClickX, event.clientY - lastClickY) < 30;
+        lastClickAt = now;
+        lastClickX = event.clientX;
+        lastClickY = event.clientY;
+        if (isDouble) {
+          if (clickTimer !== null) {
+            window.clearTimeout(clickTimer);
+            clickTimer = null;
+          }
+          resetPose();
+          return;
+        }
         const rect = canvas.getBoundingClientRect();
         const hit = renderer.pick(event.clientX - rect.left, event.clientY - rect.top);
-        if (hit === null) {
-          lockedRef.current = null;
-          setLocked(null);
-          renderer.setHover(null, []);
-        } else if (hit.annotation !== undefined) {
-          openRef.current(hit.annotation.row.ref, hit.annotation.row.action);
-        } else if (hit.point !== undefined) {
-          openRef.current(hit.point.ref, hit.point.action);
-        } else {
-          lockRef.current(hit);
-        }
+        if (clickTimer !== null) window.clearTimeout(clickTimer);
+        /* A single click waits out the double-click window: the same gesture must not both
+           open a link and carry the camera home. */
+        clickTimer = window.setTimeout(() => {
+          clickTimer = null;
+          if (hit === null) {
+            lockedRef.current = null;
+            setLocked(null);
+            renderer.setHover(null, []);
+          } else if (hit.point !== undefined) {
+            openRef.current(hit.point.ref, hit.point.action);
+          } else {
+            lockRef.current(hit);
+          }
+        }, 300);
         return;
       }
       /* The release hands the drag's own speed to the coast, capped, so a flick carries. */
@@ -586,6 +656,89 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       keys.clear();
     };
 
+    /* ── the compass ───────────────────────────────────────────────────────── */
+
+    const compass = compassRef.current;
+    const compassCtx = compass === null ? null : compass.getContext('2d');
+    const compassDpr = Math.min(2, window.devicePixelRatio || 1);
+    let lastBearing = Number.NaN;
+
+    /** Draw the dial: a fixed view pointer over a ring that turns with the wall. */
+    const drawCompass = (bearing: number): void => {
+      if (compass === null || compassCtx === null) return;
+      const size = COMPASS_SIZE;
+      if (compass.width !== size * compassDpr) {
+        compass.width = size * compassDpr;
+        compass.height = size * compassDpr;
+      }
+      const ctx = compassCtx;
+      ctx.setTransform(compassDpr, 0, 0, compassDpr, 0, 0);
+      ctx.clearRect(0, 0, size, size);
+      const c = size / 2;
+
+      /* The control's face. */
+      ctx.beginPath();
+      ctx.arc(c, c, c - 2, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(6, 10, 16, 0.78)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(225, 238, 250, 0.22)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      /* The dial turns under a fixed view pointer; the star is the dial's zero. */
+      ctx.save();
+      ctx.translate(c, c);
+      ctx.rotate((-bearing * Math.PI) / 180);
+      for (let deg = 0; deg < 360; deg += 15) {
+        const major = deg % 45 === 0;
+        const a = (deg * Math.PI) / 180 - Math.PI / 2;
+        const outer = c - 7;
+        const inner = outer - (major ? 8 : 4);
+        ctx.strokeStyle = major ? 'rgba(225,238,250,0.5)' : 'rgba(225,238,250,0.22)';
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a) * inner, Math.sin(a) * inner);
+        ctx.lineTo(Math.cos(a) * outer, Math.sin(a) * outer);
+        ctx.stroke();
+      }
+      /* A gold bead marks the star's meridian; the needle points at it. */
+      ctx.beginPath();
+      ctx.arc(0, -(c - 11), 2.4, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,226,155,0.95)';
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(0, -(c - 20));
+      ctx.lineTo(4, 0);
+      ctx.lineTo(-4, 0);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(255,226,155,0.95)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(0, c - 20);
+      ctx.lineTo(4, 0);
+      ctx.lineTo(-4, 0);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(225,238,250,0.32)';
+      ctx.fill();
+      ctx.restore();
+
+      /* The view pointer stays at the top; the dial turns beneath it. */
+      ctx.beginPath();
+      ctx.moveTo(c, 2);
+      ctx.lineTo(c - 4, 9);
+      ctx.lineTo(c + 4, 9);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(255,232,180,0.9)';
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(c, c, 2, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(232,240,248,0.85)';
+      ctx.fill();
+    };
+    drawCompass(0);
+    resetRef.current = resetPose;
+
     host.addEventListener('wheel', onWheel, { passive: false });
     host.addEventListener('pointerdown', onPointerDown);
     host.addEventListener('pointermove', onPointerMove);
@@ -599,6 +752,17 @@ export function SeaView({ foreground }: { foreground: boolean }) {
 
     const started = performance.now();
     let last = started;
+    /* The pose and the scene revision of the last drawn frame. A settled pose with no
+       scene change draws nothing: the compositor keeps the frame already on screen, so a
+       still wall costs no GPU. Springs converge without ever landing, which is why the
+       comparison has a sub-pixel bound rather than waiting for equality. */
+    let drawnPose: SeaPose | null = null;
+    let drawnRevision = -1;
+    /* A restored tab starts with a fresh frame, because a hidden canvas may come back blank. */
+    const onVisible = () => {
+      if (!document.hidden) drawnPose = null;
+    };
+    document.addEventListener('visibilitychange', onVisible);
     renderer.setAnimationLoop(() => {
       const now = performance.now();
       const dt = Math.min(0.1, (now - last) / 1000);
@@ -619,18 +783,33 @@ export function SeaView({ foreground }: { foreground: boolean }) {
         reduced: still,
         momentum: momentumOf(treeCac[SEA_MOMENTUM_KEY]),
       });
-      renderer.setView({
+      const view: SeaPose = {
         camY: rig.camY * DEG_PER_UNIT,
         phi: rig.phi,
         pitch: leanedPitch(rig, still),
         roll: rig.roll,
         fov: rig.fov,
-      });
-      renderer.render(dt, (now - started) / 1000);
+      };
+      renderer.setView(view);
+      const bearing = ((-rig.phi * DEG) % 360 + 360) % 360;
+      if (!(Math.abs(bearing - lastBearing) < 0.05)) {
+        lastBearing = bearing;
+        drawCompass(bearing);
+      }
+      const poseStill = drawnPose !== null && poseSettled(drawnPose, view);
+      const redraw = !poseStill || drawnRevision !== renderer.revision;
+      if (redraw) {
+        renderer.render(dt, (now - started) / 1000);
+        drawnPose = view;
+        drawnRevision = renderer.revision;
+      }
+      noteSeaFrame(dt * 1000, redraw, poseStill);
     });
 
     return () => {
       renderer.setAnimationLoop(null);
+      document.removeEventListener('visibilitychange', onVisible);
+      if (clickTimer !== null) window.clearTimeout(clickTimer);
       observer?.disconnect();
       window.removeEventListener('resize', size);
       reduced.removeEventListener('change', onReduced);
@@ -644,6 +823,7 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       window.removeEventListener('blur', onBlur);
       renderer.dispose();
       rendererRef.current = null;
+      resetRef.current = () => {};
       if (canvas.parentElement === mount) mount.removeChild(canvas);
     };
   }, [relationsFor]);
@@ -664,7 +844,6 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     const nature = kindLabel(region.nature);
     const reach = kindLabel(region.reach);
     const point = active.target.point;
-    const annotation = active.target.annotation;
 
     return (
       <div style={{ ...CARD, left, top }} role="group" aria-live="polite">
@@ -687,19 +866,16 @@ export function SeaView({ foreground }: { foreground: boolean }) {
             </div>
           </>
         )}
-        {(point !== undefined || annotation !== undefined) && (
+        {point !== undefined && (
           <>
-            <div style={CARD_SECTION}>{point !== undefined ? 'link' : 'annotation'}</div>
+            <div style={CARD_SECTION}>link</div>
             <button
               type="button"
-              style={((point ?? annotation?.row)?.action === 'link' ? CARD_ROW : CARD_ROW_EDITOR)}
-              title={(point ?? annotation?.row)?.text}
-              onClick={() => {
-                const row = point ?? annotation?.row;
-                if (row !== undefined) openRow(row.ref, row.action);
-              }}
+              style={point.action === 'link' ? CARD_ROW : CARD_ROW_EDITOR}
+              title={point.text}
+              onClick={() => openRow(point.ref, point.action)}
             >
-              {`${(point ?? annotation?.row)?.action === 'link' ? '↗' : '✎'} ${(point ?? annotation?.row)?.label ?? ''}`}
+              {`${point.action === 'link' ? '↗' : '✎'} ${point.label}`}
             </button>
           </>
         )}
@@ -742,6 +918,17 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       >
         <div ref={mountRef} style={CANVAS_HOST} />
       </div>
+      <canvas
+        ref={compassRef}
+        className="sea-compass"
+        style={{ ...COMPASS, display: foreground ? 'block' : 'none' }}
+        width={COMPASS_SIZE}
+        height={COMPASS_SIZE}
+        role="button"
+        aria-label="Return to the star and sea level"
+        title="Return to the star and sea level"
+        onClick={() => resetRef.current()}
+      />
       {card}
       {tags.length === 0 && (
         <div style={WAITING}>

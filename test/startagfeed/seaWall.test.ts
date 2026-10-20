@@ -48,7 +48,7 @@ const rowsOf = (tag: string): SeaRow[] => [
 ];
 
 const WALL = buildWall(GRAPH, TAGS, rowsOf);
-const SHAPE = { pinCol: 46, areaPerRow: 4, labelDeg: 15 };
+const SHAPE = { pinCol: 46, areaPerRow: 4 };
 
 describe('the star and the pin column', () => {
   const wall = buildWall(GRAPH, TAGS, rowsOf, SHAPE);
@@ -69,12 +69,16 @@ describe('the star and the pin column', () => {
     }
   });
 
-  it('annotates a pinned heading and no one else', () => {
+  it('gives a pinned heading its links as points, like any other cell', () => {
     for (const region of wall.regions) {
-      if (region.reach === 'pinned' && !region.reflection) {
-        expect(region.annotations.length).toBeGreaterThan(0);
-      } else {
-        expect(region.annotations).toEqual([]);
+      if (region.reach !== 'pinned' && region.reach !== 'alias') continue;
+      if (region.reflection) continue;
+      expect(region.points.length).toBeGreaterThan(0);
+      for (const point of region.points) {
+        expect(point.lon).toBeGreaterThanOrEqual(region.lon0);
+        expect(point.lon).toBeLessThanOrEqual(region.lon1);
+        expect(point.rise).toBeGreaterThanOrEqual(region.rise0);
+        expect(point.rise).toBeLessThanOrEqual(region.rise1);
       }
     }
   });
@@ -111,9 +115,9 @@ describe('the cloud ring', () => {
     expect(wall.below).toBeLessThan(0);
   });
 
-  it('gives a wide cell its name and a narrow one a hover', () => {
-    for (const cloud of clouds) {
-      expect(cloud.label).toBe(cloud.lon1 - cloud.lon0 >= 15);
+  it('draws a name in every cell below the horizon', () => {
+    for (const region of wall.regions) {
+      expect(region.label).toBe(!region.reflection);
     }
   });
 });
@@ -137,6 +141,26 @@ describe('the link points', () => {
     for (const point of wall.points) {
       expect(point.ref.startsWith(`https://example.com/${point.tag}/`)).toBe(true);
       expect(point.above).toBe(false);
+    }
+  });
+
+  it('shows every row as a point, with no count kept back', () => {
+    for (const region of wall.regions) {
+      if (region.reflection) continue;
+      expect(region.points.length).toBe(region.rows.length);
+    }
+  });
+
+  it('places every row of a crowded cell inside that cell', () => {
+    const many = (tag: string): SeaRow[] => Array.from({ length: 240 }, (_, i) => row(tag, i));
+    const crowded = buildWall(GRAPH, TAGS, many, SHAPE);
+    const beta = crowded.regions.find((region) => region.tag === 'beta' && !region.reflection);
+    expect(beta?.points).toHaveLength(240);
+    for (const point of beta?.points ?? []) {
+      expect(point.lon).toBeGreaterThanOrEqual(beta!.lon0);
+      expect(point.lon).toBeLessThanOrEqual(beta!.lon1);
+      expect(point.rise).toBeGreaterThanOrEqual(beta!.rise0);
+      expect(point.rise).toBeLessThanOrEqual(beta!.rise1);
     }
   });
 

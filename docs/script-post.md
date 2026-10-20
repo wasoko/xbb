@@ -33,7 +33,7 @@ a row today and must not start.
 
 | Call site | Row | After M1 |
 |---|---|---|
-| `src/ui/wFeedRun.ts` | `webfeed/extract.js` | the compiled twin runs; `notes` say so and the readout keeps its items |
+| `src/srcfeed.ts` | a `Src:` source row | the row text or its twin runs, and the readout keeps its items; a source with no `Src:` uses the built-in walk and never evals |
 | `src/srctag.ts` (`loadTagAdapter` ← `loadAdaptersFromStore`) | `srctag/embed.js`, `srctag/classify.js` | no twin exists, so the row is skipped with the named refusal; the sweep keeps the lexical channels and `hashEmbed` |
 | `src/ui/restGrouper.ts` | a custom `type='src'` grouper row | the refusal is logged and the list falls back to flat; the default `qarf` never evals |
 | `src/recr.ts` (`run_src`) | any `type='src'` row | the twin, or a refusal that lists the steps; a `@requires tab` row goes to the extension's tab runner |
@@ -98,11 +98,11 @@ whenever the realm can eval, and the webapp never consults anything new.
 |---|---|
 | `src/rowMeta.ts` | the `// @requires` / `@match` / `@max` / `@prompt` parse; stops at the first body line |
 | `src/runsrc.ts` | `canEvalBody()` — probe once, cache verdict and reason (the `checkUserScriptsAvailable` shape); `registerBodyTwin`/`registerBodyTwins` keyed by **exact body text**; `runBodyWithPath` returns the path (`body`/`twin`/`tab`); `runBody` delegates; `SrcUnavailableError` carries `code` and `steps`; the constructor-syntax-error tie-breaker is unchanged |
-| `src/webfeedRows.ts` | `webFeedReport` + `WEBFEED_BODY_TWINS` for `WEBFEED_EXTRACT_BODY`: the body's own call to `extractFromDoc`, with the same `sources` lines and `showRows` slice |
-| `src/ui/routes.tsx` | `registerBodyTwins(WEBFEED_BODY_TWINS)` and `installExtSrcRunner()` beside the two `install*Global()` calls |
-| `src/ui/wFeedRun.ts` | uses the traced form and appends `ran the compiled body…` to `notes` when the twin ran |
+| `src/srcfeedRows.ts` | `webFeedReport` + `SRCFEED_BODY_TWINS` for `WEBFEED_EXTRACT_BODY` and the seeded `srcdom` body: each body's own call to the engine, with the same `sources` lines and `showRows` slice |
+| `src/ui/routes.tsx` | `registerBodyTwins(SRCFEED_BODY_TWINS)` and `installSrcFeedTabRunner()` beside the two `install*Global()` calls |
+| `src/srcfeed.ts` | runs each `Src:` row through the traced form and reports the compiled or tab path in the readout |
 | `src/recr.ts` | `run_src` uses the traced form, appends the path, and prints `SrcUnavailableError.steps`; the tool description names `@requires tab` |
-| `src/extsrc.ts`, `src/extsrcRows.ts` | the tab runner, its capability probe and failure catalogue, plus the seeded `extsrc.md`/`extsrc/extract.js` — see [extsrc.md](extsrc.md) |
+| `src/srcfeedTab.ts`, `src/srcfeedRows.ts` | the tab runner, its capability probe and failure catalogue, plus the seeded `extdom/*` bodies and the legacy `extsrc.md` adapter — see [srcfeed.md](srcfeed.md) |
 
 Deliberately not in M1: a twin for `srctag/embed.js` and `srctag/classify.js`. Their body
 *is* the implementation (read the provider block out of `secret.md`, call the API, return an
@@ -130,7 +130,7 @@ A row whose header says `// @requires tab` never takes any of the three paths ab
 `chrome.userScripts`, matches a tab, and hands the body to
 `chrome.userScripts.execute`. Chrome compiles that body; the extension never evaluates
 it. The row stays `type='src'`, stays behind the `rwr` gate, and needs no new tool —
-`run_src` already offers it. Details and the failure catalogue: [extsrc.md](extsrc.md).
+`run_src` already offers it. Details and the failure catalogue: [srcfeed.md](srcfeed.md).
 
 ## M2 — deferred: a script post for the greet service host
 
@@ -171,7 +171,7 @@ tabext, which is long-lived and can hold one frame for every caller instead of o
 2. `test/runsrc.test.ts` (new): the selection is a pure function of `(body, canEval)` — twin on
    exact text, refusal on an edited body, refusal on an unknown body, and no twin consulted
    when eval is available.
-3. `test/startagfeed/wFeedRun.test.ts`: a read with eval blocked reports the compiled path in
+3. `test/startagfeed/srcfeedRun.test.ts`: a read with eval blocked reports the compiled path in
    `notes` and the same items as the row-text read.
 4. Real hosts: a feed read in the options page (compiled path) beside the same read at
    `http://localhost:5173` (row text), plus `test/srctag-cdp.test.ts` untouched.
@@ -182,8 +182,9 @@ tabext, which is long-lived and can hold one frame for every caller instead of o
 
 1. Does the future greet host own the frame, or does the options page keep one and hand it
    over? (Both work; the port's owner decides who answers `ctx.db` calls.)
-2. Is an edited `webfeed/extract.js` expected to run in the extension before M2 exists — if so,
-   M2 moves ahead of the host and grows the port M1 does not need.
+2. Is an edited seeded adapter (`srcdom/sinaCNmedia`, `extdom/*`) expected to run in the
+   extension before M2 exists — the registered twin covers only the exact seed text, so an
+   edit refuses with `eval-blocked`.
 3. The `srctag` adapter rows stay skipped in an extension page until M2; is that acceptable for
    a sweep run from the options page, or should a twin for the built-in provider walk be added
    to `srctag.ts` as a separate change?

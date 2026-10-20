@@ -1,6 +1,6 @@
 // @vitest-environment node
 /**
- * wFeed.test.ts — the `w.feed.md` dialect: the `## Setup` a read obeys, the
+ * srcfeedDoc.test.ts — the `*.feed.md` dialect: the `## Setup` a read obeys, the
  * `## Posts as of …` block it writes, and the `{ref}` token a pin card heading
  * carries into `cs1`.
  *
@@ -11,11 +11,10 @@
 
 import { describe, expect, it } from 'vitest';
 import { headingMatchRuns, splitHeadingParts } from '../../src/ui/cs1Token';
-import { feedDraft } from '../../src/webfeedRows';
 import {
-  dueForRefresh, insertPosts, isFeedRef, latestPosts, nextRefreshAt, parseFreq, parsePostItem,
-  parseStamp, parseWFeedDoc, postItem, postsBlock, setSetupValue,
-} from '../../src/wFeed';
+  dueForRefresh, feedDraft, insertPosts, isFeedRef, latestPosts, nextRefreshAt, parseFreq,
+  parsePostItem, parseStamp, parseWFeedDoc, postItem, postsBlock, setSetupValue,
+} from '../../src/srcfeed';
 
 /** A document with a schedule, prose, and one read behind it. */
 const DOC = `# w.feed
@@ -155,7 +154,7 @@ describe('the ref a feed document lives under', () => {
     const doc = parseWFeedDoc(draft);
     expect(doc.setup.freqText).toBe('2hr');
     expect(doc.setup.nextText).toBe('');
-    // No named source reads every block `webfeed.md` declares, whatever they are called.
+    // No named source reads every entry without a `Src:` row, whatever they are called.
     expect(doc.setup.sources).toEqual([]);
     expect(doc.posts).toEqual([]);
     expect(nextRefreshAt(doc)).toBeNull();
