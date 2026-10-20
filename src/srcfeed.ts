@@ -23,11 +23,14 @@
  * returns: the entry name in `rec.feed`, the path in `rec.strategy`, a stamp, and the
  * entry's tags.
  *
- * Each source is trimmed against its own newest stored post, matched by the post's
- * URL when it carries one — an item's text carries counts that tick between reads —
- * so a source shared by two feeds stops at the same pinned row in both. Nothing here
- * imports Dexie or React: the write goes through {@link SrcFeedStore}, so a test
- * passes its own port and the app passes `srcfeedStore.ts`.
+ * Each source is trimmed at the oldest post the last read stored for it, matched by
+ * the post's URL when it carries one — an item's text carries counts that tick
+ * between reads — and every row the document already holds is dropped after that.
+ * A list that keeps a pinned head at its top leaves the anchor near its own top, so
+ * the trim alone would stop at the pins on every read; the second step removes what
+ * sits above them. Nothing here imports Dexie or React: the write goes through
+ * {@link SrcFeedStore}, so a test passes its own port and the app passes
+ * `srcfeedStore.ts`.
  *
  * `srcfeed.ts` also publishes the reader helpers a `srcdom` row calls as
  * `globalThis.srcfeed` ({@link installSrcFeedGlobal}); a `data:`-URL body can import
@@ -416,7 +419,10 @@ export interface SrcFeedEntry extends FeedSource {
   prompt: string;
   /** `* Item:` selector of one history entry, for a tab adapter. */
   item: string;
-  /** `* Sidebar:` selector that must exist before the list can be read. */
+  /**
+   * `* Sidebar:` selector that says the page needs a manual step; the tab body
+   * consults it only when `Item:` matched nothing.
+   */
   sidebar: string;
   /** `* Scroll:` container to exhaust before reading, when the list is virtualized. */
   scroll: string;
@@ -817,12 +823,14 @@ async function readEntry(
 }
 
 /**
- * The newest post each source stored: its first line, in the newest block that
- * names it.
+ * The oldest post each source stored: its last line, in the newest block that names
+ * it.
  *
  * A block lists only the posts its read found new, so the newest block need not
  * name a source at all; that source's last check is still its line in an earlier
- * block. Keyed by the entry name {@link postItem} writes as `**name**`.
+ * block. A block is newest first, so its last line is the oldest post it holds, and
+ * that line stays in the list on the next read even when a pinned head sits above
+ * it. Keyed by the entry name {@link postItem} writes as `**name**`.
  */
 function previousBoundaries(doc: WFeedDoc): Map<string, { text: string; ref: string }> {
   const stored = new Map<string, { text: string; ref: string }>();
@@ -830,13 +838,60 @@ function previousBoundaries(doc: WFeedDoc): Map<string, { text: string; ref: str
   const unstamped = doc.posts.filter((p) => p.asOf === null);
   stamped.sort((a, b) => (b.asOf?.getTime() ?? 0) - (a.asOf?.getTime() ?? 0));
   for (const block of [...stamped, ...unstamped]) {
-    for (const line of block.items) {
+    /* Walking backwards keeps the last line of the first block that names a source,
+       and skips every later block for that source. */
+    for (const line of [...block.items].reverse()) {
       const item = parsePostItem(line);
       if (item === null || item.source === '' || stored.has(item.source)) continue;
       stored.set(item.source, item);
     }
   }
   return stored;
+}
+
+/** What one source's stored blocks already hold. */
+interface StoredKeys {
+  /** Every URL the source's blocks list. */
+  refs: Set<string>;
+  /** Every ref-less text, without the action counts that tick between reads. */
+  texts: Set<string>;
+}
+
+/**
+ * Every post each source has stored in any block, keyed by the entry name.
+ *
+ * The anchor {@link previousBoundaries} returns is a position in the live list; this
+ * is the whole history of stored keys, so a row above the anchor is still dropped
+ * when the document already lists it.
+ */
+function storedKeys(doc: WFeedDoc): Map<string, StoredKeys> {
+  const out = new Map<string, StoredKeys>();
+  for (const block of doc.posts) {
+    for (const line of block.items) {
+      const item = parsePostItem(line);
+      if (item === null || item.source === '') continue;
+      let keys = out.get(item.source);
+      if (keys === undefined) {
+        keys = { refs: new Set(), texts: new Set() };
+        out.set(item.source, keys);
+      }
+      if (item.ref !== '') keys.refs.add(item.ref);
+      else keys.texts.add(stripActionLine(item.text));
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether the document already lists this row for its source.
+ *
+ * A row with a URL is known by it; a row without one is known by its text without
+ * the action counts. A post that is only retitled or reactivated keeps its URL, so it
+ * counts as stored and is not written again.
+ */
+function alreadyStored(keys: StoredKeys | undefined, row: FeedDa): boolean {
+  if (keys === undefined) return false;
+  return row.ref !== '' ? keys.refs.has(row.ref) : keys.texts.has(stripActionLine(row.txt));
 }
 
 /**
@@ -915,6 +970,7 @@ export async function runSrcFeed(opts: SrcFeedRunOptions): Promise<SrcFeedReport
     : registry.entries.filter((entry) => entry.src === '').map((entry) => entry.name);
 
   const boundaries = previousBoundaries(doc);
+  const held = storedKeys(doc);
   const results: EntryRead[] = [];
   for (const name of names) {
     const entry = registry.entries.find((e) => e.name === name);
@@ -931,7 +987,10 @@ export async function runSrcFeed(opts: SrcFeedRunOptions): Promise<SrcFeedReport
         notes: [`${entry.name}: ${e instanceof Error ? e.message : String(e)}`],
       }));
     log.info(`[srcfeed] ${entry.name}: ${read.rows.length} row(s)`);
-    results.push({ ...read, rows: trimAtBoundary(read.rows, boundaries.get(entry.name) ?? null) });
+    const kept = held.get(entry.name);
+    const rows = trimAtBoundary(read.rows, boundaries.get(entry.name) ?? null)
+      .filter((row) => !alreadyStored(kept, row));
+    results.push({ ...read, rows });
   }
 
   const notes = [

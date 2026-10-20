@@ -65,17 +65,14 @@ export const EXTSRC_DOC = `# extsrc
  * Body of `extsrc/extract.js`: read one registry entry out of the tab it runs in.
  *
  * Runs inside the page, so it uses the DOM directly and has no store access. The
- * runner supplies the entry as `ctx.args.source`; a missing `Sidebar` returns a
- * `needsUser` report instead of an empty list.
+ * runner supplies the entry as `ctx.args.source`. The item list decides what the page
+ * shows: a list rendered without the declared sidebar wrapper still reads, and an
+ * empty list asks for the entry's manual step.
  */
 export const EXTSRC_EXTRACT_BODY = `// @requires tab
 // @requires user-scripts
 const src = ctx.args.source || {};
 if (!src.url) throw new Error('srcfeed: ctx.args.source.url is missing');
-
-if (src.sidebar && !document.querySelector(src.sidebar)) {
-  return { rows: [], notes: [], needsUser: src.prompt || 'open the history sidebar in this tab' };
-}
 
 const scroller = src.scroll ? document.querySelector(src.scroll) : null;
 for (let pass = 0; scroller && pass < 3; pass++) {
@@ -94,6 +91,9 @@ for (const el of nodes.slice(0, max)) {
   const row = { txt: txt, ref: href, tags: [src.name].concat(src.tags || []) };
   if (src.mode === 'html') row.rec = { html: (el.outerHTML || '').slice(0, 2000) };
   rows.push(row);
+}
+if (rows.length === 0 && (src.prompt || (src.sidebar && !document.querySelector(src.sidebar)))) {
+  return { rows: [], notes: [], needsUser: src.prompt || 'open the history sidebar in this tab' };
 }
 const notes = rows.length === 0 && src.item ? ['no element matched ' + src.item] : [];
 return { rows: rows, notes: notes };
@@ -258,7 +258,6 @@ reads it; a source without one is read by the built-in web walk (\`URL\`, then i
 * URL: https://chat.deepseek.com/*
 * Src: ${EXTDOM_DSC_REF}
 * Type: url
-* Sidebar: .chat-history
 * Item: a[href^="/a/chat"]
 * Prompt: open the history sidebar in the DeepSeek tab
 * Tags:

@@ -125,6 +125,29 @@ describe('tab body', () => {
     expect(res.value?.needsUser).toBe('open the history sidebar');
   });
 
+  it('asks for the entry prompt when the list is empty and no Sidebar is declared', async () => {
+    document.body.innerHTML = '<div></div>';
+    const res = await runInTab({
+      name: 'demo', url: 'https://e.test/*', item: 'a[href^="/a/chat"]',
+      prompt: 'open the history sidebar',
+    });
+    expect(res.value?.rows).toEqual([]);
+    expect(res.value?.needsUser).toBe('open the history sidebar');
+  });
+
+  it('reads the list when the sidebar wrapper it was told to expect is gone', async () => {
+    document.body.innerHTML = '<nav class="renamed">'
+      + '<a href="/a/chat/1">First chat</a><a href="/a/chat/2">Second chat</a>'
+      + '</nav>';
+    const res = await runInTab({
+      name: 'demo', url: 'https://e.test/*', sidebar: '.hist',
+      item: 'a[href^="/a/chat"]', prompt: 'open the history sidebar',
+    });
+    expect(res.ok).toBe(true);
+    expect(res.value?.rows.map(r => r.txt)).toEqual(['First chat', 'Second chat']);
+    expect(res.value?.needsUser).toBeUndefined();
+  });
+
   it('reports the selector that matched nothing', async () => {
     document.body.innerHTML = '<aside class="hist"></aside>';
     const res = await runInTab({

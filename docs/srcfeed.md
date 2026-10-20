@@ -11,10 +11,10 @@ entries from that registry and keeps its own schedule and the blocks its reads
 wrote. An entry with a `Src:` row is read by that row (a site adapter, or a tab
 adapter in the extension); an entry without one follows the built-in web walk.
 
-`webfeed.md` and `extsrc.md` are legacy: an installation that still holds them is
-read through the adapter in `src/srcfeed.ts` until it seeds `srcfeed.md`. Their
-`type='src'` rows (`webfeed/extract.js`, `extsrc/extract.js`) keep working through
-`run_src`.
+`srcfeed.md` is the only registry to write. `webfeed.md` and `extsrc.md` are
+legacy: an installation that still holds them is read through the adapter in
+`src/srcfeed.ts` until it seeds `srcfeed.md`. Their `type='src'` rows
+(`webfeed/extract.js`, `extsrc/extract.js`) keep working through `run_src`.
 
 ## Where it sits
 
@@ -22,7 +22,7 @@ read through the adapter in `src/srcfeed.ts` until it seeds `srcfeed.md`. Their
 |---|---|---|
 | Registry + read | `src/srcfeed.ts` | `srcfeed.md`, the `*.feed.md` dialect, the read loop, trimming, the block write, `globalThis.srcfeed` |
 | Store port | `src/srcfeedStore.ts` | `daRead` / `daEdit` / `greet` behind `SrcFeedStore` |
-| Web walk | `src/srcfeedWeb.ts` | the `webfeed.md` dialect, strategies, backoff, payload readers, the row plan, the commit port, `globalThis.webfeed` |
+| Web walk | `src/srcfeedWeb.ts` | the `## Sources` dialect, strategies, backoff, payload readers, the row plan, the commit port, `globalThis.webfeed` |
 | Tab port | `src/srcfeedTab.ts` | the extension probe, tab match, `chrome.userScripts.execute`, the refusal catalogue |
 | Rows | `src/srcfeedRows.ts` | the seeded registry and bodies, `w.feed.md`, `y.feed.md`, `x.feed.md`, compiled twins |
 | Readout | `src/ui/FeedTip.tsx` | the hover preview the pin card's `{*.feed.md}` token shows |
@@ -41,13 +41,14 @@ The engine imports no Dexie or React: a read reaches the store through
 ### sina
 * URL: https://www.sina.cn/media/1402400261
 * Src: srcdom/sinaCNmedia
+* Proxy Headers:
+  - X-Return-Format: html
 * Tags:
   - media
 
 ### dsc
 * URL: https://chat.deepseek.com/*
 * Src: extdom/dsc
-* Sidebar: .chat-history
 * Item: a[href^="/a/chat"]
 * Prompt: open the history sidebar in the DeepSeek tab
 * Tags:
@@ -69,18 +70,50 @@ The engine imports no Dexie or React: a read reaches the store through
 | `* Mobile:` | entry | mirror the `mobile` strategy requests; empty derives one when the URL carries an id |
 | `* Proxy Headers:` | entry | headers the `proxy` request adds, one `- name: value` per line |
 | `* Limit:` | entry | rows kept from this source; `0` keeps every row |
-| `* Sidebar:` | entry | selector that must exist before a tab list does |
-| `* Item:` | entry | selector for one tab entry |
+| `* Sidebar:` | entry | selector that says the page needs a manual step; consulted only when `Item:` matched nothing |
+| `* Item:` | entry | selector for one tab entry; the list it matches decides whether the page was read |
 | `* Scroll:` | entry | container to exhaust before reading a virtualized list |
 | `* Mode:` | entry | `dom` reads text and href; `html` also keeps each `outerHTML` under `rec.html` |
 | `* Max:` | entry | tab rows returned, 200 by default |
-| `* Prompt:` | entry | what the user sees when `Sidebar` is missing |
+| `* Prompt:` | entry | what the user sees when `Item:` matched nothing |
 | `* Tags:` | entry | `- tag` lines every row of this entry carries |
 | `* Proxy URL:`, `* Retries:`, `* Base delay ms:`, `* Cap delay ms:`, `* Timeout ms:`, `* Limit:` | `## Fallback` | the web walk's retry budget, proxy root, and default cap |
 
 A block with no `URL:` is skipped, and an unknown label is ignored, so a
 hand-edited document still parses. `## Fallback` defaults are the table's values
 above when the section is absent.
+
+### Legacy registries (`webfeed.md`, `extsrc.md`)
+
+`srcfeed.md` is the only registry to write; a held `webfeed.md` or `extsrc.md` is a
+read-only input, not another place to declare a new source. The legacy dialect is
+the same `## Sources` / `### name` / `* Key:` one above. A held `webfeed.md` may
+carry:
+
+```md
+### wallstreetcn
+* URL: https://wallstreetcn.com/live/global
+* API:
+  - lives: https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=30
+* Tags:
+  - finance
+  - cn
+
+### sina-fly51fly
+* URL: https://www.sina.cn/media/1402400261
+* Proxy Headers:
+  - X-Return-Format: html
+
+### weibo-fly51fly
+* URL: https://weibo.com/u/2337530130
+* Session: weibo
+```
+
+The legacy `webfeed/extract.js` body accepts `ctx.args` overrides for one call:
+`sources`, `url`, `name`, `limit`, `proxy`, `retries`, `baseDelayMs`, `timeoutMs`,
+and `existing`, which is how one `run_src` call reads a single block or a URL the
+document does not hold. `extsrc.md` entries run the legacy tab body
+`extsrc/extract.js`.
 
 ## The feed document (`*.feed.md`)
 
@@ -156,12 +189,20 @@ flowchart LR
    deleted.
 3. Normalize each row: `rec.feed` = entry name, `rec.strategy` = the path, a stamp,
    and the entry's tags.
-4. Trim each source at its own newest stored post — the first line that source has in
-   the newest block that names it, matched by the post's URL when it carries one,
-   because an item's `[转发 …]` counts tick between reads. A source shared by two
-   feeds stops at the same row in both.
+4. Trim each source at the oldest post the last read stored for it — the last line
+   that source has in the newest block that names it, matched by the post's URL when
+   it carries one, because an item's `[转发 …]` counts tick between reads — then drop
+   every row the document already holds for that source, by URL or else by text
+   without its counts. A source shared by two feeds stops at the same row in both.
 5. Write one `## Posts as of <stamp>` block and move `next:` to the read's stamp
    plus `freq`. Write nothing when no source answered.
+
+The anchor is a position in the live list, and a list that keeps a pinned head at
+its top holds it near that top: trimming alone would then stop at the pins on every
+read. The stored-key pass leaves only the rows above the anchor that the document
+has never listed — the pinned head, and any chat the page lists twice. One
+consequence is deliberate: a chat that is only retitled or reactivated keeps its
+URL, so it counts as stored and is not written again.
 
 The written row is pushed like any edit. A document whose `next` has passed is read
 once by itself when the preview opens (at most once per five minutes per ref), so a
@@ -192,13 +233,19 @@ page with no post markup yields no items and the walk tries the next strategy. A
 `<a class="post-link">`, `post-text` is the post, `post-repost` the quote,
 `post-actions` the numbers (转发, 评论, 赞), `time` the stamp, and the anchor's
 `href` the post's URL. The stamp is Beijing time. A post with no `href` keeps a
-ref hashed from its body, so the counting numbers never change its identity.
+ref hashed from its body, so the counting numbers never change its identity. In a
+browser `sina.cn` sends no `Access-Control-Allow-Origin`, so `direct` and `mobile`
+fail and the walk reaches `proxy`; the seeded entry asks the proxy for HTML with
+`* Proxy Headers: - X-Return-Format: html`, because the proxy's Markdown drops the
+markup the posts are read from. The same applies to any entry whose posts only
+exist in HTML.
 
 Every request retries on what a retry can fix — a thrown error, a timeout, 429,
 5xx — with `base * 2^attempt` capped, and gives up on what it cannot: a 403, a
 redirect into a login page, a 200 that carries a wall, or an empty body
 (`blockedText`). Giving up is per strategy, not per source: the next strategy is
-the answer to a wall.
+the answer to a wall. The delay is exponential and jittered; tests pass
+`random: () => 1` to make the sequence exact.
 
 **Rows and persistence.** `planFeedRows` turns items into `FeedDa` rows with no
 `tid`, and `commitFeedRows(port, das)` writes them when a caller pins, tags or
@@ -213,14 +260,15 @@ matching tab. Chrome compiles the code; the extension never evaluates row text.
 
 The body receives `ctx = { ref, args, console }` — no `db`, because it runs in the
 page's origin. It reads its entry from `ctx.args.source` and returns
-`{ rows, notes }`, or `{ needsUser }` when the sidebar is closed.
+`{ rows, notes }`, or `{ needsUser }` when `Item:` matched nothing and the entry
+names a `Prompt`.
 
 | state | when | what the user sees |
 |---|---|---|
 | `not-extension` | the webapp runs a tab row | the row needs the extension |
 | `user-scripts-off` | `chrome.userScripts` is withheld, or the probe fails | `Allow User Scripts`, the `chrome://extensions` steps, the Chrome 138 Developer-mode note, and the API link |
 | `no-tab` | no open tab matches `URL` | the pattern, and "open it in a tab, then run again" |
-| `needs-user` | `Sidebar` is absent | the entry's `Prompt` |
+| `needs-user` | `Item:` matched nothing and the entry names a `Prompt` | the entry's `Prompt` |
 | `missing-source` | the caller passed no source block | run it through a `.feed.md` source |
 | `eval-blocked` | no twin, and this realm forbids eval | open the app at its own origin, or add `@requires tab` |
 
@@ -270,17 +318,30 @@ the legacy document body, whose report names the strategy that answered each sou
 
 | Test | Covers |
 |---|---|
-| `test/startagfeed/srcfeedRun.test.ts` | mixed web/`Src:`/tab/twin reads, trimming, `next:`, legacy `webfeed.md` |
+| `test/startagfeed/srcfeedRun.test.ts` | mixed web/`Src:`/tab/twin reads, trimming and the stored-key dedupe under a pinned head, `next:`, legacy `webfeed.md` |
 | `test/startagfeed/srcfeedDoc.test.ts` | the `*.feed.md` dialect and its write rules |
 | `test/startagfeed/srcfeedWeb.test.ts` | the strategy walk, payload readers, the legacy body, the live findings |
-| `test/srcfeedTab.test.ts` | the tab body, the refusal catalogue, the environment probe |
+| `test/srcfeedTab.test.ts` | the tab body, the item-first sidebar check, the refusal catalogue, the environment probe |
 | `test/runsrc.test.ts` | `@requires tab` routing, the compiled twin registry |
 
 `srcfeedWeb.test.ts` opts into the network with `WEBBFEED_E2E=1`; it reads the
 legacy seeded sources and writes `test-artifacts/webfeed-findings.json`. Measured
-2026-10-15: `wallstreetcn` answers at `api`, `sina.cn/media/…` at `direct`,
-`zhihu.com` returns a CAPTCHA wall and `weibo.com` a visitor wall at every
-session-less strategy — both 200s, which is why `blockedText` exists.
+2026-10-15:
+
+| Source | `api` | `cookied` | `direct` | `mobile` | `proxy` (`r.jina.ai`) | Answers |
+|---|---|---|---|---|---|---|
+| `wallstreetcn` | 200 JSON | — | — | — | — | **`api`**, 3 rows |
+| `sina.cn/media/…` | — | — | 200 | not reached | — | **`direct`**, 3 rows |
+| `zhihu.com/people/…` | 200 `{"data": []}` | — | 403 | — | 200 CAPTCHA (`安全验证`) | none |
+| `weibo.com/u/…` | 200 visitor system | throws | 200 visitor system | 200 visitor system | 200 visitor system | none |
+
+A dash means the strategy did not run: `sina` answers at `direct`, so its derived
+mobile mirror is never requested, and the `zhihu` page carries no id for
+`mobileUrl`. `m.weibo.cn` is not a way around the wall: the weibo and sina mirror
+hosts redirect there and land on `visitor.passport.weibo.cn`'s challenge, so the
+readable copy is the `sina.cn` mirror. Both walls are 200s, which is why
+`blockedText` exists. A run where no source answers warns and passes;
+`WEBBFEED_E2E_STRICT=1` turns that into an assertion.
 
 ## Related
 

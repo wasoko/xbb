@@ -158,10 +158,10 @@ produce the same plan without running any code.
 Seed through `TagSeedRow`/`TagSeedTable` (same helper as `webfeedRows.ts`):
 
 - `extsrc.md` — the document.
-- `extsrc/extract.js` — the in-page body; reads `ctx.args.source`, checks
-  `source.sidebar` presence first, returns `needsUser` when absent, otherwise collects
+- `extsrc/extract.js` — the in-page body; reads `ctx.args.source`, collects
   `{ txt, ref }` for up to `max` items, optionally scrolling a container / clicking a “more”
-  control between passes, and returns `{ rows, notes }`.
+  control between passes, and returns `{ rows, notes }` — or `needsUser` when nothing matched
+  and the entry names a `Prompt`.
 
 Dialect (same `secret.md` style as `webfeed.md`):
 
@@ -186,7 +186,7 @@ Dialect (same `secret.md` style as `webfeed.md`):
 ```
 
 `Mode: dom` reads attributes from matched elements; `Mode: html` returns `outerHTML` slices for
-the row body to parse. `Prompt` is what the runner shows as a notice when `Sidebar` is absent.
+the row body to parse. `Prompt` is what the runner shows as a notice when no item matched.
 The row body's metadata declares `// @requires tab` and `// @requires user-scripts`.
 
 Acceptance: the seeded document is inert until a caller runs it (same rule as `webfeed.md`);
@@ -203,7 +203,7 @@ not troubleshooting notes.
 | `not-extension` | webapp runs a `@requires extension/tab` row | “<ref> needs the extension” | open the sibling app at its own origin; badge explains why |
 | `user-scripts-off` | `chrome.userScripts` absent, disabled, or the toggle is off | “Allow User Scripts is off for Tab Seer” | `chrome://extensions` → Tab Seer → Details → **Allow User Scripts** (Chrome ≥ 138: enable Developer mode first) + link `https://developer.chrome.com/docs/extensions/reference/api/userScripts` |
 | `no-tab` | no open tab matches `* URL:` | “no open tab matches <pattern>” | action: open the source URL; re-check button |
-| `needs-user` | `Sidebar:` selector absent | the source's `Prompt` | action: focus the tab; re-check button |
+| `needs-user` | no item matched and the entry names a `Prompt` | the source's `Prompt` | action: focus the tab; re-check button |
 | `empty` | selectors match nothing | “<n> items read, 0 matched” | names the selector that missed |
 | `error` | the body threw in the tab | the error message + the row ref | — |
 | `eval-blocked` | M1 refusal | names the CSP + the app's origin | — |
@@ -213,8 +213,8 @@ Acceptance: every row above is produced by a unit test with a fake `env`/`tabs`;
 
 ### P6 — docs and checks
 
-- `docs/extsrc.md` (current-state: the dialect, the runner, the failure catalogue, the
-  asymmetry in §2.5), `docs/webfeed.md` + `docs/recr-agloop.md` §7 pointers, and
+- `docs/srcfeed.md` (current-state: the dialect, the runner, the failure catalogue, the
+  asymmetry in §2.5), `docs/recr-agloop.md` §7 pointers, and
   `docs/script-post.md` updated to say `extSrc` chose `userScripts` and why the bridge is still
   deferred.
 - Tests: `test/runsrc.test.ts` (new), `test/extsrc.test.ts` (new: parse, plan, verify, mapping,
@@ -263,9 +263,11 @@ flowchart TD
   B -- no --> U["user-scripts-off<br/>steps + link"]
   B -- yes --> C{"tab matches * URL:?"}
   C -- no --> N["no-tab<br/>open action"]
-  C -- yes --> D{"Sidebar selector present?"}
-  D -- no --> P["needs-user<br/>source Prompt + focus action"]
+  C -- yes --> D{"any Item: match?"}
   D -- yes --> E["userScripts.execute(rowBody)<br/>rows / notes"]
+  D -- no --> F{"Prompt declared?"}
+  F -- yes --> P["needs-user<br/>source Prompt + focus action"]
+  F -- no --> G["rows: [] and the selector that missed"]
 ```
 
 ## 8. Definition of done

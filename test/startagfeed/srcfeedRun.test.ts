@@ -197,6 +197,36 @@ describe('runSrcFeed', () => {
     expect(report.items.map((i) => i.ref)).toEqual(['https://demo.test/9']);
   });
 
+  it('keeps reading under a pinned head that stays at the top of the list', async () => {
+    await seed('srcfeed.md', 'md', withSrc('srcdom/demo'));
+    await seed('probe.feed.md', 'md', feedDoc('demo'));
+
+    /** Two pinned chats that never move, then the history newest first. */
+    const list = (...chats: string[]): string => ['return { rows: [',
+      "    { txt: 'Pinned chat one', ref: 'https://demo.test/p1' },",
+      "    { txt: 'Pinned chat two', ref: 'https://demo.test/p2' },",
+      ...chats.map((chat) => `    { txt: '${chat}', ref: 'https://demo.test/${chat}' },`),
+      '  ], notes: [] };',
+    ].join('\n');
+
+    await seed('srcdom/demo', 'src', list('chat1'));
+    const first = await run({ ref: 'probe.feed.md' });
+    expect(first.items.map((i) => i.ref)).toEqual([
+      'https://demo.test/p1', 'https://demo.test/p2', 'https://demo.test/chat1',
+    ]);
+
+    await editSrc('srcdom/demo', list('chat2', 'chat1'));
+    const second = await run({ ref: 'probe.feed.md', now: new Date('2026-10-16T09:00:00Z') });
+    expect(second.items.map((i) => i.ref)).toEqual(['https://demo.test/chat2']);
+
+    await editSrc('srcdom/demo', list('chat3', 'chat2', 'chat1'));
+    const third = await run({ ref: 'probe.feed.md', now: new Date('2026-10-16T11:00:00Z') });
+    expect(third.items.map((i) => i.ref)).toEqual(['https://demo.test/chat3']);
+
+    const doc = parseWFeedDoc((await held('probe.feed.md'))?.txt ?? '');
+    expect(doc.posts[0].items).toEqual(['- **demo** chat3 — https://demo.test/chat3']);
+  });
+
   it('keeps matching a source that the newest block does not name', async () => {
     await seed('srcfeed.md', 'md', withSrc('srcdom/demo'));
     await seed('srcdom/demo', 'src',
@@ -389,7 +419,7 @@ describe('seeded registry', () => {
       .toEqual(['wallstreetcn', 'sina', 'dsc', 'ge']);
     expect(registry.entries.find((entry) => entry.name === 'sina')?.src).toBe(SRCDOM_SINA_REF);
     expect(registry.entries.find((entry) => entry.name === 'dsc')).toMatchObject({
-      src: EXTDOM_DSC_REF, sidebar: '.chat-history', item: 'a[href^="/a/chat"]',
+      src: EXTDOM_DSC_REF, sidebar: '', item: 'a[href^="/a/chat"]',
     });
     expect(registry.entries.find((entry) => entry.name === 'wallstreetcn')?.src).toBe('');
     expect(registry.fallback.proxy).toBe('https://r.jina.ai/');
