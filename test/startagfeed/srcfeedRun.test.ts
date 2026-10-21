@@ -152,6 +152,31 @@ describe('runSrcFeed', () => {
     expect(report.pathNote).toBe('ran in a browser tab');
   });
 
+  it('keeps every tab\'s new chats when a Tabs: all merge changes order between reads', async () => {
+    await seed('srcfeed.md', 'md', withSrc('extdom/chat', '* Tabs: all\n'));
+    await seed('extdom/chat', 'src', '// @requires tab\nreturn { rows: [] };');
+    await seed('probe.feed.md', 'md', feedDoc('demo'));
+    /* Tab A first, then tab B: the block's last line, b1, is the next read's anchor. */
+    const first = [
+      { txt: 'a1', ref: 'https://demo.test/a1' },
+      { txt: 'b1', ref: 'https://demo.test/b1' },
+    ];
+    /* Tab B is now first, and tab A holds a chat the first read did not see. */
+    const second = [
+      { txt: 'b1', ref: 'https://demo.test/b1' },
+      { txt: 'a0', ref: 'https://demo.test/a0' },
+      { txt: 'a1', ref: 'https://demo.test/a1' },
+    ];
+    const runner = vi.fn(async () => ({ rows: first, notes: [] }));
+    registerTabBodyRunner(runner);
+    await run({ ref: 'probe.feed.md' });
+
+    runner.mockResolvedValue({ rows: second, notes: [] });
+    const report = await run({ ref: 'probe.feed.md', now: new Date('2026-10-16T11:00:00Z') });
+
+    expect(report.items.map((item) => item.ref)).toEqual(['https://demo.test/a0']);
+  });
+
   it('runs the compiled twin when this page cannot eval row text', async () => {
     const body = "return { rows: [{ txt: 'from twin', ref: 'https://demo.test/t' }] };";
     await seed('srcfeed.md', 'md', withSrc('srcdom/twin'));
@@ -419,7 +444,11 @@ describe('seeded registry', () => {
       .toEqual(['wallstreetcn', 'sina', 'dsc', 'ge']);
     expect(registry.entries.find((entry) => entry.name === 'sina')?.src).toBe(SRCDOM_SINA_REF);
     expect(registry.entries.find((entry) => entry.name === 'dsc')).toMatchObject({
-      src: EXTDOM_DSC_REF, sidebar: '', item: 'a[href^="/a/chat"]',
+      src: EXTDOM_DSC_REF, sidebar: '', item: 'a[href^="/a/chat"]', tabs: '',
+    });
+    expect(registry.entries.find((entry) => entry.name === 'ge')).toMatchObject({
+      src: 'extdom/ge', tabs: 'all', sidebar: '[data-test-id="chat-history-container"]',
+      item: 'a[href*="/app/"]',
     });
     expect(registry.entries.find((entry) => entry.name === 'wallstreetcn')?.src).toBe('');
     expect(registry.fallback.proxy).toBe('https://r.jina.ai/');

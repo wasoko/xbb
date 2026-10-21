@@ -10,8 +10,10 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { parseExtSrcDoc } from '../src/srcfeed';
 import { EXTSRC_DOC, EXTSRC_EXTRACT_BODY } from '../src/srcfeedRows';
 import {
-  isExtensionPage, resetTabEnv, tabEnv, tabFailure, wrapTabBody,
+  isExtensionPage, resetTabEnv, runTabRow, tabEnv, tabFailure, wrapTabBody,
+  type ExtTab, type TabClient,
 } from '../src/srcfeedTab';
+import type { RecrScriptContext } from '../src/runsrc';
 import { rowMeta } from '../src/rowMeta';
 
 /** What one wrapped body resolves to. */
@@ -43,7 +45,7 @@ describe('legacy document dialect', () => {
     const sources = parseExtSrcDoc(EXTSRC_DOC);
     expect(sources.map(s => s.name)).toEqual(['gemini', 'deepseek']);
     expect(sources[0]).toMatchObject({
-      url: 'https://gemini.google.com/*', item: 'a[href^="/app/"]', mode: 'dom', max: 200,
+      url: 'https://gemini.google.com/*', item: 'a[href*="/app/"]', tabs: 'all', mode: 'dom', max: 200,
     });
     expect(sources[0].prompt).toContain('chat sidebar');
     expect(sources[0].tags).toEqual(['gemini', 'chat']);
@@ -169,5 +171,124 @@ describe('tab body', () => {
     const res = await runInTab({});
     expect(res.ok).toBe(false);
     expect(res.error).toContain('source.url is missing');
+  });
+});
+
+/** A tab port over a fixed tab list; `run` answers what the body returned in each tab. */
+function fakeClient(
+  tabs: ExtTab[],
+  run: (tabId: number) => unknown,
+  opts: { fail?: (tabId: number) => string | undefined } = {},
+): TabClient & { runs: number[] } {
+  const runs: number[] = [];
+  return {
+    runs,
+    env: async () => ({ extension: true, userScripts: true }),
+    tabs: async () => tabs,
+    execute: async (tabId) => {
+      runs.push(tabId);
+      const failure = opts.fail?.(tabId);
+      if (failure !== undefined) throw new Error(failure);
+      return [{ result: { ok: true, value: run(tabId) } }];
+    },
+  };
+}
+
+/** The `run_src` context one Gemini entry is read with. */
+function ctxOf(source: Record<string, unknown>): RecrScriptContext {
+  return {
+    db: undefined,
+    ref: 'extdom/ge',
+    args: { source: { url: 'https://gemini.google.com/*', item: 'a[href*="/app/"]', ...source } },
+    console,
+  };
+}
+
+/** What a merged multi-tab read returns. */
+interface MergedRows {
+  rows: Array<{ txt: string; ref: string }>;
+  notes: string[];
+}
+
+describe('multiple login tabs', () => {
+  const geminiTabs: ExtTab[] = [
+    { id: 1, url: 'https://gemini.google.com/u/2/app?pli=1' },
+    { id: 2, url: 'https://gemini.google.com/u/3/app?pli=1' },
+    { id: 3, url: 'https://gemini.google.com/u/4/app?pli=1' },
+  ];
+
+  it('reads the first matching tab when the entry names no Tabs', async () => {
+    const client = fakeClient(geminiTabs, (id) => ({
+      rows: [{ txt: `chat ${id}`, ref: `/u/${id}/app/x` }], notes: [],
+    }));
+
+    const out = await runTabRow(EXTSRC_EXTRACT_BODY, ctxOf({}), client) as MergedRows;
+
+    expect(client.runs).toEqual([1]);
+    expect(out.rows.map((row) => row.ref)).toEqual(['/u/1/app/x']);
+  });
+
+  it('reads every matching tab with Tabs: all and merges by ref', async () => {
+    const client = fakeClient(geminiTabs, (id) => ({
+      rows: [{ txt: `chat ${id}`, ref: `/u/${id}/app/x` }, { txt: 'New chat', ref: '/app' }],
+      notes: [],
+    }));
+
+    const out = await runTabRow(EXTSRC_EXTRACT_BODY, ctxOf({ tabs: 'all' }), client) as MergedRows;
+
+    expect(client.runs).toEqual([1, 2, 3]);
+    expect(out.rows.map((row) => row.ref))
+      .toEqual(['/u/1/app/x', '/app', '/u/2/app/x', '/u/3/app/x']);
+  });
+
+  it('keeps the tabs that answered when another needs its sidebar', async () => {
+    const client = fakeClient(geminiTabs, (id) => (id === 2
+      ? { rows: [], notes: [], needsUser: 'open the chat sidebar' }
+      : { rows: [{ txt: `chat ${id}`, ref: `/u/${id}/app/x` }], notes: [] }));
+
+    const out = await runTabRow(EXTSRC_EXTRACT_BODY, ctxOf({ tabs: 'all' }), client) as MergedRows;
+
+    expect(out.rows.map((row) => row.ref)).toEqual(['/u/1/app/x', '/u/3/app/x']);
+    expect(out.notes).toContain('u/3: open the chat sidebar');
+  });
+
+  it('labels the notes a tab reported', async () => {
+    const client = fakeClient(geminiTabs, (id) => ({
+      rows: [{ txt: `chat ${id}`, ref: `/u/${id}/app/x` }],
+      notes: [`no element matched a[href*="/app/"]`],
+    }));
+
+    const out = await runTabRow(EXTSRC_EXTRACT_BODY, ctxOf({ tabs: 'all' }), client) as MergedRows;
+
+    expect(out.notes).toContain('u/2: no element matched a[href*="/app/"]');
+  });
+
+  it('keeps the tabs that ran when another tab cannot run the row', async () => {
+    const client = fakeClient(
+      geminiTabs,
+      (id) => ({ rows: [{ txt: `chat ${id}`, ref: `/u/${id}/app/x` }], notes: [] }),
+      { fail: (id) => (id === 2 ? 'No tab with id 2' : undefined) },
+    );
+
+    const out = await runTabRow(EXTSRC_EXTRACT_BODY, ctxOf({ tabs: 'all' }), client) as MergedRows;
+
+    expect(out.rows.map((row) => row.ref)).toEqual(['/u/1/app/x', '/u/3/app/x']);
+    expect(out.notes.join('\n')).toContain('u/3: extdom/ge could not run in tab 2');
+  });
+
+  it('asks for the manual step only when no tab produced a row', async () => {
+    const client = fakeClient(geminiTabs, () => ({
+      rows: [], notes: [], needsUser: 'open the chat sidebar',
+    }));
+
+    await expect(runTabRow(EXTSRC_EXTRACT_BODY, ctxOf({ tabs: 'all' }), client))
+      .rejects.toThrow('open the chat sidebar');
+  });
+
+  it('names the pattern when no tab matches', async () => {
+    const client = fakeClient([], () => ({}));
+
+    await expect(runTabRow(EXTSRC_EXTRACT_BODY, ctxOf({ tabs: 'all' }), client))
+      .rejects.toThrow('no open tab matches https://gemini.google.com/*');
   });
 });

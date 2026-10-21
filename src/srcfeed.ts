@@ -426,6 +426,12 @@ export interface SrcFeedEntry extends FeedSource {
   sidebar: string;
   /** `* Scroll:` container to exhaust before reading, when the list is virtualized. */
   scroll: string;
+  /**
+   * `* Tabs:` — `all` reads every open tab the entry's `URL:` matches and merges
+   * their rows; any other value reads the first match. A site that keeps one tab
+   * per login (Gemini's `/u/1` … `/u/9`) holds a disjoint list in each.
+   */
+  tabs: string;
   /** `* Mode:` `dom` reads text and href; `html` also keeps each element's outerHTML. */
   mode: 'dom' | 'html';
   /** `* Max:` cap on the rows this source returns. */
@@ -442,7 +448,7 @@ export interface SrcFeedRegistry {
 
 /** The fields a `* Src:`-less registry entry leaves unset. */
 const ENTRY_DEFAULTS = {
-  src: '', match: '', prompt: '', item: '', sidebar: '', scroll: '',
+  src: '', match: '', prompt: '', item: '', sidebar: '', scroll: '', tabs: '',
   mode: 'dom' as const, max: 200,
 };
 
@@ -465,6 +471,7 @@ function entryExtras(md: string): Map<string, Partial<SrcFeedEntry>> {
       item: kv.item ?? '',
       sidebar: kv.sidebar ?? '',
       scroll: kv.scroll ?? '',
+      tabs: kv.tabs ?? '',
       mode: kv.mode === 'html' ? 'html' : 'dom',
       max: Math.max(1, Number(kv.max) || 200),
     });
@@ -528,6 +535,7 @@ export function parseExtSrcDoc(md: string): SrcFeedEntry[] {
       item: kv.item ?? '',
       sidebar: kv.sidebar ?? '',
       scroll: kv.scroll ?? '',
+      tabs: kv.tabs ?? '',
       mode: kv.mode === 'html' ? 'html' : 'dom',
       max: Math.max(1, Number(kv.max) || 200),
     });
@@ -919,6 +927,9 @@ const newestFirst = (a: FeedDa, b: FeedDa): number =>
 const feedOf = (row: FeedDa): string =>
   (typeof row.rec?.feed === 'string' ? row.rec.feed : '');
 
+/** Whether the entry reads every matching tab, so its rows merge several lists. */
+const readsEveryTab = (entry: SrcFeedEntry): boolean => entry.tabs.trim().toLowerCase() === 'all';
+
 /** Run options for {@link runSrcFeed}. */
 export interface SrcFeedRunOptions {
   /** Ref of the feed document to read and write; `w.feed.md` when omitted. */
@@ -988,8 +999,14 @@ export async function runSrcFeed(opts: SrcFeedRunOptions): Promise<SrcFeedReport
       }));
     log.info(`[srcfeed] ${entry.name}: ${read.rows.length} row(s)`);
     const kept = held.get(entry.name);
-    const rows = trimAtBoundary(read.rows, boundaries.get(entry.name) ?? null)
-      .filter((row) => !alreadyStored(kept, row));
+    /* A multi-tab source merges one newest-first list per tab. Which list comes
+       first is the browser's tab order, not recency, so the positional anchor would
+       drop a tab's new chats when the tabs are reordered or one closes. There the
+       stored keys alone decide what is new. */
+    const window = readsEveryTab(entry)
+      ? read.rows
+      : trimAtBoundary(read.rows, boundaries.get(entry.name) ?? null);
+    const rows = window.filter((row) => !alreadyStored(kept, row));
     results.push({ ...read, rows });
   }
 

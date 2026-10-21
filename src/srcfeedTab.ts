@@ -29,7 +29,7 @@ import {
 } from './runsrc';
 
 /** The parts of `chrome` this module uses; declared locally so no extension types are required. */
-interface ExtTab {
+export interface ExtTab {
   id?: number;
   title?: string;
   url?: string;
@@ -203,19 +203,47 @@ function sourceOf(ctx: RecrScriptContext): Record<string, unknown> {
 }
 
 /**
- * The first open tab whose URL matches `pattern`.
+ * Every open tab whose URL matches `pattern`, in the browser's order.
  *
  * @param pattern match pattern from the registry entry
- * @returns the tab, or undefined when none matches or the pattern is invalid
+ * @returns the matching tabs; empty when none matches or the pattern is invalid
  */
-async function queryTab(pattern: string): Promise<ExtTab | undefined> {
+async function queryTabs(pattern: string): Promise<ExtTab[]> {
   const tabs = extChrome()?.tabs;
-  if (!tabs) return undefined;
+  if (!tabs) return [];
   try {
-    return (await tabs.query({ url: pattern }))[0];
+    return await tabs.query({ url: pattern });
   } catch {
-    return undefined;
+    return [];
   }
+}
+
+/** The browser side of the tab port: the capability probe, the tab list, and the executor. */
+export interface TabClient {
+  /** What this host can do for a row that needs a tab. */
+  env(): Promise<TabEnv>;
+  /** Open tabs whose URL matches a match pattern. */
+  tabs(pattern: string): Promise<ExtTab[]>;
+  /** Run one wrapped row in one tab. */
+  execute(tabId: number, code: string): Promise<Array<{ result?: unknown }>>;
+}
+
+/** {@link TabClient} over the running browser. */
+const browserTabClient: TabClient = {
+  env: tabEnv,
+  tabs: queryTabs,
+  execute: (tabId, code) => extChrome()!.userScripts!.execute({ target: { tabId }, js: [{ code }] }),
+};
+
+/**
+ * How a note names the tab it came from: the account segment a site's URL carries
+ * (`u/4` on Gemini), else the tab's title, else its id.
+ */
+function tabLabel(tab: ExtTab): string {
+  const account = tab.url?.match(/\/u\/(\d+)\//)?.[1];
+  if (account) return `u/${account}`;
+  const title = (tab.title ?? '').trim();
+  return title === '' ? `tab ${tab.id ?? '?'}` : title.slice(0, 40);
 }
 
 /** What the injected wrapper returns. */
@@ -256,16 +284,63 @@ export function wrapTabBody(body: string, ctx: { ref: string; args: unknown }): 
 })()`;
 }
 
+/** One tab's result: the body's value, or the manual step the page asked for. */
+type TabOutcome = { value: unknown } | { prompt: string };
+
+/**
+ * Run the wrapped row in one tab and read what it returned.
+ *
+ * @param client the browser side of the port
+ * @param tab the tab to run in
+ * @param code the wrapped body
+ * @param ref the row ref, for an error message
+ * @returns the body's value, or the `needsUser` step it reported
+ * @throws Error when the tab could not run the row
+ */
+async function runInTab(
+  client: TabClient, tab: ExtTab, code: string, ref: string,
+): Promise<TabOutcome> {
+  let injections: Array<{ result?: unknown }>;
+  try {
+    injections = await client.execute(tab.id!, code);
+  } catch (e) {
+    throw new Error(`${ref} could not run in tab ${tab.id}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const result = injections?.[0]?.result as TabResult | undefined;
+  if (!result || typeof result !== 'object') {
+    throw new Error(`${ref} returned nothing from tab ${tab.id}`);
+  }
+  if (!result.ok) throw new Error(`${ref} failed in tab ${tab.id}: ${result.error ?? 'unknown error'}`);
+  const value = result.value;
+  if (typeof value === 'object' && value !== null) {
+    const needsUser = (value as { needsUser?: unknown }).needsUser;
+    if (typeof needsUser === 'string' && needsUser) return { prompt: needsUser };
+    const notes = (value as { notes?: unknown }).notes;
+    if (Array.isArray(notes) && result.logs?.length) notes.push(...result.logs.slice(0, 20));
+  }
+  return { value };
+}
+
 /**
  * Run one row in its matching tab.
  *
+ * A source that names `* Tabs: all` is read in every open tab its `URL:` matches,
+ * because one login is one tab: Gemini's `/u/1` … `/u/9` tabs hold disjoint lists.
+ * Rows are merged in tab order and deduped by `ref`; a tab that needs its sidebar
+ * opened, or that cannot run the row, is a note rather than the whole read's failure,
+ * and only a read that found no row at all reports the manual step. Every other
+ * source reads the first matching tab, where a second tab is the same list.
+ *
  * @param body exact row text
  * @param ctx value of the `run_src` call; `ctx.args.source` must be the registry entry
- * @returns the body's value, with its console lines appended when it reports `notes`
+ * @param client the browser side of the port; the running browser when omitted
+ * @returns the body's value, or `{ rows, notes }` merged from every matching tab
  * @throws SrcUnavailableError when a precondition is missing
  */
-export async function runTabRow(body: string, ctx: RecrScriptContext): Promise<unknown> {
-  const env = await tabEnv();
+export async function runTabRow(
+  body: string, ctx: RecrScriptContext, client: TabClient = browserTabClient,
+): Promise<unknown> {
+  const env = await client.env();
   if (!env.extension) {
     const f = tabFailure('not-extension', { ref: ctx.ref });
     throw new SrcUnavailableError('not-extension', f.message, f.steps);
@@ -275,34 +350,66 @@ export async function runTabRow(body: string, ctx: RecrScriptContext): Promise<u
     throw new SrcUnavailableError('user-scripts-off', f.message, f.steps);
   }
   const source = sourceOf(ctx);
-  const tab = await queryTab(String(source.url));
-  if (!tab?.id) {
-    const f = tabFailure('no-tab', { ref: ctx.ref, url: String(source.url) });
+  const pattern = String(source.url);
+  const tabs = (await client.tabs(pattern)).filter((tab) => tab.id !== undefined);
+  if (tabs.length === 0) {
+    const f = tabFailure('no-tab', { ref: ctx.ref, url: pattern });
     throw new SrcUnavailableError('no-tab', f.message, f.steps);
   }
+  const every = String(source.tabs ?? '').toLowerCase() === 'all';
+  const targets = every ? tabs : tabs.slice(0, 1);
+  const merge = targets.length > 1;
   const code = wrapTabBody(body, { ref: ctx.ref, args: { ...asArgs(ctx.args), source } });
-  let injections: Array<{ result?: unknown }>;
-  try {
-    injections = await extChrome()!.userScripts!.execute({ target: { tabId: tab.id }, js: [{ code }] });
-  } catch (e) {
-    throw new Error(`${ctx.ref} could not run in tab ${tab.id}: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  const result = injections?.[0]?.result as TabResult | undefined;
-  if (!result || typeof result !== 'object') {
-    throw new Error(`${ctx.ref} returned nothing from tab ${tab.id}`);
-  }
-  if (!result.ok) throw new Error(`${ctx.ref} failed in tab ${tab.id}: ${result.error ?? 'unknown error'}`);
-  const value = result.value;
-  if (typeof value === 'object' && value !== null) {
-    const needsUser = (value as { needsUser?: unknown }).needsUser;
-    if (typeof needsUser === 'string' && needsUser) {
-      const f = tabFailure('needs-user', { ref: ctx.ref, prompt: needsUser });
-      throw new SrcUnavailableError('needs-user', f.message, f.steps);
+
+  const rows: unknown[] = [];
+  const notes: string[] = [];
+  const seen = new Set<string>();
+  let single: unknown;
+  let prompt = '';
+  let failure = '';
+  let failed = 0;
+
+  for (const tab of targets) {
+    const label = tabLabel(tab);
+    try {
+      const out = await runInTab(client, tab, code, ctx.ref);
+      if ('prompt' in out) {
+        const f = tabFailure('needs-user', { ref: ctx.ref, prompt: out.prompt });
+        if (!merge) throw new SrcUnavailableError('needs-user', f.message, f.steps);
+        prompt = prompt === '' ? out.prompt : prompt;
+        notes.push(`${label}: ${out.prompt}`);
+        continue;
+      }
+      single = out.value;
+      const report = out.value as { rows?: unknown; notes?: unknown } | null;
+      if (!merge) continue;
+      const own = report?.notes;
+      if (Array.isArray(own)) for (const note of own) notes.push(`${label}: ${String(note)}`);
+      const list = report?.rows;
+      if (!Array.isArray(list)) continue;
+      for (const row of list) {
+        const ref = typeof row === 'object' && row !== null
+          ? String((row as { ref?: unknown }).ref ?? '') : '';
+        if (ref !== '' && seen.has(ref)) continue;
+        if (ref !== '') seen.add(ref);
+        rows.push(row);
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (!merge) throw e;
+      failed += 1;
+      failure = failure === '' ? message : failure;
+      notes.push(`${label}: ${message}`);
     }
-    const notes = (value as { notes?: unknown }).notes;
-    if (Array.isArray(notes) && result.logs?.length) notes.push(...result.logs.slice(0, 20));
   }
-  return value;
+
+  if (!merge) return single;
+  if (rows.length === 0 && prompt !== '') {
+    const f = tabFailure('needs-user', { ref: ctx.ref, prompt });
+    throw new SrcUnavailableError('needs-user', f.message, f.steps);
+  }
+  if (rows.length === 0 && failed === targets.length) throw new Error(failure);
+  return { rows, notes };
 }
 
 /**
@@ -313,5 +420,5 @@ export async function runTabRow(body: string, ctx: RecrScriptContext): Promise<u
  * user needs.
  */
 export function installSrcFeedTabRunner(): void {
-  registerTabBodyRunner(runTabRow);
+  registerTabBodyRunner((body, ctx) => runTabRow(body, ctx));
 }

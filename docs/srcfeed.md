@@ -73,6 +73,7 @@ The engine imports no Dexie or React: a read reaches the store through
 | `* Sidebar:` | entry | selector that says the page needs a manual step; consulted only when `Item:` matched nothing |
 | `* Item:` | entry | selector for one tab entry; the list it matches decides whether the page was read |
 | `* Scroll:` | entry | container to exhaust before reading a virtualized list |
+| `* Tabs:` | entry | `all` reads every open tab `URL:` matches and merges their rows, deduped by ref; any other value reads the first match |
 | `* Mode:` | entry | `dom` reads text and href; `html` also keeps each `outerHTML` under `rec.html` |
 | `* Max:` | entry | tab rows returned, 200 by default |
 | `* Prompt:` | entry | what the user sees when `Item:` matched nothing |
@@ -194,6 +195,10 @@ flowchart LR
    it carries one, because an item's `[转发 …]` counts tick between reads — then drop
    every row the document already holds for that source, by URL or else by text
    without its counts. A source shared by two feeds stops at the same row in both.
+   A `* Tabs: all` source merges one newest-first list per tab, and which list comes
+   first is the tab order rather than recency, so it is trimmed by the stored keys
+   alone: the positional anchor would drop a tab's new chats when the tabs are
+   reordered or one closes.
 5. Write one `## Posts as of <stamp>` block and move `next:` to the read's stamp
    plus `freq`. Write nothing when no source answered.
 
@@ -262,6 +267,14 @@ The body receives `ctx = { ref, args, console }` — no `db`, because it runs in
 page's origin. It reads its entry from `ctx.args.source` and returns
 `{ rows, notes }`, or `{ needsUser }` when `Item:` matched nothing and the entry
 names a `Prompt`.
+
+A source that names `* Tabs: all` runs in every open tab its `URL:` matches and
+returns one merged `{ rows, notes }`. That is how one site's separate logins are
+read together: Gemini keeps an account at `/u/1` … `/u/9`, each tab holding its own
+pinned and recent chats. Rows are merged in tab order and deduped by `ref`; a tab
+that reported `needsUser` or could not run becomes a note naming its account, and
+the read fails with `needs-user` only when no tab produced a row. Without the key,
+the first matching tab is read.
 
 | state | when | what the user sees |
 |---|---|---|

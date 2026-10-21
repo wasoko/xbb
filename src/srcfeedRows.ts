@@ -44,11 +44,12 @@ export const EXTSRC_DOC = `# extsrc
 
 ### gemini
 * URL: https://gemini.google.com/*
-* Sidebar: [data-test-id="chat-history"]
-* Item: a[href^="/app/"]
+* Sidebar: [data-test-id="chat-history-container"]
+* Item: a[href*="/app/"]
+* Tabs: all
 * Mode: dom
-* Max: 200
-* Prompt: open the chat sidebar (☰) in the Gemini tab
+* Max: 55555
+* Prompt: open the chat sidebar (☰) in each Gemini tab
 * Tags: gemini chat
 
 ### deepseek
@@ -56,7 +57,7 @@ export const EXTSRC_DOC = `# extsrc
 * Sidebar: .chat-history
 * Item: a[href^="/a/chat"]
 * Mode: dom
-* Max: 200
+* Max: 55555
 * Prompt: open the history sidebar in the DeepSeek tab
 * Tags: deepseek chat
 `;
@@ -81,7 +82,7 @@ for (let pass = 0; scroller && pass < 3; pass++) {
   await new Promise(function (resolve) { setTimeout(resolve, 300); });
 }
 
-const max = Math.max(1, Number(src.max) || 200);
+const max = Math.max(1, Number(src.max) || 55555);
 const nodes = src.item ? Array.from(document.querySelectorAll(src.item)) : [];
 const rows = [];
 for (const el of nodes.slice(0, max)) {
@@ -89,7 +90,7 @@ for (const el of nodes.slice(0, max)) {
   if (!href) continue;
   const txt = (el.textContent || '').replace(/\\s+/g, ' ').trim() || el.getAttribute('title') || href;
   const row = { txt: txt, ref: href, tags: [src.name].concat(src.tags || []) };
-  if (src.mode === 'html') row.rec = { html: (el.outerHTML || '').slice(0, 2000) };
+  if (src.mode === 'html') row.rec = { html: (el.outerHTML || '').slice(0, 55555) };
   rows.push(row);
 }
 if (rows.length === 0 && (src.prompt || (src.sidebar && !document.querySelector(src.sidebar)))) {
@@ -268,9 +269,10 @@ reads it; a source without one is read by the built-in web walk (\`URL\`, then i
 * URL: https://gemini.google.com/*
 * Src: ${EXTDOM_GE_REF}
 * Type: url
-* Sidebar: [data-test-id="chat-history"]
-* Item: a[href^="/app/"]
-* Prompt: open the chat sidebar (☰) in the Gemini tab
+* Tabs: all
+* Sidebar: [data-test-id="chat-history-container"]
+* Item: a[href*="/app/"]
+* Prompt: open the chat sidebar (☰) in each Gemini tab
 * Tags:
   - gemini
   - chat
@@ -328,9 +330,10 @@ sources: dsc, ge
 
 ## Notes
 
-Two tab sources: open the DeepSeek and Gemini tabs and their history sidebars, then
-read. A tab source is never implicit, so an empty \`sources:\` here reads nothing
-rather than whichever tab happens to match.
+Two tab sources: open the DeepSeek tab and every Gemini account tab (\`/u/1\` …
+\`/u/9\`) with their history sidebars open, then read. \`* Tabs: all\` on \`ge\` reads
+all of them and merges their chats. A tab source is never implicit, so an empty
+\`sources:\` here reads nothing rather than whichever tab happens to match.
 `;
 
 /**
