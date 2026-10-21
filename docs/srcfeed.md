@@ -75,7 +75,7 @@ The engine imports no Dexie or React: a read reaches the store through
 | `* Scroll:` | entry | container to exhaust before reading a virtualized list |
 | `* Tabs:` | entry | `all` reads every open tab `URL:` matches and merges their rows, deduped by ref; any other value reads the first match |
 | `* Mode:` | entry | `dom` reads text and href; `html` also keeps each `outerHTML` under `rec.html` |
-| `* Max:` | entry | tab rows returned, 200 by default |
+| `* Max:` | entry | cap on tab rows; unset (or `0`) leaves the cap to the adapter |
 | `* Prompt:` | entry | what the user sees when `Item:` matched nothing |
 | `* Tags:` | entry | `- tag` lines every row of this entry carries |
 | `* Proxy URL:`, `* Retries:`, `* Base delay ms:`, `* Cap delay ms:`, `* Timeout ms:`, `* Limit:` | `## Fallback` | the web walk's retry budget, proxy root, and default cap |
@@ -165,6 +165,49 @@ the example feeds land in one step. An existing `webfeed.md` or `extsrc.md` is a
 registry too (read through the adapter), so the example is not written over it; a
 tombstoned registry is a deletion, not a missing one. The seed helper keeps any live
 row it finds.
+
+## Parsing
+
+The registry is read on every call — `loadSrcRegistry` caches nothing — and `FeedTip`
+keeps a live query on it, so an edited document reaches the next preview render and
+the next read.
+
+```mermaid
+flowchart LR
+  SF["srcfeed.md"] --> BASE["parseWebfeedDoc<br/>URL, Type, API, Session,<br/>Mobile, Proxy, Tags, Limit"]
+  SF --> EXTRA["entryExtras<br/>Src, Prompt, Item, Sidebar,<br/>Scroll, Tabs, Mode, Max"]
+  BASE --> ENTRY["SrcFeedEntry<br/>defaults + base + extras"]
+  EXTRA --> ENTRY
+  WB["webfeed.md"] --> BASE
+  XS["extsrc.md"] --> LEG["parseExtSrcDoc<br/>Src = extsrc/extract.js"]
+  BASE --> ADAPT["legacySrcRegistry"]
+  LEG --> ADAPT
+  ENTRY --> LOAD["loadSrcRegistry"]
+  ADAPT --> LOAD
+  FD["*.feed.md"] --> PFD["parseWFeedDoc"]
+  PFD --> SETUP["WFeedSetup<br/>freqMs, nextAt, sources, values"]
+  PFD --> POSTS["WFeedPost[]<br/>heading, asOf, items"]
+```
+
+| Document | Parser | Produces | Rules |
+|---|---|---|---|
+| `srcfeed.md` | `parseSrcFeedDoc` | `SrcFeedRegistry` (`entries`, `fallback`) | base fields from `parseWebfeedDoc`, the rest from `entryExtras`; a block with neither `URL:` nor `API:` is skipped |
+| `webfeed.md` | `parseWebfeedDoc` | `FeedSource[]` + `FeedFallback` | legacy; read only when `srcfeed.md` has no text |
+| `extsrc.md` | `parseExtSrcDoc` | `SrcFeedEntry[]` | legacy; every entry runs `extsrc/extract.js`; a name already in `webfeed.md` wins |
+| `*.feed.md` | `parseWFeedDoc` | `WFeedDoc` (`head`, `setup`, `posts`) | `freq`, `next`, `sources`; other `key:` lines stay in `setup.values`; `- item` lines are the block |
+| `feedDraft(ref)` | — | template text | a missing `*.feed.md` opens on it; the row is written on save |
+
+| Ref | Written by | When |
+|---|---|---|
+| `srcfeed.md` | `readOrSeedSrcFeed` / `seedSrcFeedRows` | opening the registry ref when none of `srcfeed.md`, `webfeed.md`, `extsrc.md` has a row |
+| `*.feed.md` | `runSrcFeed` | new items, or a moved `next:`; the first save creates the row |
+| `srcfeed.md` edits | the editor | manual; the next `loadSrcRegistry` or live query reads them |
+| `webfeed.md`, `extsrc.md` | never | legacy inputs, read-only |
+
+`ENTRY_DEFAULTS` fills every `Src:`-only field with `''` except `mode: 'dom'` and
+`max: 0`. `max: 0` means the entry declares no cap; the adapter's own default
+applies. The row header's `@max` is not what caps a `Src:` row — `* Max:` in the
+registry is.
 
 ## Paths
 
@@ -263,6 +306,19 @@ caller's realm — an MV3 extension page forbids eval, and a webapp has no tab
 access — so `srcfeedTab.ts` runs it through `chrome.userScripts.execute` in the
 matching tab. Chrome compiles the code; the extension never evaluates row text.
 
+The header is userscript-style metadata; only `@requires` changes routing today:
+
+| Header line | `rowMeta` field | Consumed by |
+|---|---|---|
+| `// @requires tab` (`extension`, `user-scripts`) | `requires` | `runsrc` sends the row to the tab runner |
+| `// @match <pattern>` | `match` | not read by the shipped runner; the entry's `URL:` is the tab match |
+| `// @max <n>` | `max` | not read by the shipped runner; the entry's `* Max:` arrives as `src.max` |
+| `// @prompt <text>` | `prompt` | not read by the shipped runner; the entry's `* Prompt:` is what the body returns as `needsUser` |
+
+`tab`, `extension` and `user-scripts` all mean the row reads a live tab; only the
+extension can run it. A `@requires tab` row never takes the `eval-blocked` path:
+it leaves the caller's realm.
+
 The body receives `ctx = { ref, args, console }` — no `db`, because it runs in the
 page's origin. It reads its entry from `ctx.args.source` and returns
 `{ rows, notes }`, or `{ needsUser }` when `Item:` matched nothing and the entry
@@ -282,24 +338,82 @@ the first matching tab is read.
 | `user-scripts-off` | `chrome.userScripts` is withheld, or the probe fails | `Allow User Scripts`, the `chrome://extensions` steps, the Chrome 138 Developer-mode note, and the API link |
 | `no-tab` | no open tab matches `URL` | the pattern, and "open it in a tab, then run again" |
 | `needs-user` | `Item:` matched nothing and the entry names a `Prompt` | the entry's `Prompt` |
-| `missing-source` | the caller passed no source block | run it through a `.feed.md` source |
+| `missing-source` | the caller passed no source block | run it through a `.feed.md` source, or pass `args.source` inline |
 | `eval-blocked` | no twin, and this realm forbids eval | open the app at its own origin, or add `@requires tab` |
 
 A refusal throws `SrcUnavailableError`; `run_src` prints its message and steps, so
 a model sees the same instructions a person does.
 
-## The pin card token and its readout
+**Limits.** Selectors are the site's and drift; fix the row or the entry, not the
+engine. A tab row returns rows and writes nothing — pinning, tagging or a feed block
+is the caller's step. `chrome.userScripts` must be allowed for the extension
+(Chrome 120+; 120–137 behind Developer mode, 138+ behind `Allow User Scripts`), and
+`tabext/ext/manifest.json` already declares the `userScripts` permission — no manifest
+change is needed. An `Item:` selector that matches nothing is not a
+refusal: the body returns `needsUser` when the entry names a `Prompt`, else
+`rows: []` with a note naming the selector.
+
+## The pin card token and the refresh UI
 
 A pin card heading may carry a `{ref}` token next to its `#tag` tokens
 (`src/ui/cs1Token.ts`, rendered by `Cs1Renderer`). A click opens the ref as a tab,
-and a `*.feed.md` ref with no row opens on `feedDraft`'s template. The hover shows:
+and a `*.feed.md` ref with no row opens on `feedDraft`'s template.
 
-- every other ref previews as the row it names;
-- any `{*.feed.md}` previews the feed (`src/ui/FeedTip.tsx`): the frequency, when
-  the next read is due, the `srcfeed.md` entries it reads and the host of each —
-  with a `not in srcfeed.md` note for a name the registry does not hold — and the
-  items of the newest `## Posts as of …` block;
-- its `refresh` button runs one read now, into that ref.
+`FeedTip` is the whole refresh surface: a hover renders the parsed document and the
+registry, a due document reads itself, and the button reads on demand.
+
+```mermaid
+flowchart TD
+  HOVER["hover {*.feed.md}"] --> PARSE["FeedTip: parseWFeedDoc<br/>+ loadSrcRegistry"]
+  PARSE --> DUE{"nextRefreshAt set<br/>and now >= it?"}
+  DUE -- no --> SHOW["render the readout"]
+  DUE -- yes --> WINDOW{"auto-read in the last 5 min?"}
+  WINDOW -- yes --> SHOW
+  WINDOW -- no --> RUN["runSrcFeed(ref, now)"]
+  BUTTON["refresh button"] --> RUN
+  RUN --> WRITE["insertPosts + setSetupValue<br/>save + push"]
+  WRITE --> LIVE["live query re-renders FeedTip"]
+  LIVE --> SHOW
+  TOKEN["click {*.feed.md}"] --> OPEN["open the ref in a tab<br/>feedDraft when it has no row"]
+  OPEN --> SAVE["save writes the row"]
+```
+
+| Trigger | Condition | What it does |
+|---|---|---|
+| hover `{*.feed.md}` | always | parses the feed and the registry; shows the readout |
+| hover, document due | `nextRefreshAt` is set and `now >= it`; the ref has not auto-read in 5 minutes | runs one read |
+| `refresh` button | always | runs one read now |
+| click the token | always | opens the ref; a missing `*.feed.md` opens on `feedDraft`, and saving writes the row |
+| open `{srcfeed.md}` with no registry row | no `srcfeed.md`, `webfeed.md` or `extsrc.md` row | seeds the catalogue, then opens the registry |
+
+A read writes by outcome:
+
+| Outcome | Block | `next:` | `push` |
+|---|---|---|---|
+| at least one new item | new `## Posts as of <stamp>` under `Setup` | read stamp + `freqMs`, empty when no `freq` | yes |
+| no new item, at least one source answered, the document exists | unchanged | read stamp + `freqMs`, empty when no `freq` | no |
+| no new item and no source answered | unchanged | unchanged | no |
+
+`nextRefreshAt` has three states:
+
+| Schedule | Due time | Effect |
+|---|---|---|
+| `next:` carries a stamp | that stamp | due when it passes |
+| no `next:`, `freq:` and a stamped posts block | the newest block's `asOf + freqMs` | due when it passes |
+| no `next:` and no `freq:`, or no stamped block | none | never due; only the button reads |
+
+The schedule, sources and items come from the parsed document, so they survive a
+reload; the report line comes from the last read in this mount:
+
+| Line | Read from | Shows | When absent |
+|---|---|---|---|
+| `feed` | the token's ref | the ref | `no row yet — the editor opens on this template` |
+| `freq` | `setup.freqText` | as written | `—` |
+| `next` | `nextRefreshAt`, else `setup.nextText` | the ISO stamp and `due` or `in <span>`, or the text as written | `—` |
+| `reads` | `setup.sources` + the registry | each entry's host, or that the name is not in `srcfeed.md` | `srcfeed.md` declares no source |
+| `last read` | `latestPosts` | age and item count | `nothing read yet` |
+| items | `storedItems` | the first 5 items of the newest block; `+N more in the block` when longer | no block |
+| report | `reportLine` | item count, answered sources, notes, a failure | hidden before the first read |
 
 ## Seeding and `run_src`
 
@@ -360,6 +474,6 @@ readable copy is the `sina.cn` mirror. Both walls are 200s, which is why
 
 - `docs/startag/sTag.md` — the tag layer the extracted rows feed.
 - `docs/recr-agloop.md` — `run_src`, the `rwr` gate, and the `secret.md` dialect.
-- `docs/script-post.md` — the CSP facts, the realm matrix, and the ScriptCat prior art.
-- `docs/extsrc-plan.md` — the plan that introduced the tab runner.
+- `docs/script-post.md` — the big picture, the CSP facts, the realm matrix, the ScriptCat prior art, the M1/M2 boundary, and the plan to M2.
+- `docs/extsrc-plan.md` — the plan that introduced the tab runner, with a status table mapping its historical names to the shipped files.
 

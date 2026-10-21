@@ -4,10 +4,31 @@ Opening prompt for a new implementation session. Read this file to the end, then
 [`docs/script-post.md`](script-post.md) for the gathered CSP facts and the ScriptCat prior art.
 Do not re-litigate the decisions in §2; they follow from that doc.
 
-> **Status (2026-10-20): superseded in part by `srcfeed`.** The header routing, the tab
-> runner and the refusal catalogue still ship, now as `src/srcfeedTab.ts`; `extsrc.md` is
-> a legacy input to `srcfeed`'s registry adapter, and the current-state doc is
-> [srcfeed.md](srcfeed.md). The decisions in §2.6 and §9 still hold.
+> **Status (2026-10-21): shipped as M1; the separate `docs/extsrc.md` is retired.**
+> The header routing, the tab runner and the refusal catalogue ship as
+> `src/srcfeedTab.ts`; `extsrc.md` is only the legacy registry input to `srcfeed`'s
+> adapter. Current state is [srcfeed.md](srcfeed.md); the overview, the M1/M2 boundary
+> and the document map are [script-post.md](script-post.md). This file is kept for the
+> decisions (§2), guardrails (§6) and verification order (§7) that the overview only
+> summarizes. Names here are historical — the table below maps them. The decisions in
+> §2.6 and §9 still hold.
+
+## Implementation status
+
+| Plan item | Shipped as | State |
+|---|---|---|
+| `runsrc` probe, text-keyed twins, traced body (§P1) | `src/runsrc.ts` | M1 |
+| `rowMeta` header parse (§P2) | `src/rowMeta.ts` | M1; only `@requires` changes routing |
+| `src/extsrc.ts` runner (§P3) | `src/srcfeedTab.ts` (`runTabRow`, `tabFailure`) | M1 |
+| `src/extsrcRows.ts` document + body (§P4) | `src/srcfeedRows.ts` (`EXTSRC_DOC`, `EXTSRC_EXTRACT_BODY`) | M1, legacy input |
+| `wFeedRun` refresh UI (§P1/P6) | `src/ui/FeedTip.tsx` + `src/srcfeed.ts` (`runSrcFeed`) | M1 |
+| Failure catalogue (§P5) | `srcfeedTab.tabFailure` + `srcfeed.reportLine` | M1 |
+| Sandbox script post (§M2) | — | deferred; [script-post.md](script-post.md) §M2 |
+
+The parse, read and refresh tables are in [srcfeed.md](srcfeed.md#parsing) and
+[srcfeed.md](srcfeed.md#the-pin-card-token-and-the-refresh-ui). The row header's
+`@match`, `@max` and `@prompt` are parsed by `rowMeta`; the shipped runner uses the
+entry's `URL:`, `Max:` and `Prompt:` instead.
 
 ## 1. Facts already established (do not rediscover)
 

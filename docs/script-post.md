@@ -6,8 +6,39 @@ Everything a `type='src'` row can drive — the feed read, the tag adapters, a c
 grouper, `recr`'s `run_src` tool — goes through one evaluator, `src/runsrc.ts`, and that
 evaluator needs a realm allowed to eval. The webapp is; an extension page is not.
 
-This file gathers the facts, the prior art that settles the design, the minimal change
-shipped now, and the bridge deferred to the future host.
+This file gathers the facts, the prior art that settles the design, the M1 shipment
+(probe, twins, tab runner, and the registry/refresh path), and the M2 bridge deferred to
+the future host. The registry parse, feed read and refresh UI are current state, not
+deferred work: [srcfeed.md](srcfeed.md#parsing) and
+[srcfeed.md](srcfeed.md#the-pin-card-token-and-the-refresh-ui) own them.
+
+## Big picture
+
+Every `type='src'` row reaches one evaluator, and the host decides which path it can
+take. The same split covers the feed registry/read/refresh path, the tag adapters,
+the rest grouper, and `run_src`:
+
+```mermaid
+flowchart TB
+  REG["srcfeed.md registry<br/>*.feed.md schedule"] --> C["consumers: feed read ·<br/>srctag adapters · rest grouper · run_src"]
+  C --> RB["runsrc.runBodyWithPath"]
+  RB -->|"canEvalBody()"| EV["row text / data: module<br/>webapp, worker, tests"]
+  RB -->|"no eval, exact text"| TW["compiled twin<br/>caller's realm, real ctx.db"]
+  RB -->|"@requires tab"| TB["srcfeedTab.runTabRow<br/>chrome.userScripts.execute"]
+  RB -. "M2" .-> SB["sandbox frame<br/>any body + ctx.db port"]
+  TB --> PAGE["target tab<br/>page origin"]
+```
+
+| Milestone | State | Adds | Still refused |
+|---|---|---|---|
+| M1 | shipped | webapp eval; exact-text twins; tab runner; registry/read/refresh UI | an edited body with no twin and no `@requires tab` in the extension (`eval-blocked`) |
+| M2 | deferred | a sandbox frame for any body; the `ctx.db` port; cancellation | bodies that return DOM nodes or functions |
+
+M1 is current state: the registry/read/refresh path plus the evaluation fallbacks.
+M2 is the only deferred piece. [srcfeed.md](srcfeed.md) owns the per-step registry,
+read, refresh and tab details; the rest of this file owns the host boundary and the
+M2 plan. [Related documents](#related-documents) maps every doc and says why
+`extsrc-plan.md` is kept.
 
 ## The constraint
 
@@ -101,8 +132,20 @@ whenever the realm can eval, and the webapp never consults anything new.
 | `src/srcfeedRows.ts` | `webFeedReport` + `SRCFEED_BODY_TWINS` for `WEBFEED_EXTRACT_BODY` and the seeded `srcdom` body: each body's own call to the engine, with the same `sources` lines and `showRows` slice |
 | `src/ui/routes.tsx` | `registerBodyTwins(SRCFEED_BODY_TWINS)` and `installSrcFeedTabRunner()` beside the two `install*Global()` calls |
 | `src/srcfeed.ts` | runs each `Src:` row through the traced form and reports the compiled or tab path in the readout |
+| `src/srcfeedStore.ts` | the Dexie port a feed read reaches the store through |
+| `src/ui/FeedTip.tsx` | the preview: schedule, due auto-read (5-minute window), refresh button, and readout |
 | `src/recr.ts` | `run_src` uses the traced form, appends the path, and prints `SrcUnavailableError.steps`; the tool description names `@requires tab` |
 | `src/srcfeedTab.ts`, `src/srcfeedRows.ts` | the tab runner, its capability probe and failure catalogue, plus the seeded `extdom/*` bodies and the legacy `extsrc.md` adapter — see [srcfeed.md](srcfeed.md) |
+
+The registry and refresh path belong to this M1 shipment, not to the deferred bridge:
+
+| Surface | Shipped in | Current-state detail |
+|---|---|---|
+| Registry parse, legacy adapter | `parseSrcFeedDoc`, `parseExtSrcDoc`, `legacySrcRegistry` | [srcfeed.md](srcfeed.md#parsing) |
+| Feed read, block write, `next:` | `runSrcFeed` | [srcfeed.md](srcfeed.md#one-read) and [srcfeed.md](srcfeed.md#the-pin-card-token-and-the-refresh-ui) |
+| Refresh UI | `FeedTip`, `feedDraft` | [srcfeed.md](srcfeed.md#the-pin-card-token-and-the-refresh-ui) |
+| Tab runner | `runTabRow`, `tabFailure` | [srcfeed.md](srcfeed.md#the-tab-port) |
+| Probe, twins | `canEvalBody`, `runBodyWithPath` | this file |
 
 Deliberately not in M1: a twin for `srctag/embed.js` and `srctag/classify.js`. Their body
 *is* the implementation (read the provider block out of `secret.md`, call the API, return an
@@ -123,34 +166,45 @@ flowchart TD
 The cost is one honest gap: in the extension an **edited** `webfeed/extract.js` does not run.
 That is what M2 exists to close.
 
-### extsrc — the `run_src` case that needs a tab
+### `extsrc` — the M1 tab case
+
+`extsrc.md` is not a current-state document; it is the legacy registry input
+`parseExtSrcDoc` reads, and every entry runs `extsrc/extract.js`. The former
+`docs/extsrc.md` is folded into [srcfeed.md](srcfeed.md#the-tab-port) (the header
+table, the runner and the failure catalogue); this file keeps the M1/M2 boundary.
 
 A row whose header says `// @requires tab` never takes any of the three paths above:
 `runsrc` hands it to the tab runner, which checks the extension, checks
 `chrome.userScripts`, matches a tab, and hands the body to
 `chrome.userScripts.execute`. Chrome compiles that body; the extension never evaluates
 it. The row stays `type='src'`, stays behind the `rwr` gate, and needs no new tool —
-`run_src` already offers it. Details and the failure catalogue: [srcfeed.md](srcfeed.md).
+`run_src` already offers it.
 
 ## M2 — deferred: a script post for the greet service host
 
 The bridge waits for the host it belongs to: a responsive-hooked greet service host on
 tabext, which is long-lived and can hold one frame for every caller instead of one per read.
 
-- `ext/sandbox.html` + a sandbox host entry in `tabext/esbuild.mjs`; manifest gains
-  `"sandbox": { "pages": ["sandbox.html"] }`. Chrome needs no sandbox CSP entry (ScriptCat's
-  Chrome build ships without one); the existing `content_security_policy.sandbox` string is
-  kept only for parity and would be the place `'unsafe-eval'` goes for Firefox.
-- The host imports `runsrc` unchanged. Same-origin is impossible — a sandboxed page gets an
-  opaque origin — so the frame is framed by the options page and reached by `postMessage`:
-  `{ id, body, ctx: { ref, args } }` in, `{ id, ok, value | error }` out, with `console`
-  lines streamed as they are written.
-- `ctx.db` becomes a port shaped like `dexieTagPort` (`src/srctag.ts:2614`, which already
-  narrows Dexie to one operation for the tagger): the frame asks, the parent answers. The ops
-  are only the ones rows use — `where('[ref+type]').equals(k).toArray()`, `toArray`, `get`,
-  `add`, `update`, and the `where('type').equals(t).toArray()` the feed's `existingRows`
-  needs. Values cross by structured clone; a body returning a DOM node or a function is
-  refused by name.
+| Step | Deliverable | Depends on |
+|---|---|---|
+| 1 | `ext/sandbox.html` and a sandbox host entry in `tabext/esbuild.mjs`; the manifest gains `"sandbox": { "pages": ["sandbox.html"] }` | tabext build |
+| 2 | `postMessage` protocol: `{ id, body, ctx: { ref, args } }` in, `{ id, ok, value \| error }` out, with `console` lines streamed | 1 |
+| 3 | `ctx.db` port shaped like `dexieTagPort` (`src/srctag.ts:2614`) with the operations rows use | 2 |
+| 4 | cancellation by dropping or reloading the frame | 2 |
+| 5 | move edited/no-twin `srctag` and `srcdom` bodies onto the frame; keep the twins as fallback | 3 |
+| 6 | tests: sandbox eval, an edited body, cancellation, and a `ctx.db` round-trip | 2–5 |
+
+The constraints that decide the plan:
+
+- Chrome needs no sandbox CSP entry (ScriptCat's Chrome build ships without one); the
+  existing `content_security_policy.sandbox` string is kept only for parity and would be
+  the place `'unsafe-eval'` goes for Firefox.
+- Same-origin is impossible — a sandboxed page gets an opaque origin — so the frame is
+  framed by the options page and reached by `postMessage`.
+- The `ctx.db` port answers only the calls rows use:
+  `where('[ref+type]').equals(k).toArray()`, `toArray`, `get`, `add`, `update`, and the
+  `where('type').equals(t).toArray()` the feed's `existingRows` needs. Values cross by
+  structured clone; a body returning a DOM node or a function is refused by name.
 - Cancellation comes free: dropping or reloading the frame stops a body that never settles,
   which `run_src` cannot do today in any realm. ScriptCat's `target:'sandbox'` makes the same
   trade against its uninterruptible `target:'page'`.
@@ -168,23 +222,40 @@ tabext, which is long-lived and can hold one frame for every caller instead of o
 2. Options page: `new Function('return 1')()` throws; a scratch `sandbox.pages` frame runs it;
    `indexedDB.open('tagDB_0')` inside that frame opens an empty database — the measurement
    that justifies M2's port.
-2. `test/runsrc.test.ts` (new): the selection is a pure function of `(body, canEval)` — twin on
+3. `test/runsrc.test.ts`: the selection is a pure function of `(body, canEval)` — twin on
    exact text, refusal on an edited body, refusal on an unknown body, and no twin consulted
    when eval is available.
-3. `test/startagfeed/srcfeedRun.test.ts`: a read with eval blocked reports the compiled path in
+4. `test/startagfeed/srcfeedRun.test.ts`: a read with eval blocked reports the compiled path in
    `notes` and the same items as the row-text read.
-4. Real hosts: a feed read in the options page (compiled path) beside the same read at
+5. Real hosts: a feed read in the options page (compiled path) beside the same read at
    `http://localhost:5173` (row text), plus `test/srctag-cdp.test.ts` untouched.
-5. tabext's `node_modules` in this checkout is Windows-only, so the extension build and load
+6. tabext's `node_modules` in this checkout is Windows-only, so the extension build and load
    stay a Windows-side step; only `npx tsc --noEmit` runs here.
 
 ## Open questions
 
 1. Does the future greet host own the frame, or does the options page keep one and hand it
    over? (Both work; the port's owner decides who answers `ctx.db` calls.)
-2. Is an edited seeded adapter (`srcdom/sinaCNmedia`, `extdom/*`) expected to run in the
-   extension before M2 exists — the registered twin covers only the exact seed text, so an
-   edit refuses with `eval-blocked`.
+2. Is an edited seeded adapter without `@requires tab` (`srcdom/sinaCNmedia`) expected to
+   run in the extension before M2 exists — the registered twin covers only the exact seed
+   text, so an edit refuses with `eval-blocked`. The `extdom/*` rows carry `@requires tab`
+   and run through the tab runner, so they are not affected.
 3. The `srctag` adapter rows stay skipped in an extension page until M2; is that acceptable for
    a sweep run from the options page, or should a twin for the built-in provider walk be added
    to `srctag.ts` as a separate change?
+
+## Related documents
+
+| Document | Owns | State |
+|---|---|---|
+| `docs/script-post.md` (this file) | the big picture, the CSP facts, the realm matrix, the ScriptCat prior art, the M1/M2 boundary, and the M2 plan | living overview |
+| `docs/srcfeed.md` | the registry parse and precedence, the feed document, one read, the tab port, the refresh UI, and the failure catalogue | current state |
+| `docs/extsrc-plan.md` | the decisions (§2, §9), adopted simplifications (§3), work order P1–P6, guardrails (§6), verification order (§7), definition of done (§8), and commit summary (§10) | historical plan |
+| `docs/recr-agloop.md` | `run_src`, the `rwr` gate, and the `secret.md` dialect | current state |
+
+`extsrc-plan.md` is still needed because it records what this overview only summarizes:
+why M1 used `chrome.userScripts` instead of a sandbox, why no new row type, why twins
+are keyed by exact text, and which pre-run checks are mandatory. Those decisions are
+the "do not re-litigate" constraints; the current-state docs must not restate them.
+The plan's file names are historical (`src/extsrc.ts`, `src/extsrcRows.ts`,
+`wFeedRun`), and its status table maps each to the shipped module.

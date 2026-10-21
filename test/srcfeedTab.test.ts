@@ -45,7 +45,7 @@ describe('legacy document dialect', () => {
     const sources = parseExtSrcDoc(EXTSRC_DOC);
     expect(sources.map(s => s.name)).toEqual(['gemini', 'deepseek']);
     expect(sources[0]).toMatchObject({
-      url: 'https://gemini.google.com/*', item: 'a[href*="/app/"]', tabs: 'all', mode: 'dom', max: 200,
+      url: 'https://gemini.google.com/*', item: 'a[href*="/app/"]', tabs: 'all', mode: 'dom', max: 55555,
     });
     expect(sources[0].prompt).toContain('chat sidebar');
     expect(sources[0].tags).toEqual(['gemini', 'chat']);

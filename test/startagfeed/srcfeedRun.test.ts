@@ -135,6 +135,25 @@ describe('runSrcFeed', () => {
     expect(doc.posts[0].items).toEqual(['- **demo** a post — https://demo.test/1']);
   });
 
+  it('does not cap a Src row at 200 rows when the entry declares no Max', async () => {
+    await seed('srcfeed.md', 'md', withSrc('extdom/chat'));
+    await seed('extdom/chat', 'src', '// @requires tab\nreturn { rows: [] };');
+    await seed('probe.feed.md', 'md', feedDoc('demo'));
+    const many = Array.from({ length: 250 }, (_, i) => ({
+      txt: `chat ${i}`, ref: `https://demo.test/${i}`,
+    }));
+    const blocks: Array<{ max?: number }> = [];
+    registerTabBodyRunner(vi.fn(async (_body: string, ctx: { args?: unknown }) => {
+      blocks.push((ctx.args as { source?: { max?: number } }).source ?? {});
+      return { rows: many, notes: [] };
+    }));
+
+    const report = await run({ ref: 'probe.feed.md' });
+
+    expect(blocks[0]?.max).toBe(0);
+    expect(report.items).toHaveLength(250);
+  });
+
   it('runs a tab entry through the registered runner with its registry block', async () => {
     await seed('srcfeed.md', 'md', withSrc('extdom/chat', '* Item: a\n* Prompt: open the sidebar\n'));
     await seed('extdom/chat', 'src', '// @requires tab\nreturn { rows: [] };');
@@ -444,14 +463,21 @@ describe('seeded registry', () => {
       .toEqual(['wallstreetcn', 'sina', 'dsc', 'ge']);
     expect(registry.entries.find((entry) => entry.name === 'sina')?.src).toBe(SRCDOM_SINA_REF);
     expect(registry.entries.find((entry) => entry.name === 'dsc')).toMatchObject({
-      src: EXTDOM_DSC_REF, sidebar: '', item: 'a[href^="/a/chat"]', tabs: '',
+      src: EXTDOM_DSC_REF, sidebar: '', item: 'a[href^="/a/chat"]', tabs: '', max: 0,
     });
     expect(registry.entries.find((entry) => entry.name === 'ge')).toMatchObject({
       src: 'extdom/ge', tabs: 'all', sidebar: '[data-test-id="chat-history-container"]',
-      item: 'a[href*="/app/"]',
+      item: 'a[href*="/app/"]', max: 0,
     });
     expect(registry.entries.find((entry) => entry.name === 'wallstreetcn')?.src).toBe('');
     expect(registry.fallback.proxy).toBe('https://r.jina.ai/');
+  });
+
+  it('keeps a declared Max and leaves an undeclared one to the row', () => {
+    const registry = parseSrcFeedDoc(withSrc('srcdom/demo', '* Max: 7\n'));
+
+    expect(registry.entries.find((entry) => entry.name === 'wallstreetcn')?.max).toBe(0);
+    expect(registry.entries.find((entry) => entry.name === 'demo')?.max).toBe(7);
   });
 });
 

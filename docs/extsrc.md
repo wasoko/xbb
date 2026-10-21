@@ -83,7 +83,7 @@ that authorizes a row authorizes its tab access.
 | `Item` | selector for one history entry |
 | `Mode` | `dom` reads text and href; `html` also keeps each `outerHTML` under `rec.html` |
 | `Scroll` | optional container to exhaust before reading a virtualized list |
-| `Max` | cap on returned rows, 200 by default |
+| `Max` | cap on returned rows; unset (or `0`) leaves the cap to the body |
 | `Tags` | extra tags beside the source name |
 
 ## The body

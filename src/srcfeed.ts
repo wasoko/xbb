@@ -434,7 +434,7 @@ export interface SrcFeedEntry extends FeedSource {
   tabs: string;
   /** `* Mode:` `dom` reads text and href; `html` also keeps each element's outerHTML. */
   mode: 'dom' | 'html';
-  /** `* Max:` cap on the rows this source returns. */
+  /** `* Max:` cap on the rows this source returns; 0 leaves the row's own cap. */
   max: number;
 }
 
@@ -449,7 +449,7 @@ export interface SrcFeedRegistry {
 /** The fields a `* Src:`-less registry entry leaves unset. */
 const ENTRY_DEFAULTS = {
   src: '', match: '', prompt: '', item: '', sidebar: '', scroll: '', tabs: '',
-  mode: 'dom' as const, max: 200,
+  mode: 'dom' as const, max: 0,
 };
 
 /**
@@ -473,7 +473,7 @@ function entryExtras(md: string): Map<string, Partial<SrcFeedEntry>> {
       scroll: kv.scroll ?? '',
       tabs: kv.tabs ?? '',
       mode: kv.mode === 'html' ? 'html' : 'dom',
-      max: Math.max(1, Number(kv.max) || 200),
+      max: Math.max(0, Number(kv.max) || 0),
     });
   }
   return out;
@@ -537,7 +537,7 @@ export function parseExtSrcDoc(md: string): SrcFeedEntry[] {
       scroll: kv.scroll ?? '',
       tabs: kv.tabs ?? '',
       mode: kv.mode === 'html' ? 'html' : 'dom',
-      max: Math.max(1, Number(kv.max) || 200),
+      max: Math.max(0, Number(kv.max) || 0),
     });
   }
   return out;

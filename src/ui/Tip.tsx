@@ -3,7 +3,7 @@
  *
  * A row registers itself with {@link setTip} and the `data-tip` marker; the
  * popover picks its body from what it was registered with: `md` renders markdown
- * (math included) under the `.tip-md` typography, `src` shows the row through the
+ * (math included) under the `.md-body` typography, `src` shows the row through the
  * same CodeMirror setup the editor pane uses, anything else — a plain row, a
  * `http(s)` ref — prints its text, and a row registered with a `kind` renders that
  * kind's own body instead of its row (`wfeed`, the `{w.feed.md}` token's readout).
@@ -254,7 +254,7 @@ export function TipHost({ children }: { children: React.ReactNode }) {
     if (!row) return null;
     if (row.kind === 'wfeed') return <FeedTip feedRef={row.da.ref} />;
     if (row.da.type === 'md') {
-      return <div className="tip-md" dangerouslySetInnerHTML={{ __html: cachedHtml(row.da.txt) }} />;
+      return <div className="md-body" dangerouslySetInnerHTML={{ __html: cachedHtml(row.da.txt) }} />;
     }
     if (row.da.type === 'src') {
       return (

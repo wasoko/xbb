@@ -42,6 +42,7 @@ import { feedDraft, isFeedRef, SRCFEED_REF } from '../srcfeed';
 import { SRCFEED_DOC } from '../srcfeedRows';
 import { readOrSeedSrcFeed } from '../srcfeedStore';
 import { subscribeNav } from './navStore';
+import { MdText } from './MdText';
 
 /**
  * The text a tab with no row yet opens with.
@@ -827,6 +828,55 @@ function toBubbles(messages: ChatMessage[], path: SessionNode[]): Bubble[] {
   return out;
 }
 
+/**
+ * Copies `text` to the clipboard, falling back to a temporary textarea when the
+ * async clipboard is unavailable.
+ *
+ * @param text - Text to copy.
+ * @returns whether the copy succeeded.
+ */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (err) {
+    // An extension page can deny the async clipboard; the selection path still copies.
+    console.warn('[chat] clipboard write failed:', err);
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    const done = document.execCommand('copy');
+    area.remove();
+    return done;
+  }
+}
+
+/** Copy action beside every bubble's timestamp, with a short confirmation. */
+function CopyButton({ text }: { text: string }) {
+  const [done, setDone] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+
+  const copy = async () => {
+    if (!await copyText(text)) return;
+    setDone(true);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setDone(false), 1200);
+  };
+
+  return (
+    <button style={CHIP_BTN} onClick={() => void copy()}
+      title={done ? 'copied' : 'copy this message'}
+      aria-label={done ? 'copied' : 'copy this message'}>
+      {done ? <li.Check size={11} /> : <li.Copy size={11} />}
+    </button>
+  );
+}
+
 /** Node controls beside a message: the branch icon, the sibling arrows, and the edit action. */
 const NODE_CHIP: React.CSSProperties = {
   display: 'flex', alignItems: 'center', gap: 3, marginBottom: 2, opacity: 0.85,
@@ -1162,12 +1212,17 @@ export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession
                     <button onClick={() => setEditing(null)}>Cancel</button>
                   </div>
                 </div>
+              ) : b.role === 'assistant' ? (
+                <MdText text={b.content} className="message-text md-body" />
               ) : (
                 <div className="message-text" style={b.role === 'tool'
                   ? { fontFamily: 'monospace', fontSize: '12px', whiteSpace: 'pre-wrap' }
                   : { whiteSpace: 'pre-wrap' }}>{b.content}</div>
               )}
-              <div className="message-time">{new Date(b.timestamp).toLocaleTimeString()}</div>
+              <div className="message-time" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span>{new Date(b.timestamp).toLocaleTimeString()}</span>
+                <CopyButton text={b.content} />
+              </div>
             </div>
           </div>
         ))}
@@ -1175,7 +1230,8 @@ export function Chat({ sessionId, nodeId, onNodeChange, onSwitchSession
           <div className="message assistant">
             <div className="message-avatar">🤖</div>
             <div className="message-content">
-              <div className="message-text" style={{ whiteSpace: 'pre-wrap' }}>{streaming}</div>
+              <MdText text={streaming} className="message-text md-body" />
+              <div className="message-time"><CopyButton text={streaming} /></div>
             </div>
           </div>
         )}

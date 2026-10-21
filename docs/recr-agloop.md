@@ -244,6 +244,8 @@ host, so the browser-visible error stands as it is.
 |---|---|
 | History | `loadBranchingSession(sid)` → `buildPromptFromNode(head)`; nothing in `localStorage` |
 | Streaming | `rcr({ onProgress })` accumulates per-delta text into a live bubble |
+| Reply rendering | Assistant and streaming bubbles render through `ui/MdText.tsx`: `mdRender` keeps model HTML escaped and `hydrateMath` fills `$..$` after paint; a link opens in a new tab so the chat is not replaced |
+| Copy | Every bubble has a copy button for its raw text (`navigator.clipboard`, textarea fallback) |
 | Tool rows | `recrBus` (`recr-tool-call` / `recr-tool-result`) appended as they happen |
 | Stop | `AbortController`; an abort renders as `stopped`, not as an error |
 | Gate warning | A live query on `gate.md`; while the row is absent the pane shows an amber bar whose button writes `recrGate.DEFAULT_GATE_MD` and opens the tab |

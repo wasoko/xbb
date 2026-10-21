@@ -146,7 +146,7 @@ One popover serves the whole list (`src/ui/Tip.tsx`): a single `mouseover` /
 callback, so no list re-render is needed to keep previews current.
 
 The body follows `da.type`: `md` renders markdown (math deferred, below) inside
-`.tip-md`, which restores the heading weight, list markers and block margins
+`.md-body`, which restores the heading weight, list markers and block margins
 Tailwind's preflight flattens; `src` shows the row through the editor pane's
 CodeMirror setup read-only, highlighted as JavaScript whenever the ref's suffix
 names no other grammar; every other type prints `txt || ref` as plain text, which
