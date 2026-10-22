@@ -8,8 +8,10 @@
  * row a tag was kept by is a point inside its region. Nothing is sampled or invented.
  *
  * The camera is the one the feel module describes: a spring-damped body, scroll and yaw that
- * coast, five pitch detents, and a field of view the wheel opens. Sea level is rise 0; the
- * first pinned heading stands there under a star whose ring runs round the whole cylinder.
+ * coast, five pitch detents, and a field of view the wheel opens. Sea level also tilts the
+ * aim, up above the horizon and down below it, so a dive looks into the deep while the star
+ * and its ring stay overhead. Sea level is rise 0; the first pinned heading stands there
+ * under a star whose ring runs round the whole cylinder.
  * Above the horizon the canvas is almost black and catches the star's light; below it is tinted
  * and readable.
  *
@@ -34,7 +36,7 @@ import {
   NO_RELATIONS, type SeaAction, type SeaRelations, type SeaRow, type TagRelation,
 } from './seaTags';
 import {
-  SEA_FEEL, createRig, leanedPitch, notch, poseSettled, stepRig, wheelScroll,
+  SEA_FEEL, createRig, leanedPitch, levelPitch, notch, poseSettled, stepRig, wheelScroll,
   type SeaPose, type SeaRig,
 } from './seaFeel';
 import { SEA_MOMENTUM_KEY } from './seaMotion';
@@ -786,7 +788,7 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       const view: SeaPose = {
         camY: rig.camY * DEG_PER_UNIT,
         phi: rig.phi,
-        pitch: leanedPitch(rig, still),
+        pitch: leanedPitch(rig, still) + levelPitch(rig.camY),
         roll: rig.roll,
         fov: rig.fov,
       };

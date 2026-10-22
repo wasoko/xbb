@@ -225,6 +225,54 @@ describe('runSrcFeed', () => {
     ]);
   });
 
+  it('follows an API cursor and writes a post the page edge and anchor hid', async () => {
+    await seed('srcfeed.md', 'md', `## Sources
+
+### demo
+* URL: https://demo.test/page
+* API:
+  - feed: https://demo.test/api?limit=33
+* Tags:
+  - finance
+`);
+    await seed('probe.feed.md', 'md', `# probe.feed
+
+## Setup
+freq: 2hr
+next:
+sources: demo
+
+## Posts as of 2026-10-16T01:00:00Z
+
+- **demo** the stored post — https://demo.test/old
+`);
+    const item = (id: number, title: string, uri: string, sec: number): Record<string, unknown> =>
+      ({ id, title, uri, display_time: sec });
+    const page = (items: unknown[], cursor = ''): string =>
+      JSON.stringify({ code: 20000, data: { items, next_cursor: cursor } });
+    const first = page([item(3, 'the newest post', 'https://demo.test/3', 1792630000)], 'c1');
+    const second = page([
+      item(2, 'the post a page edge hid', 'https://demo.test/2', 1792620000),
+      item(1, 'the stored post', 'https://demo.test/old', 1792610000),
+      item(0, 'the post below the anchor', 'https://demo.test/0', 1792600000),
+    ]);
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      urls.push(url);
+      return { ok: true, status: 200, text: async () => (url.includes('cursor=') ? second : first) };
+    }));
+
+    const report = await run({ ref: 'probe.feed.md', now: new Date('2026-10-16T03:00:00Z') });
+
+    expect(report.items.map((i) => i.ref)).toEqual([
+      'https://demo.test/3',
+      'https://demo.test/2',
+      'https://demo.test/0',
+    ]);
+    expect(urls).toHaveLength(2);
+    expect(urls[1]).toContain('cursor=c1');
+  });
+
   it('trims each source at its own last stored post, not at the block\'s newest line', async () => {
     await seed('srcfeed.md', 'md', withSrc('srcdom/demo'));
     await seed('srcdom/demo', 'src',

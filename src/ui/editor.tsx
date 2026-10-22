@@ -32,6 +32,7 @@ import {
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
 import { markdown } from '@codemirror/lang-markdown';
+import { search } from '@codemirror/search';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { LocalErrorBoundary } from './ErrorBoundaryOutlet';
 import { useTabSyncState } from './tabSync';
@@ -43,6 +44,12 @@ import { SRCFEED_DOC } from '../srcfeedRows';
 import { readOrSeedSrcFeed } from '../srcfeedStore';
 import { subscribeNav } from './navStore';
 import { MdText } from './MdText';
+import { openLinks } from './openLinks';
+
+/** Extensions every row gets. `search()` must be part of the configured extensions: the
+ *  find command otherwise appends it for that one transaction, and react-codemirror
+ *  reconfigures on every render, which drops appended extensions and closes the panel. */
+const BASE_EXTENSIONS = [search(), openLinks];
 
 /**
  * The text a tab with no row yet opens with.
@@ -742,10 +749,10 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
             extensions={
               (() => {
                 const row = recrTab ?? activeTab;
-                if (!row) return [];
-                if (row.endsWith('.md')) return [markdown()];
-                if (/\.(ts|tsx|js|jsx)$/.test(row)) return [javascript({ jsx: true })];
-                return [];
+                if (!row) return BASE_EXTENSIONS;
+                if (row.endsWith('.md')) return [markdown(), ...BASE_EXTENSIONS];
+                if (/\.(ts|tsx|js|jsx)$/.test(row)) return [javascript({ jsx: true }), ...BASE_EXTENSIONS];
+                return BASE_EXTENSIONS;
               })()
             }
             theme={oneDark}

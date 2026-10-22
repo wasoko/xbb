@@ -14,11 +14,18 @@
  *
  * | Strategy | Request | Read as |
  * |---|---|---|
- * | `api` | a URL the block declares under `* API:` | JSON |
+ * | `api` | a URL the block declares under `* API:`, then its `next_cursor` pages | JSON |
  * | `cookied` | a caller-supplied reader, declared as `* Session:` | text |
  * | `direct` | the page itself | JSON, else HTML posts, else Markdown |
  * | `mobile` | the page's mobile mirror, `* Mobile:` or derived by {@link mobileUrl} | JSON, else HTML posts, else Markdown |
  * | `proxy` | `<proxy>/<page>` (`https://r.jina.ai/` by default) | Markdown, or HTML posts when the block asks the proxy for HTML |
+ *
+ * An API page carries only what its own `limit` allows, and a site that repeats one
+ * article per category spends that limit on duplicates. On a read with a previous
+ * boundary, the `api` step follows `next_cursor` while a page still holds a post the
+ * feed does not store, so a page edge cannot hide posts published between two reads
+ * and a post hidden by an earlier edge is backfilled. `## Fallback`'s `* Pages:`
+ * bounds that walk; a first read keeps one page.
  *
  * A body is read for what it is: JSON when it parses, the `<a class="post-link">`
  * posts when it is an HTML document ({@link htmlPostItems} — which reads a
@@ -84,6 +91,8 @@ export interface FeedFallback {
   timeoutMs: number;
   /** Rows kept per source when the block names no `* Limit:`; 0 keeps every row. */
   limit: number;
+  /** Most API pages one read fetches while a page still holds an unread post. */
+  pages: number;
 }
 
 /** Retry budget and proxy root used when the document omits `## Fallback`. */
@@ -94,6 +103,7 @@ export const DEFAULT_FALLBACK: FeedFallback = {
   capDelayMs: 8000,
   timeoutMs: 15000,
   limit: 0,
+  pages: 4,
 };
 
 /** A parsed `webfeed.md`. */
@@ -172,6 +182,9 @@ export function parseWebfeedDoc(md: string): WebfeedDoc {
         else if (label === 'cap delay ms' && Number.isFinite(n)) fallback.capDelayMs = n;
         else if (label === 'timeout ms' && Number.isFinite(n)) fallback.timeoutMs = n;
         else if (label === 'limit' && Number.isFinite(n)) fallback.limit = n;
+        else if ((label === 'api pages' || label === 'pages') && Number.isFinite(n) && n >= 1) {
+          fallback.pages = Math.floor(n);
+        }
       }
       continue;
     }
@@ -853,6 +866,20 @@ export interface FeedExtractOptions extends BackoffConfig {
   stopAtKnown?: boolean;
   now?: Date;
   /**
+   * The oldest post the feed's previous read stored for this source. An API step
+   * follows each page's `next_cursor` while the page still holds a post the feed
+   * does not, so a page size or a site that repeats one article per category cannot
+   * hide posts published between two reads. A first read has none and keeps one page.
+   */
+  boundary?: { text: string; ref: string } | null;
+  /**
+   * Whether the caller already stores an item. Given, an API step walks down until
+   * one page is entirely stored; without it, only `boundary` says where to stop.
+   */
+  seen?: (item: FeedItem) => boolean;
+  /** Most API pages one step fetches; omitted uses the fallback's `pages`. */
+  pages?: number;
+  /**
    * Reader for a source that declares `* Session:` — the caller's session-aware
    * path, e.g. `fc.get_weibo_posts`. It returns a response body to parse or the
    * items themselves, for a reader that already parsed them.
@@ -907,6 +934,111 @@ function cookiedItems(read: string | FeedItem[], url: string): FeedItem[] {
 }
 
 /**
+ * The cursor an API page names for the page below it; '' when it is the last page.
+ *
+ * @param text the response body
+ * @returns `data.next_cursor` or a top-level `next_cursor`, as text
+ */
+function nextCursor(text: string): string {
+  try {
+    const js: unknown = JSON.parse(text);
+    const cursor = at(js, 'data', 'next_cursor') ?? at(js, 'next_cursor');
+    return typeof cursor === 'string' ? cursor : typeof cursor === 'number' ? String(cursor) : '';
+  } catch {
+    // A body that does not parse is not a page this walk can go below.
+    return '';
+  }
+}
+
+/**
+ * The same request one page older: the page's cursor replaces any the URL held.
+ *
+ * @param url the API URL the step declared
+ * @param cursor the `next_cursor` the answered page carried
+ * @returns the request for the next page
+ */
+function withCursor(url: string, cursor: string): string {
+  const next = new URL(url);
+  next.searchParams.set('cursor', cursor);
+  return next.toString();
+}
+
+/**
+ * Whether one page holds the post the previous read stopped at.
+ *
+ * @param items the page's items
+ * @param boundary the last stored post, by ref or else by text without its counts
+ * @returns true when the page reaches the boundary
+ */
+function holdsBoundary(items: FeedItem[], boundary: { text: string; ref: string }): boolean {
+  return boundary.ref !== ''
+    ? items.some((item) => item.ref === boundary.ref)
+    : items.some((item) => stripActionLine(item.txt) === stripActionLine(boundary.text));
+}
+
+/**
+ * Items from one `api` step, walking `next_cursor` down until the feed's history is
+ * covered.
+ *
+ * A page size caps the posts one response can carry, and a site that repeats an
+ * article per category spends that cap on duplicates, so one page can end above the
+ * oldest stored post. Posts published between two reads would then never be
+ * requested. The walk continues while a page holds an item the caller does not
+ * store (or, without that test, until the boundary is on the page), so the window
+ * between two reads has no hole and a read also backfills a page edge that hid a
+ * post earlier. `pages` bounds the walk.
+ *
+ * @param step the API request
+ * @param source the block it belongs to, for the attempt log
+ * @param fallback the document's retry and page budget
+ * @param opts the caller's headers, boundary, stored test, and page override
+ * @param attempts the shared attempt log
+ * @param notes the shared note list
+ * @returns the items of every page, or null when the first page did not answer
+ */
+async function readApiPages(
+  step: FeedPlanStep,
+  source: FeedSource,
+  fallback: FeedFallback,
+  opts: FeedExtractOptions,
+  attempts: FeedAttempt[],
+  notes: string[],
+): Promise<FeedItem[] | null> {
+  const headers = step.headers === undefined ? opts.headers : { ...opts.headers, ...step.headers };
+  const boundary = opts.boundary ?? null;
+  const pages = boundary === null ? 1 : Math.max(1, Math.floor(opts.pages ?? fallback.pages));
+  const items: FeedItem[] = [];
+  const cursors = new Set<string>();
+  let url = step.url;
+
+  for (let page = 0; page < pages; page++) {
+    const out = await fetchWithBackoff(url, source.name, step.strategy, { ...opts, headers });
+    attempts.push(...out.attempts);
+    if (!out.ok) {
+      notes.push(page === 0 ? `${step.strategy}: ${out.error}` : `api page ${page + 1}: ${out.error}`);
+      return page === 0 ? null : items;
+    }
+    const read = parseFeedPayload(out.text, url);
+    items.push(...read);
+    if (pages === 1) return items;
+    const seen = opts.seen;
+    const covered = seen !== undefined
+      ? read.every((item) => seen(item))
+      : boundary !== null && holdsBoundary(read, boundary);
+    if (covered) return items;
+    const cursor = nextCursor(out.text);
+    if (cursor === '' || cursors.has(cursor)) return items;
+    if (page + 1 >= pages) {
+      notes.push(`api: ${pages} page(s) reached`);
+      return items;
+    }
+    cursors.add(cursor);
+    url = withCursor(step.url, cursor);
+  }
+  return items;
+}
+
+/**
  * Read one source, walking the strategies until one answers with items.
  *
  * @param source the block to read
@@ -940,6 +1072,10 @@ export async function extractSource(
       attempts.push({ source: source.name, strategy: 'cookied', url: step.url, delayMs: 0, ok: wall === '', status: 200, bytes: body.length, ms: Date.now() - start, error: wall ? `blocked: ${wall}` : '' });
       if (wall) continue;
       items = Array.isArray(read) ? cookiedItems(read, step.url) : parseFeedPayload(body, step.url);
+    } else if (step.strategy === 'api') {
+      const read = await readApiPages(step, source, fallback, opts, attempts, notes);
+      if (read === null) continue;
+      items = read;
     } else {
       /* A step's own headers (what a reader proxy needs) join the caller's; a step
          without any passes the caller's through untouched. */

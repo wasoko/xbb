@@ -23,14 +23,16 @@
  * returns: the entry name in `rec.feed`, the path in `rec.strategy`, a stamp, and the
  * entry's tags.
  *
- * Each source is trimmed at the oldest post the last read stored for it, matched by
- * the post's URL when it carries one — an item's text carries counts that tick
- * between reads — and every row the document already holds is dropped after that.
- * A list that keeps a pinned head at its top leaves the anchor near its own top, so
- * the trim alone would stop at the pins on every read; the second step removes what
- * sits above them. Nothing here imports Dexie or React: the write goes through
- * {@link SrcFeedStore}, so a test passes its own port and the app passes
- * `srcfeedStore.ts`.
+ * A `Src:` row's list is trimmed at the oldest post the last read stored for it,
+ * matched by the post's URL when it carries one — an item's text carries counts that
+ * tick between reads — and every row the document already holds is dropped after
+ * that. A list that keeps a pinned head at its top leaves the anchor near its own
+ * top, so the trim alone would stop at the pins on every read; the second step
+ * removes what sits above them. The built-in web walk keeps no positional anchor: its
+ * page edge can hide a post older than the anchor, so only the stored keys decide
+ * what is new, and the walk pages until a page holds nothing unread. Nothing here
+ * imports Dexie or React: the write goes through {@link SrcFeedStore}, so a test
+ * passes its own port and the app passes `srcfeedStore.ts`.
  *
  * `srcfeed.ts` also publishes the reader helpers a `srcdom` row calls as
  * `globalThis.srcfeed` ({@link installSrcFeedGlobal}); a `data:`-URL body can import
@@ -778,12 +780,21 @@ function srcRows(rows: FeedDa[], entry: SrcFeedEntry, how: string, at: Date): Fe
  * Read one entry, whichever path it names.
  *
  * @param entry the registry entry
- * @param ctx the store, the fallback budget, the read's stamp, and the log sink
+ * @param ctx the store, the fallback budget, the previous read's oldest post, the
+ *   read's stamp, and the log sink
  * @returns the rows, whether the entry answered, and the reasons it did not
  */
 async function readEntry(
   entry: SrcFeedEntry,
-  ctx: { store: SrcFeedStore; fallback: FeedFallback; at: Date; log: Console },
+  ctx: {
+    store: SrcFeedStore;
+    fallback: FeedFallback;
+    at: Date;
+    log: Console;
+    boundary: { text: string; ref: string } | null;
+    /** Whether the feed already stores an item, which is where an API walk stops. */
+    seen: (item: { ref: string; txt: string }) => boolean;
+  },
 ): Promise<EntryRead> {
   if (entry.src === '') {
     const res = await extractSource(entry, ctx.fallback, {
@@ -792,6 +803,8 @@ async function readEntry(
       existing: [],
       limit: 0,
       stopAtKnown: false,
+      boundary: ctx.boundary,
+      seen: ctx.seen,
       now: ctx.at,
     });
     return {
@@ -897,7 +910,7 @@ function storedKeys(doc: WFeedDoc): Map<string, StoredKeys> {
  * the action counts. A post that is only retitled or reactivated keeps its URL, so it
  * counts as stored and is not written again.
  */
-function alreadyStored(keys: StoredKeys | undefined, row: FeedDa): boolean {
+function alreadyStored(keys: StoredKeys | undefined, row: { ref: string; txt: string }): boolean {
   if (keys === undefined) return false;
   return row.ref !== '' ? keys.refs.has(row.ref) : keys.texts.has(stripActionLine(row.txt));
 }
@@ -992,18 +1005,26 @@ export async function runSrcFeed(opts: SrcFeedRunOptions): Promise<SrcFeedReport
       });
       continue;
     }
-    const read = await readEntry(entry, { store: opts.store, fallback: registry.fallback, at, log })
+    const kept = held.get(entry.name);
+    const read = await readEntry(entry, {
+      store: opts.store,
+      fallback: registry.fallback,
+      at,
+      log,
+      boundary: boundaries.get(entry.name) ?? null,
+      seen: (item) => alreadyStored(kept, item),
+    })
       .catch((e: unknown): EntryRead => ({
         name: entry.name, rows: [], answered: false,
         notes: [`${entry.name}: ${e instanceof Error ? e.message : String(e)}`],
       }));
     log.info(`[srcfeed] ${entry.name}: ${read.rows.length} row(s)`);
-    const kept = held.get(entry.name);
-    /* A multi-tab source merges one newest-first list per tab. Which list comes
-       first is the browser's tab order, not recency, so the positional anchor would
-       drop a tab's new chats when the tabs are reordered or one closes. There the
-       stored keys alone decide what is new. */
-    const window = readsEveryTab(entry)
+    /* A multi-tab source merges one newest-first list per tab, and the web walk reads
+       a page whose edge may sit above a post it has not stored yet. Neither list is
+       contiguous, so the positional anchor could drop a new chat or the post a page
+       edge hid; the stored keys alone decide what is new. A `Src:` row reads a list
+       its own adapter owns, where the anchor is the last check. */
+    const window = readsEveryTab(entry) || entry.src === ''
       ? read.rows
       : trimAtBoundary(read.rows, boundaries.get(entry.name) ?? null);
     const rows = window.filter((row) => !alreadyStored(kept, row));

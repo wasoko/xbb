@@ -8,8 +8,9 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  PITCH_NOTCHES, SEA_FEEL, SEA_IDLE, createRig, damp, fogDensity, leanedPitch, notch, notchIndex,
-  notchPitch, poseSettled, seaLevel, springStep, stepRig, wheelScroll, wheelZoom,
+  PITCH_NOTCHES, SEA_FEEL, SEA_IDLE, createRig, damp, fogDensity, leanedPitch, levelPitch,
+  notch, notchIndex, notchPitch, poseSettled, seaLevel, springStep, stepRig, wheelScroll,
+  wheelZoom,
 } from '../../src/ui/seaFeel';
 
 describe('damp', () => {
@@ -93,6 +94,12 @@ describe('sea level', () => {
   it('thins the fog above the horizon and thickens it below', () => {
     expect(fogDensity(100)).toBeLessThan(fogDensity(0));
     expect(fogDensity(-100)).toBeGreaterThan(fogDensity(0));
+  });
+
+  it('tilts the aim up above the horizon and down below it', () => {
+    expect(levelPitch(100)).toBe(SEA_FEEL.levelPitch);
+    expect(levelPitch(0)).toBeCloseTo(0, 9);
+    expect(levelPitch(-100)).toBe(-SEA_FEEL.levelPitch);
   });
 });
 

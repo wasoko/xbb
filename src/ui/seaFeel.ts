@@ -7,8 +7,10 @@
  * flick carries the same distance at 30 and 120 fps.
  *
  * The four degrees of freedom are the whole of the interaction: scroll (body height), yaw
- * (turning on the spot), pitch (five detents) and zoom (an eased field of view). Nothing here
- * touches the DOM or three.js, so the feel is testable from numbers alone.
+ * (turning on the spot), pitch (five detents) and zoom (an eased field of view). Sea level
+ * leans the aim on its own as well: up above the horizon, down below it, so a dive reads as
+ * a dive with the surface overhead. Nothing here touches the DOM or three.js, so the feel is
+ * testable from numbers alone.
  */
 
 /** Frame-rate-independent approach: the gap closes by `1 - exp(-dt / tau)` each frame. */
@@ -82,6 +84,8 @@ export const SEA_FEEL = {
   rollTau: 0.3,
   leanGain: 0.15,
   leanMax: 4,
+  /** How far sea level tilts the aim, degrees: up above the horizon, down below it. */
+  levelPitch: 6,
   /** Fog, and the band over which sea level changes it. */
   fogDensity: 0.025,
   levelBelow: 1.15,
@@ -140,6 +144,17 @@ export function notchIndex(index: number, delta: number): number {
 export function seaLevel(y: number): number {
   const t = Math.min(1, Math.max(0, (y + SEA_FEEL.levelSpan) / (2 * SEA_FEEL.levelSpan)));
   return t * t * (3 - 2 * t);
+}
+
+/**
+ * The pitch sea level asks for on its own: up above the horizon, down below it, so the star
+ * and its ring stay overhead once the camera dives and the wall below reads as the deep.
+ *
+ * @param y camera height
+ * @returns degrees, positive up
+ */
+export function levelPitch(y: number): number {
+  return SEA_FEEL.levelPitch * (2 * seaLevel(y) - 1);
 }
 
 /**

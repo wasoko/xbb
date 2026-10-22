@@ -78,7 +78,7 @@ The engine imports no Dexie or React: a read reaches the store through
 | `* Max:` | entry | cap on tab rows; unset (or `0`) leaves the cap to the adapter |
 | `* Prompt:` | entry | what the user sees when `Item:` matched nothing |
 | `* Tags:` | entry | `- tag` lines every row of this entry carries |
-| `* Proxy URL:`, `* Retries:`, `* Base delay ms:`, `* Cap delay ms:`, `* Timeout ms:`, `* Limit:` | `## Fallback` | the web walk's retry budget, proxy root, and default cap |
+| `* Proxy URL:`, `* Retries:`, `* Base delay ms:`, `* Cap delay ms:`, `* Timeout ms:`, `* Limit:`, `* Pages:` | `## Fallback` | the web walk's retry budget, proxy root, default cap, and API page budget |
 
 A block with no `URL:` is skipped, and an unknown label is ignored, so a
 hand-edited document still parses. `## Fallback` defaults are the table's values
@@ -233,24 +233,27 @@ flowchart LR
    deleted.
 3. Normalize each row: `rec.feed` = entry name, `rec.strategy` = the path, a stamp,
    and the entry's tags.
-4. Trim each source at the oldest post the last read stored for it — the last line
-   that source has in the newest block that names it, matched by the post's URL when
-   it carries one, because an item's `[转发 …]` counts tick between reads — then drop
-   every row the document already holds for that source, by URL or else by text
-   without its counts. A source shared by two feeds stops at the same row in both.
-   A `* Tabs: all` source merges one newest-first list per tab, and which list comes
-   first is the tab order rather than recency, so it is trimmed by the stored keys
-   alone: the positional anchor would drop a tab's new chats when the tabs are
-   reordered or one closes.
-5. Write one `## Posts as of <stamp>` block and move `next:` to the read's stamp
+4. A `Src:` row's list is trimmed at the oldest post the last read stored for it —
+   the last line that source has in the newest block that names it, matched by the
+   post's URL when it carries one, because an item's `[转发 …]` counts tick between
+   reads. The built-in web walk and a `* Tabs: all` source use the stored keys alone:
+   a page edge can hide a post older than the anchor, and a tab's list order is the
+   browser's, so neither list is contiguous. A source shared by two feeds stops at
+   the same row in both.
+5. Drop every row the document already holds for that source, by URL or else by text
+   without its counts.
+6. Write one `## Posts as of <stamp>` block and move `next:` to the read's stamp
    plus `freq`. Write nothing when no source answered.
 
-The anchor is a position in the live list, and a list that keeps a pinned head at
-its top holds it near that top: trimming alone would then stop at the pins on every
-read. The stored-key pass leaves only the rows above the anchor that the document
-has never listed — the pinned head, and any chat the page lists twice. One
-consequence is deliberate: a chat that is only retitled or reactivated keeps its
-URL, so it counts as stored and is not written again.
+For a `Src:` row, the anchor is a position in the live list, and a list that keeps a
+pinned head at its top holds it near that top: trimming alone would then stop at the
+pins on every read. The stored-key pass leaves only the rows above the anchor that
+the document has never listed — the pinned head, and any chat the page lists twice.
+One consequence is deliberate: a chat that is only retitled or reactivated keeps its
+URL, so it counts as stored and is not written again. A web-walk read also
+backfills a post a page edge hid on an earlier read: it keeps paging while a page
+holds a post the document does not store, and the stored-key pass writes only that
+post, not the page's older stored ones.
 
 The written row is pushed like any edit. A document whose `next` has passed is read
 once by itself when the preview opens (at most once per five minutes per ref), so a
@@ -263,11 +266,20 @@ that answers with items ends the walk:
 
 | Strategy | Request | Read as |
 |---|---|---|
-| `api` | each `* API:` URL | JSON |
+| `api` | each `* API:` URL, then its `next_cursor` pages | JSON |
 | `cookied` | the caller's reader, for a `* Session:` entry | its items, or a body |
 | `direct` | `* URL:` | JSON, else the document's posts, else Markdown |
 | `mobile` | the page's mobile mirror | JSON, else the document's posts, else Markdown |
 | `proxy` | `<proxy>/<URL>` | Markdown, or the document's posts when the entry asks for HTML |
+
+An API page is not the whole feed: a `limit` caps how many rows it carries, and a
+site that repeats one article under each category spends that cap on duplicates
+(wallstreetcn's 33 rows hold about nine articles). On every read after the first,
+an `api` step follows the page's `data.next_cursor` while the page still holds a
+post the feed does not store, so the window between two reads has no hole and a
+page edge that hid a post is backfilled on a later read. `* Pages:` in
+`## Fallback` (default 4) bounds the walk. A first read has no boundary and keeps
+one page.
 
 `mobileUrl` carries the numeric id a URL already names over to
 `https://m.weibo.cn/u/<id>`, so `weibo.com/u/2337530130` and

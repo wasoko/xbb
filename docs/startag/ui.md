@@ -194,6 +194,10 @@ translating the camera (`glide.offset × UNIT`). The grid follows in whole spaci
 view without the geometry growing, while the stars and edges sit at their own rise and travel
 past the camera.
 
+Sea level also tilts the aim by up to `SEA_FEEL.levelPitch` (6) degrees: up above the
+horizon, down below it. A dive therefore looks into the deep while the star and its ring stay
+overhead, which is what makes the wall read as exploration rather than a flat pan.
+
 A click — pointer travel under `CLICK_SLOP` (5) pixels — selects the grid cell under the
 pointer, outlines it and lists the tags that cell holds. That read happens once per click
 into state, not per frame, so a coasting sky does not re-render React sixty times a second.
