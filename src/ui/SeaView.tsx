@@ -3,15 +3,16 @@
  * camera body that is dragged through it.
  *
  * `star.tagger.md`'s generated taxonomy is packed once by `seaWall.buildWall` into rectangles
- * on the cylinder: the pinned headings keep the central column below the star, each cluster's
- * clouds fill the wall above or below sea level according to the pin they answer for, and every
- * row a tag was kept by is a point inside its region. Nothing is sampled or invented.
+ * on the cylinder: the pinned headings stand in one band at sea level, a column each, the
+ * newest pin card's columns at the star; each cluster's clouds fill the wall above or below
+ * sea level according to the pin they answer for, and every row a tag was kept by is a point
+ * inside its region. Nothing is sampled or invented.
  *
  * The camera is the one the feel module describes: a spring-damped body, scroll and yaw that
  * coast, five pitch detents, and a field of view the wheel opens. Sea level also tilts the
  * aim, up above the horizon and down below it, so a dive looks into the deep while the star
- * and its ring stay overhead. Sea level is rise 0; the first pinned heading stands there
- * under a star whose ring runs round the whole cylinder.
+ * and its ring stay overhead. Sea level is rise 0; the pinned band hangs from there, the
+ * newest card's columns at a star whose ring runs round the whole cylinder.
  * Above the horizon the canvas is almost black and catches the star's light; below it is tinted
  * and readable.
  *
@@ -32,7 +33,7 @@ import { ensureStarTaggerRow, writeStarTaggerTrace } from './starTaggerRun';
 import { loadPinGraph, type PinGraphSeed } from './seaPinGraph';
 import { restTagStore } from './restGrouper';
 import {
-  kindLabel, parseTaxonomyDoc, relationsOf, seaRowsByTag, seaTagPool, graphFromTags,
+  kindLabel, parseTaxonomyDoc, relationsOf, seaPinsOf, seaRowsByTag, seaTagPool, graphFromTags,
   NO_RELATIONS, type SeaAction, type SeaRelations, type SeaRow, type TagRelation,
 } from './seaTags';
 import {
@@ -239,8 +240,8 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     () => (tags.length === 0
       ? null
       : buildWall(graph, tags, (tag) => rowsByTag.get(tag) ?? [], {
-        /* The wall opens at the feel's narrow field of view, so the column is narrower than
-           the old wide-wall packing and the strips come into view beside it. */
+        /* The wall opens at the feel's narrow field of view, so a column is narrower than the
+           old wide-wall packing and the strips come into view beside the band. */
         pinCol: 32,
         shelfGap: 5,
         areaPerRow: 4,
@@ -248,7 +249,10 @@ export function SeaView({ foreground }: { foreground: boolean }) {
         minH: 12,
         maxH: 36,
         maxRegions: 260,
-        ...(seed === null ? {} : { recency: (tag: string) => seed.recency.get(tag) }),
+        ...(seed === null ? {} : {
+          recency: (tag: string) => seed.recency.get(tag),
+          pins: seaPinsOf(seed.pins, graph),
+        }),
       })),
     [graph, tags, rowsByTag, seed],
   );
@@ -335,8 +339,10 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       .then((loaded) => {
         if (!live) return;
         setSeed(loaded);
-        if (restTagStore.version === 0) {
-          restTagStore.set(loaded.reports, loaded.rows, loaded.pins);
+        /* A rest-list pass owns the store once one has landed; the sea's own seed only
+           fills an empty one, so the omnibox reads whichever pass ran first. */
+        if (restTagStore.size === 0) {
+          restTagStore.set(loaded.reports, loaded.rows);
         }
         void writeStarTaggerTrace(loaded, loaded.setup, loaded.timings).catch((error: unknown) => {
           console.debug('[star.tagger] trace skipped', error);

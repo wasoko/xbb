@@ -254,7 +254,7 @@ export async function dl_merge (tab: Table, curSnap='', testOld=false
         while(toPut.length >0) tab.bulkPut(toPut.splice(0, chunk))
       fc.nowWarn(st, 'initial merge',undefined,33)
       stale = testOld
-    } else stale = await tab.toArray()
+    } 
 
     // A pin names its file outright, so a newly listed snapshot cannot move the working set.
     let snapName = pin || list.data[0].name
@@ -273,6 +273,8 @@ export async function dl_merge (tab: Table, curSnap='', testOld=false
     const snapUp = upgrade_rows(snapRows, snapName);
     stts(`ren ${snapUp.ren_cnt} sts ->tags`,'greet')
     st = fc.nowWarn(st, `dl snap`, upSnapName)
+    if (stale.length==0) 
+      stale = await tab.toArray()
     const toPut = bulk2put(stale, modrw, snapUp.rows, (t:sdb.Da)=>t.tid
       , sdb.daUniq, sdb.tags2str,sdb.deepMerge, sdb.daNoPk )
     onStep?.('snap merge', 0.5)

@@ -10,8 +10,8 @@
  * All content is real: a region exists because the packing gave a tag that wall, a point exists
  * because a row carried it, and a line exists because the table lists the relation. Above sea
  * level the canvas is almost black, with the star's light glinting off it; below it is tinted
- * and readable. The star sits at the first pinned heading, and its ring marks the horizontal
- * direction all the way round the cylinder.
+ * and readable. The star sits over the newest pin card's column, and its ring marks the
+ * horizontal direction all the way round the cylinder.
  */
 
 import * as THREE from 'three';
@@ -303,26 +303,6 @@ const POINT_FRAGMENT = `
   }
 `;
 
-/** The horizon ring: a full circle at sea level, brightest at the star. */
-const RING_VERTEX = `
-  varying float vLon;
-  void main() {
-    vLon = atan(position.x, position.z);
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`;
-
-const RING_FRAGMENT = `
-  uniform vec3 uColor;
-  uniform float uBase;
-  varying float vLon;
-  void main() {
-    float front = pow(max(0.0, cos(vLon)), 16.0);
-    float a = uBase + front * 0.5;
-    gl_FragColor = vec4(uColor, a);
-  }
-`;
-
 /** The sea-level star: a billboard with a core, a halo and four rays. */
 const STAR_VERTEX = `
   uniform vec3 uCamLocal;
@@ -442,8 +422,6 @@ export class SeaRenderer {
   private readonly post: ShaderPass;
 
   private readonly sky: THREE.Mesh;
-  private readonly ring: THREE.Mesh;
-  private readonly halo: THREE.Mesh;
   private readonly star: THREE.Mesh;
   private readonly starMaterial: THREE.ShaderMaterial;
   private readonly fillMaterial: THREE.ShaderMaterial;
@@ -510,6 +488,7 @@ export class SeaRenderer {
           uAbove: { value: SKY_ABOVE.clone() },
           uStar: { value: STAR_COLOR.clone() },
           uCamLocal: { value: new THREE.Vector3() },
+          uRingY: { value: 0 },
         },
         vertexShader: `
           varying vec3 vDir;
@@ -523,6 +502,7 @@ export class SeaRenderer {
           uniform vec3 uBelow;
           uniform vec3 uAbove;
           uniform vec3 uStar;
+          uniform float uRingY;
           varying vec3 vDir;
           void main() {
             float y = vDir.y;
@@ -534,6 +514,19 @@ export class SeaRenderer {
             float glow = pow(max(0.0, cos(lon)), 24.0);
             float halo = y > 0.0 ? exp(-y * 14.0) * 0.55 : exp(y * 45.0) * 0.06;
             col += uStar * glow * halo * 0.35;
+            /* The sea-level ring. Every point of the circle is the same elevation from the
+               camera on the axis, so the whole ring is one band of directions: uRingY is the
+               sine of that elevation. A band here keeps a pixel footprint and a derivative
+               wide edge; the flat annulus it replaces was seen edge-on and collapsed to a
+               zero-area sliver. */
+            float d = y - uRingY;
+            float cosE = sqrt(max(0.0, 1.0 - uRingY * uRingY));
+            float aa = max(fwidth(d), 1e-5);
+            float ringHalf = ${(0.35 / WALL_RADIUS).toFixed(8)} * cosE;
+            float ring = 1.0 - smoothstep(ringHalf - aa, ringHalf + aa, abs(d));
+            float front = pow(max(0.0, cos(lon)), 16.0);
+            col += uStar * (ring * (0.1 + front * 0.5)
+              + exp(-abs(d) / (${(4 / WALL_RADIUS).toFixed(8)} * cosE)) * (0.02 + front * 0.5));
             gl_FragColor = vec4(col, 1.0);
           }
         `,
@@ -547,43 +540,7 @@ export class SeaRenderer {
     this.sky.frustumCulled = false;
     this.content.add(this.sky);
 
-    /* The horizon ring: two thin annuli at sea level, the wide one a soft glow. */
-    this.ring = new THREE.Mesh(
-      ringGeometry(WALL_RADIUS - 0.35, WALL_RADIUS + 0.35),
-      new THREE.ShaderMaterial({
-        uniforms: { uColor: { value: STAR_COLOR.clone() }, uBase: { value: 0.1 } },
-        vertexShader: RING_VERTEX,
-        fragmentShader: RING_FRAGMENT,
-        transparent: true,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        depthTest: false,
-        side: THREE.DoubleSide,
-        toneMapped: false,
-      }),
-    );
-    this.ring.renderOrder = 5;
-    this.ring.frustumCulled = false;
-    this.content.add(this.ring);
-
-    this.halo = new THREE.Mesh(
-      ringGeometry(WALL_RADIUS - 4, WALL_RADIUS + 4),
-      new THREE.ShaderMaterial({
-        uniforms: { uColor: { value: STAR_COLOR.clone() }, uBase: { value: 0.02 } },
-        vertexShader: RING_VERTEX,
-        fragmentShader: RING_FRAGMENT,
-        transparent: true,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        depthTest: false,
-        side: THREE.DoubleSide,
-        toneMapped: false,
-      }),
-    );
-    this.halo.renderOrder = 4;
-    this.halo.frustumCulled = false;
-    this.content.add(this.halo);
-    /* The star at the first pinned heading. */
+    /* The star over the newest pin card's column. */
     this.starMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uCamLocal: { value: new THREE.Vector3() },
@@ -987,7 +944,10 @@ export class SeaRenderer {
     }
     this.starMaterial.uniforms.uCamLocal.value.copy(this.camLocal);
     this.starMaterial.uniforms.uPxToWorld.value = pxToWorld;
-    (this.sky.material as THREE.ShaderMaterial).uniforms.uCamLocal.value.copy(this.camLocal);
+    const skyMaterial = this.sky.material as THREE.ShaderMaterial;
+    skyMaterial.uniforms.uCamLocal.value.copy(this.camLocal);
+    const ringY = view.camY * UNIT;
+    skyMaterial.uniforms.uRingY.value = -ringY / Math.hypot(ringY, WALL_RADIUS);
     if (this.pointsMaterial !== null) {
       this.pointsMaterial.uniforms.uPxToWorld.value = pxToWorld;
       this.pointsMaterial.uniforms.uDpr.value = Math.min(2, window.devicePixelRatio || 1);
@@ -1263,32 +1223,8 @@ export class SeaRenderer {
     this.starMaterial.dispose();
     this.sky.geometry.dispose();
     (this.sky.material as THREE.Material).dispose();
-    this.ring.geometry.dispose();
-    (this.ring.material as THREE.Material).dispose();
-    this.halo.geometry.dispose();
-    (this.halo.material as THREE.Material).dispose();
     this.star.geometry.dispose();
     this.composer.dispose();
     this.renderer.dispose();
   }
-}
-
-/** A flat annulus at sea level, in the XZ plane. */
-function ringGeometry(inner: number, outer: number): THREE.BufferGeometry {
-  const segments = 512;
-  const positions: number[] = [];
-  const indices: number[] = [];
-  for (let i = 0; i <= segments; i++) {
-    const a = (i / segments) * Math.PI * 2;
-    positions.push(Math.sin(a) * inner, 0, Math.cos(a) * inner);
-    positions.push(Math.sin(a) * outer, 0, Math.cos(a) * outer);
-  }
-  for (let i = 0; i < segments; i++) {
-    const a = i * 2;
-    indices.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setIndex(indices);
-  return geometry;
 }

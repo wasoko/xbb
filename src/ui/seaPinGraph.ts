@@ -16,7 +16,8 @@
 
 import { db, treeCacReady, type Da } from '../sdb';
 import { TAG_DEL, pinPriorityTags, type RowTagReport } from '../srctag';
-import { QARF_GROUPER, restProfileMap } from './restGrouper';
+import { QARF_TAG_SCORE, qarfAdaptive, qarfTagReports } from '../qarf';
+import { runRestPass } from '../rstag';
 import { isPinCardRow } from './cardTab';
 import { buildTagGraph, headingTags, pinReach, type GraphReach, type TagGraph } from './restGraph';
 import {
@@ -170,9 +171,19 @@ export async function loadPinGraph(
     ...(setup.ceil === undefined ? {} : { ceil: setup.ceil }),
   };
   const scored = clock();
-  const reports = await restProfileMap(rows, QARF_GROUPER,
-    Object.keys(qarf).length > 0 ? { qarf } : undefined,
-    { pins, priorityTags, tag: { synonyms } });
+  /* The seed is the qarf reading over the whole window: every row is scored, the curated
+     half is rooted at the pin cards, and each row's own share decides its weights. The URL
+     is left out of the channels the way a list of one site's pages needs it. */
+  const reports = await runRestPass(rows, {
+    dim: 'visitTime', bucket: 'domain',
+    score: QARF_TAG_SCORE,
+    limit: Number.POSITIVE_INFINITY,
+    pinsPriority: true,
+    aim: {},
+    pipeline: 'qarf',
+    qarf: { ...qarfAdaptive(qarf), tag: qarfTagReports },
+    bm25: { fields: { url: 0 } },
+  }, { pins, priorityTags, tag: { synonyms, urls: false } });
   const scoreDone = clock();
 
   const graph = buildTagGraph(pins, rows, reports, {

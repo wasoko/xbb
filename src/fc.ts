@@ -105,23 +105,14 @@ export function subscribeStts(listener: () => void) {
  * @param scope - the `stts` scope, e.g. `-lastgreet`
  * @returns the message, or `''` before the scope first fires */
 export const getStts = (scope = '') => sttsDict[scope + 'STTS'] ?? ''
-/**
- * Show a status line and file it as a notice on the same scope.
- *
- * @param message the line; one beginning `err` is logged as an error
- * @param scope the topic, e.g. `-lastgreet`
- * @param level the notice level; absent derives it from the `err` prefix
- * @returns the message
- */
-export const stts = (message: string, scope = '',
-  level?: 'status' | 'info' | 'warning' | 'error') => {
+export const stts = (message: string, scope = '') => {
   const stKey=scope+'STTS'
   sttsDict[stKey] = message
   const isErr = message.slice(0,3).toLowerCase().startsWith("err")
   if (isErr)
     console.error(scope,message);
   console.info(scope,message);
-  noticeStore({scope, message, level:level ?? (isErr? 'error': 'info')})
+  noticeStore({scope, message, level:isErr? 'error': 'info'})
   sttsCB({type: 'stts'+scope, stts: message})
   sttsListeners.forEach(l => l())
   return message;
@@ -599,6 +590,11 @@ export function fmt2parts(dt) { return Object.fromEntries( new Intl.DateTimeForm
  */
 export const dtMs = (dt: unknown): number => (dt ? new Date(dt as string | number).getTime() : 0);
 
+/** Default-locale formatters, built once: `toLocale*String` builds one per call. */
+const FMT_TIME = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit', hour12: false });
+const FMT_WEEKDAY = new Intl.DateTimeFormat([], { weekday: 'short' });
+const FMT_MONTH_DAY = new Intl.DateTimeFormat([], { month: 'short', day: 'numeric' });
+
 export const fmtAgo = (ts: number | undefined, from=new Date()): string => {
   if (ts === undefined || ts===0) return '-';
   const date = new Date(ts);
@@ -607,7 +603,7 @@ export const fmtAgo = (ts: number | undefined, from=new Date()): string => {
   const diffMins = Math.floor(diffMs / 60000);
   const diffHrs = Math.floor(diffMins / 60);
 
-  const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  const timeStr = FMT_TIME.format(date);
 
 // Reset to midnight to accurately compare calendar days
   const today = new Date(from.getFullYear(), from.getMonth(), from.getDate());
@@ -624,11 +620,11 @@ export const fmtAgo = (ts: number | undefined, from=new Date()): string => {
   }
   if (diffDays === 1) return `Yesterday ${timeStr}` 
   if (diffDays < 7) {
-    const weekday = date.toLocaleDateString([], { weekday: 'short' });
+    const weekday = FMT_WEEKDAY.format(date);
     return `${weekday} ${timeStr}`;
   }
 
-  const dateStr = date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const dateStr = FMT_MONTH_DAY.format(date);
   return `${dateStr} ${timeStr}`;
 };
 // //unused

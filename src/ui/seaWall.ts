@@ -1,26 +1,29 @@
 /**
  * seaWall.ts — the tag canvas on the cylinder, from the table out.
  *
- * The pinned headings hold a column at the front, the first of them exactly at sea level under
- * the star; every other pinned heading is stacked below it. The other tags tile one continuous
- * arc around the rest of the cylinder, ordered by the pin whose cluster they answer for, so the
- * canvas fills the wall instead of leaving a strip empty. Every cell — the pinned column
- * included — scatters the rows that kept it as link points, and no cell lists its rows as text.
- * Above the horizon the same canvas is mirrored as a reflection: the same tags, dark and
- * unlabelled, catching the star's light.
+ * The pinned headings hold one band at the front, its top edge exactly at sea level under the
+ * star: one column per top level heading, and the tags that heading names stack down it. A
+ * lone card starts at the star and reads east; several cards centre the newest card's run and
+ * the older cards interleave outward and descend on both sides, so turning either way reads
+ * the pins in date order. The other tags tile one continuous arc around the rest of the
+ * cylinder, ordered by the pin whose cluster they answer for, so the canvas fills the wall
+ * instead of leaving a strip empty. Every cell — the pinned band included — scatters the rows
+ * that kept it as link points, and no cell lists its rows as text. Above the horizon the same
+ * canvas is mirrored as a reflection: the same tags, dark and unlabelled, catching the star's
+ * light.
  *
  * Nothing is sampled or invented. A region exists because the table holds the tag, and a link
  * point exists because a row carried it. Spacing is the renderer's business; this module lays
  * the wall out in degrees.
  *
- * The cloud arc starts at the column's east edge and runs the long way round to its west edge,
- * so longitudes on the canvas are unwrapped past 180: the seam falls behind the pinned column,
+ * The cloud arc starts at the band's east edge and runs the long way round to its west edge,
+ * so longitudes on the canvas are unwrapped past 180: the seam falls behind the pinned band,
  * where nothing is read. A caller searching for a place tries the place and the place plus a
  * turn, which is all the wrapping the wall needs.
  */
 
 import type { AnyNodeKind, GraphNodeKind, TagGraph } from './restGraph';
-import { cropText, type SeaRow, type SeaTag } from './seaTags';
+import { cropText, type SeaPin, type SeaRow, type SeaTag } from './seaTags';
 import { SEA_REGION, clusterOf, type SeaRegionOptions, type SeaRegionShape } from './seaRegion';
 import { pinReach } from './restGraph';
 /** Characters a tag keeps in its wall label. */
@@ -94,8 +97,49 @@ export interface SeaWall {
 
 /** How a wall is built. */
 export interface WallOptions extends SeaRegionOptions {
+  /**
+   * The pin cards the wall is rooted at, newest first. Every top level heading takes a
+   * column and stacks the tags it names, so a card reads as a contiguous run of columns. A
+   * lone card starts at the star and reads east; several cards centre the newest card's run
+   * and alternate outward. Omitted or empty, the graph's roots stand one column each.
+   */
+  pins?: readonly SeaPin[];
   /** Cloud tags kept before the tail is left to the hover card; defaults to 220. */
   maxClouds?: number;
+}
+
+/**
+ * Degrees of wall the pinned band may take. Past this the columns narrow instead of the band
+ * growing, so the clouds keep half the cylinder whatever the pins ask for.
+ */
+const PIN_BAND_MAX = 180;
+
+/** One card's columns, before the band places them: its top level headings and its date. */
+interface PinGroup {
+  /** The card's date, or the tag's recency when no card named it; newer stands nearer the star. */
+  rank: number;
+  /** One entry per top level heading, the tags it stacks in its column, in card order. */
+  columns: string[][];
+}
+
+/**
+ * Order the groups so the newest stands at the centre and the rest alternate outward,
+ * descending on both sides.
+ *
+ * Even ranks go to the right of the centre and odd ranks to the left, so either side reads
+ * newest to oldest as it turns away from the star. Equal ranks keep their given order.
+ *
+ * @param groups the cards, in any order
+ * @returns the cards from west to east
+ */
+function interleave(groups: readonly PinGroup[]): PinGroup[] {
+  const newestFirst = [...groups].sort((a, b) => b.rank - a.rank);
+  const half = Math.floor(newestFirst.length / 2);
+  const out: PinGroup[] = new Array(newestFirst.length);
+  newestFirst.forEach((group, i) => {
+    out[i % 2 === 0 ? half + i / 2 : half - (i + 1) / 2] = group;
+  });
+  return out;
 }
 
 /** The shape a call is packed with: the sea region defaults, overridden field by field. */
@@ -278,7 +322,7 @@ export function buildWall(
   const natureOf = (tag: string): GraphNodeKind => stats.get(tag)?.kind ?? graph.kind.get(tag) ?? 'own';
   const weightOf = (tag: string): number => stats.get(tag)?.weight ?? graph.weight.get(tag) ?? 0;
 
-  /* ── the pinned column ─────────────────────────────────────────────────── */
+  /* ── the pinned band ───────────────────────────────────────────────────── */
 
   const pinTags = [...graph.roots]
     .filter((tag) => graph.weight.has(tag) || stats.has(tag))
@@ -289,77 +333,108 @@ export function buildWall(
     [...stats.keys()].filter((tag) => graph.alias.get(tag) === pin)
       .sort((a, b) => weightOf(b) - weightOf(a) || a.localeCompare(b));
 
+  /* A card counts only while a heading still roots the graph. Without readable cards the
+     roots stand one column each, ordered the way the band orders cards. */
+  const cards = (opts.pins ?? []).filter((card) =>
+    card.columns.some((column) => column.some((tag) => pinSet.has(tag))));
+  const groups = cards.length > 0
+    ? interleave(cards.map((card) => ({
+      rank: card.stamp,
+      columns: card.columns
+        .map((column) => column.filter((tag) => pinSet.has(tag)))
+        .filter((column) => column.length > 0),
+    })))
+    : interleave(pinTags.map((tag) => ({ rank: recency(tag), columns: [[tag]] })));
+
+  /* A lone card starts at the star and reads east, so its first heading is the first column
+     under the star. Several cards centre the newest card's run and fall away on both sides;
+     `interleave` seats that card at the middle slot, so only the columns before it count. */
+  const columns = groups.flatMap((group) => group.columns);
+  const newest = Math.floor(groups.length / 2);
+  let start = 0;
+  for (let i = 0; i < newest; i++) start += groups[i].columns.length;
+  const centre = groups.length <= 1
+    ? 0 : start + (groups[newest]?.columns.length ?? 0) / 2 - 0.5;
+
   const entries: WallRegion[] = [];
   const points: WallPoint[] = [];
-  const band = shape.pinCol / 2;
-  let cursor = 0;
+  /* A column keeps the width a lone pin had until the band would take more than half the
+     wall; past that the columns narrow instead of the band growing. */
+  const colW = columns.length === 0
+    ? 0 : Math.min(shape.pinCol, PIN_BAND_MAX / columns.length);
+  const origin = groups.length <= 1 || columns.length === 0 ? 0 : -(centre + 0.5) * colW;
+  const starTag = columns[Math.floor(centre)]?.[0] ?? null;
 
-  for (const pin of pinTags) {
-    const rows = [...rowsOf(pin)];
-    const aliases = aliasesOf(pin);
-    const room = aliases.length > 0 ? shape.aliasBand : 0;
-    const height = clamp(shape.areaPerRow * Math.max(1, weightOf(pin)) / shape.pinCol,
-      shape.minH, shape.maxH);
-    const bottom = cursor - (height + room);
-    const cellW = aliases.length > 0 ? shape.pinCol / aliases.length : 0;
-    aliases.forEach((alias, i) => {
-      const aliasRows = [...rowsOf(alias)];
+  columns.forEach((tags, i) => {
+    const lon0 = origin + colW * i;
+    const lon1 = lon0 + colW;
+    let cursor = 0;
+    for (const pin of tags) {
+      const rows = [...rowsOf(pin)];
+      const aliases = aliasesOf(pin);
+      const room = aliases.length > 0 ? shape.aliasBand : 0;
+      const height = clamp(shape.areaPerRow * Math.max(1, weightOf(pin)) / colW,
+        shape.minH, shape.maxH);
+      const bottom = cursor - (height + room);
+      const cellW = aliases.length > 0 ? colW / aliases.length : 0;
+      aliases.forEach((alias, j) => {
+        const aliasRows = [...rowsOf(alias)];
+        const region: WallRegion = {
+          key: alias,
+          tag: alias,
+          reach: 'alias',
+          nature: natureOf(alias),
+          weight: weightOf(alias),
+          score: stats.get(alias)?.score ?? 0,
+          freq: stats.get(alias)?.freq ?? weightOf(alias),
+          ...(stats.get(alias)?.lambda === undefined ? {} : { lambda: stats.get(alias)?.lambda }),
+          lon0: lon0 + cellW * j,
+          lon1: lon0 + cellW * (j + 1),
+          rise0: bottom,
+          rise1: bottom + room,
+          above: false,
+          reflection: false,
+          star: false,
+          label: true,
+          pin,
+          labelText: `#${cropText(alias, WALL_TAG_CROP)}`,
+          rows: aliasRows,
+          points: [],
+        };
+        /* A spelling is still a cell with rows: its links are stars like any other tag's. */
+        region.points = scatter(region, aliasRows, false);
+        points.push(...region.points);
+        entries.push(region);
+      });
       const region: WallRegion = {
-        key: alias,
-        tag: alias,
-        reach: 'alias',
-        nature: natureOf(alias),
-        weight: weightOf(alias),
-        score: stats.get(alias)?.score ?? 0,
-        freq: stats.get(alias)?.freq ?? weightOf(alias),
-        ...(stats.get(alias)?.lambda === undefined ? {} : { lambda: stats.get(alias)?.lambda }),
-        lon0: -band + cellW * i,
-        lon1: -band + cellW * (i + 1),
-        rise0: bottom,
-        rise1: bottom + room,
+        key: pin,
+        tag: pin,
+        reach: 'pinned',
+        nature: natureOf(pin),
+        weight: weightOf(pin),
+        score: stats.get(pin)?.score ?? 0,
+        freq: stats.get(pin)?.freq ?? weightOf(pin),
+        ...(stats.get(pin)?.lambda === undefined ? {} : { lambda: stats.get(pin)?.lambda }),
+        lon0,
+        lon1,
+        rise0: bottom + room,
+        rise1: cursor,
         above: false,
         reflection: false,
-        star: false,
+        star: pin === starTag,
         label: true,
-        pin,
-        labelText: `#${cropText(alias, WALL_TAG_CROP)}`,
-        rows: aliasRows,
+        labelText: `#${cropText(pin, WALL_TAG_CROP)}`,
+        rows,
         points: [],
       };
-      /* A spelling is still a cell with rows: its links are stars like any other tag's. */
-      region.points = scatter(region, aliasRows, false);
+      /* The curated heading is a cell like the rest: its evidence hangs under it as points,
+         not as a list of links. */
+      region.points = scatter(region, rows, false);
       points.push(...region.points);
       entries.push(region);
-    });
-    const isStar = pin === pinTags[0];
-    const region: WallRegion = {
-      key: pin,
-      tag: pin,
-      reach: 'pinned',
-      nature: natureOf(pin),
-      weight: weightOf(pin),
-      score: stats.get(pin)?.score ?? 0,
-      freq: stats.get(pin)?.freq ?? weightOf(pin),
-      ...(stats.get(pin)?.lambda === undefined ? {} : { lambda: stats.get(pin)?.lambda }),
-      lon0: -band,
-      lon1: band,
-      rise0: bottom + room,
-      rise1: cursor,
-      above: false,
-      reflection: false,
-      star: isStar,
-      label: true,
-      labelText: `#${cropText(pin, WALL_TAG_CROP)}`,
-      rows,
-      points: [],
-    };
-    /* The curated heading is a cell like the rest: its evidence hangs under it as points,
-       not as a list of links. */
-    region.points = scatter(region, rows, false);
-    points.push(...region.points);
-    entries.push(region);
-    cursor = bottom - shape.shelfGap;
-  }
+      cursor = bottom - shape.shelfGap;
+    }
+  });
 
   /* ── the cloud ring ────────────────────────────────────────────────────── */
 
@@ -391,7 +466,7 @@ export function buildWall(
     ordered.push({ tag, weight: weightOf(tag), reach: reachOf(tag), nature: natureOf(tag) });
   }
 
-  const arc = { start: band, end: 360 - band };
+  const arc = { start: origin + columns.length * colW, end: origin + 360 };
   const placed = tileClouds(ordered, shape, arc.start, arc.end - arc.start);
 
   let above = 0;
@@ -451,7 +526,7 @@ export function buildWall(
     regions: entries,
     pins: entries.filter((region) => region.reach === 'pinned' && !region.reflection),
     points,
-    star: { lon: 0, rise: 0, pin: pinTags[0] ?? null },
+    star: { lon: 0, rise: 0, pin: starTag },
     above,
     below,
     arc,
@@ -461,7 +536,7 @@ export function buildWall(
 /**
  * The region a wall place falls in.
  *
- * Longitudes past 180 belong to the cloud arc, whose seam is hidden behind the pinned column;
+ * Longitudes past 180 belong to the cloud arc, whose seam is hidden behind the pinned band;
  * a place is therefore tried as it is and once more a turn away.
  *
  * @param regions the wall's regions

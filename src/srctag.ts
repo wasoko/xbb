@@ -1169,6 +1169,39 @@ export interface PinTag {
   level: number;
 }
 
+/** One heading line of a pin card: its level and the tags it names, in text order. */
+export interface PinHeading {
+  level: number;
+  tags: string[];
+}
+
+/**
+ * The Markdown headings of one pin card, each with the `#tag` tokens it names.
+ *
+ * The rules are the ones `ui/cs1.tsx` renders with: heading lines only, closing hashes
+ * stripped, a tag after start or whitespace. A heading that names no tag is dropped, so
+ * every entry is a line a caller can read as one unit.
+ *
+ * @param txt pin card text
+ * @returns one entry per heading line that names a tag, in text order
+ */
+export function pinHeadingRows(txt: string): PinHeading[] {
+  const out: PinHeading[] = [];
+  for (const raw of (txt ?? '').split('\n')) {
+    const m = raw.match(HEADING_RX);
+    if (!m) continue;
+    const level = m[1].length;
+    const text = m[2].replace(CLOSING_HASH_RX, '').trim();
+    if (!text) continue;
+    const tags: string[] = [];
+    for (const hit of text.matchAll(HASHTAG_RX)) {
+      if (!tags.includes(hit[2])) tags.push(hit[2]);
+    }
+    if (tags.length > 0) out.push({ level, tags });
+  }
+  return out;
+}
+
 /**
  * `#tag` tokens in the Markdown headings of one pin card, following the same
  * rules `ui/cs1.tsx` renders with: heading lines only, closing hashes stripped,
@@ -1180,17 +1213,11 @@ export interface PinTag {
 export function pinTags(txt: string): PinTag[] {
   const out: PinTag[] = [];
   const seen = new Set<string>();
-  for (const raw of (txt ?? '').split('\n')) {
-    const m = raw.match(HEADING_RX);
-    if (!m) continue;
-    const level = m[1].length;
-    const text = m[2].replace(CLOSING_HASH_RX, '').trim();
-    if (!text) continue;
-    for (const hit of text.matchAll(HASHTAG_RX)) {
-      const tag = hit[2];
+  for (const row of pinHeadingRows(txt)) {
+    for (const tag of row.tags) {
       if (seen.has(tag)) continue;
       seen.add(tag);
-      out.push({ tag, level });
+      out.push({ tag, level: row.level });
     }
   }
   return out;

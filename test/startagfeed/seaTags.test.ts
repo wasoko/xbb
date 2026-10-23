@@ -6,10 +6,12 @@
  * sections are read back into the web, theme and burst edges the hover draws.
  */
 
+import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
+import type { Da } from '../../src/sdb';
 import {
   cropText, graphFromTags, parseRelations, parseTaxonomy, parseTaxonomyDoc, relationsOf,
-  rowAction, seaRowOf, type SeaRelations,
+  rowAction, seaPinsOf, seaRowOf, type SeaRelations,
 } from '../../src/ui/seaTags';
 
 const TABLE = [
@@ -113,6 +115,43 @@ describe('tags from the table alone', () => {
     expect([...graph.roots]).toEqual(['alpha', 'area']);
     expect(graph.edges.get('area')?.get('area/topic')).toBe(9);
     expect(graph.kind.get('area/topic')).toBe('theme');
+  });
+});
+
+describe('pin cards as columns', () => {
+  const doc = parseTaxonomyDoc(TABLE);
+  const graph = graphFromTags(doc.tags, doc.relations);
+  const card = (ref: string, txt: string, dt: Date, modAt?: Date): Da => ({
+    ref, txt, type: 'md', tags: ['pin'], dt, modAt, rec: {},
+  });
+
+  it('reads a card at its own top heading level', () => {
+    const cards = seaPinsOf([
+      card('pin:a', '# #alpha\n## #area', new Date('2026-01-01')),
+    ], graph);
+    expect(cards[0].columns).toEqual([['alpha']]);
+  });
+
+  it('falls back to the second level when a card has no first level heading', () => {
+    const cards = seaPinsOf([
+      card('pin:a', '## #alpha\n## #area\n### #beta', new Date('2026-01-01')),
+    ], graph);
+    expect(cards[0].columns).toEqual([['alpha'], ['area']]);
+  });
+
+  it('keeps the tags one heading names in one column', () => {
+    const cards = seaPinsOf([
+      card('pin:a', '# #alpha #area\n# #alpha', new Date('2026-01-01')),
+    ], graph);
+    expect(cards[0].columns).toEqual([['alpha', 'area']]);
+  });
+
+  it('orders the cards by the later of their dt and modAt', () => {
+    const cards = seaPinsOf([
+      card('pin:old', '## #alpha', new Date('2026-01-01')),
+      card('pin:new', '## #area', new Date('2026-01-01'), new Date('2026-02-01')),
+    ], graph);
+    expect(cards.map((entry) => entry.ref)).toEqual(['pin:new', 'pin:old']);
   });
 });
 

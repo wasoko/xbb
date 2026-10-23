@@ -22,6 +22,7 @@ import { bulletKv, bulletList, splitSections, subSections } from './recrMd';
 import { GATE_REF, RECR_SOURCE_ID, RECR_TYPE, SECRET_REF, TASK_COMPLETE } from './recrConst';
 import { filterTools, gateTools, loadGate, type GateConfig } from './recrGate';
 import { runBodyWithPath, SrcUnavailableError, type RecrScriptContext } from './runsrc';
+import { isExtensionPage } from './srcfeedTab';
 import {
   recrHost, buildContext, buildRequestState, defaultToolMeta,
   initDefaultPlugins,
@@ -1268,13 +1269,15 @@ export class LlmHttpError extends Error {
 const OLLAMA_PROXY_PATH = '/functions/v1/v1a';
 
 /**
- * The Supabase proxy URL that answers `base`, or undefined when the provider is
- * reached directly.
+ * The Supabase proxy URL that answers `base` for a webapp page, or undefined when
+ * the provider is reached directly.
  *
  * Only `ollama.com` routes here: it answers `OPTIONS` with 405 and carries no
- * CORS header, so a page cannot call it at all. The function pins the upstream
- * host and accepts only `/v1/chat/completions`, so the page-side path is rebuilt
- * from the provider root and a trailing `/v1` on the configured base is dropped.
+ * CORS header, so a webapp page cannot call it at all. An extension page skips
+ * this function entirely, because its host permissions answer CORS. The function
+ * pins the upstream host and accepts only `/v1/chat/completions`, so the page-side
+ * path is rebuilt from the provider root and a trailing `/v1` on the configured
+ * base is dropped.
  *
  * @param base provider root, already trimmed of trailing slashes
  * @returns absolute function URL, or undefined for every other provider
@@ -1316,16 +1319,20 @@ async function supabaseAccessToken(): Promise<string> {
  * page origin — that is how the dev-server proxy in `vite.config.ts` keeps the
  * call same-origin and avoids the CORS preflight the provider would refuse.
  *
- * An `ollama.com` base goes to the Supabase function instead; it takes the
- * request path rather than a target URL, and reads the Ollama key from
- * `x-ollama-auth` rather than `Authorization`
+ * An `ollama.com` base goes to the Supabase function from a webapp page; it
+ * takes the request path rather than a target URL, and reads the Ollama key from
+ * `x-ollama-auth` rather than `Authorization`. An extension page is the
+ * exception: it posts to the provider directly, because its host permissions
+ * answer CORS
  * ([topology](docs/recr-agloop.md#5-reaching-a-provider-cors-decides-the-topology)).
  */
 export async function fetchLLM(opts: FetchLLMOptions): Promise<FetchResult> {
   const { messages, tools, config, settings, onChunk, abortSignal } = opts;
 
   const base = config.apiBaseUrl.replace(/\/+$/, '');
-  const ollamaProxy = ollamaProxyTarget(base);
+  // An extension page reaches the provider through its host permissions, so it
+  // skips the proxy the webapp needs; the function's allowlist names page origins.
+  const ollamaProxy = isExtensionPage() ? undefined : ollamaProxyTarget(base);
   const url = ollamaProxy ?? `${base}/v1/chat/completions`;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',

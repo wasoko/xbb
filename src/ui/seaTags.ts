@@ -11,7 +11,8 @@
  * jump otherwise, which is the split the app's own row boxes make.
  */
 
-import type { Da } from '../sdb';
+import { daStamp, type Da } from '../sdb';
+import { pinHeadingRows } from '../srctag';
 import type { PinGraphSeed } from './seaPinGraph';
 import {
   GRAPH_NODE_KIND, GRAPH_REACH, headingTags, pinReach, type AnyNodeKind, type GraphNodeKind,
@@ -46,6 +47,16 @@ export interface SeaRow {
   label: string;
   action: SeaAction;
   type: string;
+}
+
+/** One pin card as the wall's band reads it: its top level heading columns and its date. */
+export interface SeaPin {
+  /** The card's row ref, which keeps two cards' columns apart. */
+  ref: string;
+  /** Tags each top level heading names, in card order; one heading is one column. */
+  columns: string[][];
+  /** The card's effective update time, the later of its `dt` and `modAt`, in epoch ms. */
+  stamp: number;
 }
 
 /** Characters a row's title keeps in a block; the hover card holds the whole text. */
@@ -212,6 +223,45 @@ export function seaTagsFromSeed(seed: PinGraphSeed): SeaTag[] {
 export function seaTagPool(taxonomy: readonly SeaTag[], seed: PinGraphSeed | null): SeaTag[] {
   if (taxonomy.length > 0) return taxonomy as SeaTag[];
   return seed === null ? [] : seaTagsFromSeed(seed);
+}
+
+/**
+ * The pin cards as the wall's columns, newest first.
+ *
+ * A card's top level is the smallest heading level it uses — `#` when it has first level
+ * headings, `##` when it starts at the second — because that is the level the card's own
+ * structure reads at. Every heading line at that level is one column, and the tags it names
+ * stack down that column, so a card that writes two tags in one heading keeps them together.
+ * Names are folded to the graph's node names the way the roots were, and a tag an earlier
+ * line already named keeps that line's column.
+ *
+ * @param pins the pin cards the seed read, in any order
+ * @param graph the graph over that seed, for each heading's node name
+ * @returns one entry per card that heads a rooted tag, newest first
+ */
+export function seaPinsOf(pins: readonly Da[], graph: TagGraph): SeaPin[] {
+  const out: SeaPin[] = [];
+  const seen = new Set<string>();
+  for (const pin of pins) {
+    const rows = pinHeadingRows(pin.txt ?? '');
+    if (rows.length === 0) continue;
+    const top = Math.min(...rows.map((row) => row.level));
+    const columns: string[][] = [];
+    for (const row of rows) {
+      if (row.level !== top) continue;
+      const tags: string[] = [];
+      for (const raw of row.tags) {
+        const name = graph.name(raw);
+        if (!graph.roots.has(name) || seen.has(name)) continue;
+        seen.add(name);
+        tags.push(name);
+      }
+      if (tags.length > 0) columns.push(tags);
+    }
+    if (columns.length === 0) continue;
+    out.push({ ref: pin.ref, columns, stamp: daStamp(pin) });
+  }
+  return out.sort((a, b) => b.stamp - a.stamp);
 }
 
 /**
