@@ -2,11 +2,12 @@
  * seaWall.test.ts — the tag canvas as a function of the table.
  *
  * The wall owes four things to a reader: the pinned headings share one band whose top edge is
- * sea level, a column each, with the newest pin card under the star; a lone card divides the
- * band into its top level headings; the clouds tile one continuous arc without a gap; and
- * every point is a row the table actually kept. The tests pin those, the interleaving of the
- * older cards outward from the star, the mirrored half above the horizon, and the determinism
- * of the scatter.
+ * sea level at longitude 0, one column each, with the newest pin card starting on the star and
+ * the rest reading rightwards; a lone card divides the band into its top level headings, with
+ * the next heading level tiled below; the recent band starts on the other side of the same
+ * meridian and runs leftwards; and every point is a row the table actually kept. The tail
+ * stays on the rear half. The tests pin those, the mirrored half above the horizon, and the
+ * determinism of the scatter.
  */
 
 import 'fake-indexeddb/auto';
@@ -70,13 +71,13 @@ const BAND_PINS = BAND_TAGS.map((tag, i) => ({
 describe('the pin band', () => {
   const wall = buildWall(GRAPH, TAGS, rowsOf, SHAPE);
 
-  it('hangs the newest pinned heading from sea level under the star', () => {
+  it('hangs the newest pinned heading from sea level at the star edge', () => {
     expect(wall.star).toEqual({ lon: 0, rise: 0, pin: 'alpha' });
     const alpha = wall.pins.find((pin) => pin.tag === 'alpha');
     expect(alpha?.star).toBe(true);
     expect(alpha?.rise1).toBeCloseTo(0, 9);
-    expect(alpha?.lon0).toBeCloseTo(-23, 9);
-    expect(alpha?.lon1).toBeCloseTo(23, 9);
+    expect(alpha?.lon0).toBeCloseTo(-46, 9);
+    expect(alpha?.lon1).toBeCloseTo(0, 9);
   });
 
   it('stands every pinned heading from sea level down, side by side', () => {
@@ -108,46 +109,43 @@ describe('the pin band', () => {
 describe('the pin cards', () => {
   const SHAPE = { pinCol: 20 };
 
-  it('puts the newest card under the star and interleaves the rest outward', () => {
+  it('puts the newest card at the star and reads the rest rightwards', () => {
     const wall = buildWall(BAND_GRAPH, BAND_TAGS, BAND_ROWS, { ...SHAPE, pins: BAND_PINS });
-    expect(wall.pins.map((pin) => pin.tag)).toEqual(['four', 'two', 'one', 'three', 'five']);
+    expect(wall.pins.map((pin) => pin.tag)).toEqual(['one', 'two', 'three', 'four', 'five']);
     expect(wall.star.pin).toBe('one');
-    expect(wall.arc).toEqual({ start: 50, end: 310 });
+    expect(wall.arc).toEqual({ start: 90, end: 260 });
   });
 
-  it('descends by date on both sides of the star', () => {
+  it('descends by date as it turns right from the star', () => {
     const wall = buildWall(BAND_GRAPH, BAND_TAGS, BAND_ROWS, { ...SHAPE, pins: BAND_PINS });
     const stamps = new Map(BAND_PINS.map((pin) => [pin.columns[0][0], pin.stamp]));
-    const tags = wall.pins.map((pin) => pin.tag);
-    const middle = tags.indexOf(wall.star.pin ?? '');
-    for (let i = 1; i <= middle; i++) {
-      expect(stamps.get(tags[middle - i])!).toBeLessThan(stamps.get(tags[middle - i + 1])!);
-    }
-    for (let i = middle + 1; i < tags.length; i++) {
-      expect(stamps.get(tags[i])!).toBeLessThan(stamps.get(tags[i - 1])!);
+    const pins = wall.pins;
+    for (let i = 1; i < pins.length; i++) {
+      expect(stamps.get(pins[i].tag)!).toBeLessThan(stamps.get(pins[i - 1].tag)!);
+      expect(pins[i].lon1).toBeCloseTo(pins[i - 1].lon0, 9);
     }
   });
 
-  it('tiles the band with the columns, the newest under the star', () => {
+  it('tiles the band with the columns, the newest at the star edge', () => {
     const wall = buildWall(BAND_GRAPH, BAND_TAGS, BAND_ROWS, { ...SHAPE, pins: BAND_PINS });
     const sorted = [...wall.pins].sort((a, b) => a.lon0 - b.lon0);
-    expect(sorted[0].lon0).toBeCloseTo(-50, 9);
-    expect(sorted[sorted.length - 1].lon1).toBeCloseTo(50, 9);
+    expect(sorted[0].lon0).toBeCloseTo(-100, 9);
+    expect(sorted[sorted.length - 1].lon1).toBeCloseTo(0, 9);
     for (let i = 1; i < sorted.length; i++) {
       expect(sorted[i].lon0).toBeCloseTo(sorted[i - 1].lon1, 6);
     }
   });
 
-  it('starts a lone card at the star and reads its headings east', () => {
+  it('starts a lone card at the star and reads its headings rightwards', () => {
     const wall = buildWall(BAND_GRAPH, BAND_TAGS, BAND_ROWS, {
       ...SHAPE,
       pins: [{ ref: 'pin:solo', columns: [['one'], ['two'], ['three']], stamp: 9 }],
     });
     expect(wall.pins.map((pin) => pin.tag)).toEqual(['one', 'two', 'three']);
     expect(wall.star.pin).toBe('one');
-    expect(wall.pins[0].lon0).toBeCloseTo(0, 9);
-    expect(wall.pins[0].lon1).toBeCloseTo(20, 9);
-    expect(wall.pins[2].lon1).toBeCloseTo(60, 9);
+    expect(wall.pins[0].lon0).toBeCloseTo(-20, 9);
+    expect(wall.pins[0].lon1).toBeCloseTo(0, 9);
+    expect(wall.pins[2].lon0).toBeCloseTo(-60, 9);
   });
 
   it('stacks the tags one heading names down its column', () => {
@@ -160,11 +158,11 @@ describe('the pin cards', () => {
     expect(two.lon0).toBeCloseTo(one.lon0, 9);
     expect(two.lon1).toBeCloseTo(one.lon1, 9);
     expect(two.rise1).toBeLessThan(one.rise0);
-    expect(three.lon0).toBeCloseTo(one.lon1, 9);
+    expect(three.lon0).toBeCloseTo(one.lon0 - 20, 9);
     expect(three.rise1).toBeCloseTo(0, 9);
   });
 
-  it('keeps a card’s headings together as one run straddling the star', () => {
+  it('keeps a card’s headings together as one run to the right of the star', () => {
     const wall = buildWall(BAND_GRAPH, BAND_TAGS, BAND_ROWS, {
       ...SHAPE,
       pins: [
@@ -173,10 +171,11 @@ describe('the pin cards', () => {
         { ref: 'pin:c', columns: [['four']], stamp: 1 },
       ],
     });
-    expect(wall.pins.map((pin) => pin.tag)).toEqual(['three', 'one', 'two', 'four']);
+    expect(wall.pins.map((pin) => pin.tag)).toEqual(['one', 'two', 'three', 'four']);
     expect(wall.star.pin).toBe('one');
-    expect(wall.pins[1].lon0).toBeCloseTo(-20, 9);
-    expect(wall.pins[2].lon1).toBeCloseTo(20, 9);
+    expect(wall.pins[0].lon0).toBeCloseTo(-20, 9);
+    expect(wall.pins[1].lon1).toBeCloseTo(-20, 9);
+    expect(wall.pins[2].lon1).toBeCloseTo(-40, 9);
   });
 
   it('draws no band when no card roots the graph', () => {
@@ -186,19 +185,90 @@ describe('the pin cards', () => {
     const bare = buildWall(graphFromTags(cloudTags, NO_EDGES), cloudTags, BAND_ROWS);
     expect(bare.pins).toEqual([]);
     expect(bare.star).toEqual({ lon: 0, rise: 0, pin: null });
-    expect(bare.arc).toEqual({ start: 0, end: 360 });
+    expect(bare.arc).toEqual({ start: 90, end: 270 });
     const clouds = bare.regions.filter((region) => !region.reflection);
-    expect(clouds[0].lon0).toBeCloseTo(0, 9);
-    expect(clouds[clouds.length - 1].lon1).toBeCloseTo(360, 6);
+    expect(clouds[0].lon0).toBeCloseTo(90, 9);
+    expect(clouds[clouds.length - 1].lon1).toBeCloseTo(270, 6);
+  });
+
+  it('draws the next heading level as a treemap under its top pin', () => {
+    const wall = buildWall(BAND_GRAPH, BAND_TAGS, BAND_ROWS, {
+      ...SHAPE,
+      pins: [{
+        ref: 'pin:nested', columns: [['one']], children: [['two']], stamp: 9,
+      }],
+    });
+    expect(wall.pins.map((pin) => pin.tag)).toEqual(['one']);
+    const one = wall.regions.find((region) => region.tag === 'one');
+    const two = wall.regions.find((region) => region.tag === 'two');
+    expect(two?.side).toBe('pin');
+    expect(two?.depth).toBe(1);
+    expect(two?.parent).toBe('one');
+    expect(two?.lon0).toBeCloseTo(one!.lon0, 9);
+    expect(two?.lon1).toBeCloseTo(one!.lon1, 9);
+    expect(two?.rise1).toBeLessThan(one!.rise0);
   });
 });
 
-describe('the cloud ring', () => {
+describe('the recent band', () => {
+  const wall = buildWall(GRAPH, TAGS, rowsOf, {
+    pinCol: 20,
+    emerging: [{ tag: 'gamma', score: 3, children: ['delta'] }],
+  });
+  const recent = wall.recent[0];
+  const child = wall.regions.find((region) => region.tag === 'delta');
+
+  it('starts at the star edge and runs leftwards from it', () => {
+    expect(recent.tag).toBe('gamma');
+    expect(recent.side).toBe('recent');
+    expect(recent.lon0).toBeCloseTo(0, 9);
+    expect(recent.lon1).toBeCloseTo(20, 9);
+    expect(wall.pins.every((pin) => pin.lon1 <= 0)).toBe(true);
+  });
+
+  it('draws its one-hop neighbours as the treemap below it', () => {
+    expect(child?.side).toBe('recent');
+    expect(child?.depth).toBe(1);
+    expect(child?.parent).toBe('gamma');
+    expect(child?.lon0).toBeCloseTo(recent.lon0, 9);
+    expect(child?.lon1).toBeCloseTo(recent.lon1, 9);
+    expect(child?.rise1).toBeLessThan(recent.rise0);
+  });
+
+  it('keeps the recent tags out of the rear cloud tail', () => {
+    const tail = wall.regions.filter((region) => region.side === 'tail' && !region.reflection);
+    expect(tail.some((region) => region.tag === 'gamma')).toBe(false);
+    expect(tail.some((region) => region.tag === 'delta')).toBe(false);
+  });
+});
+
+describe('recency', () => {
+  it('dims a row by where its stamp sits between the oldest and newest points', () => {
+    const stamped = (tag: string): SeaRow[] => [
+      { ...row(tag, 0), stamp: tag === 'one' ? 2_000 : 1_000 },
+      { ...row(tag, 1), stamp: tag === 'one' ? 1_000 : 500 },
+    ];
+    const wall = buildWall(BAND_GRAPH, BAND_TAGS, stamped, { pinCol: 20 });
+    expect(wall.points.find((point) => point.tag === 'one' && point.stamp === 2_000)?.recency)
+      .toBeCloseTo(1, 9);
+    expect(wall.points.find((point) => point.tag === 'one' && point.stamp === 1_000)?.recency)
+      .toBeCloseTo(1 / 3, 9);
+    expect(wall.star.recency).toBeCloseTo(1, 9);
+  });
+
+  it('leaves a star undimmed when its tag kept no row', () => {
+    const wall = buildWall(BAND_GRAPH, BAND_TAGS,
+      (tag) => (tag === 'one' ? [] : BAND_ROWS(tag)), { pinCol: 20 });
+    expect(wall.star.recency).toBeUndefined();
+  });
+});
+
+describe('the rear tail', () => {
   const wall = buildWall(GRAPH, TAGS, rowsOf, SHAPE);
   const clouds = wall.regions.filter((region) => !region.reflection
     && region.reach !== 'pinned' && region.reach !== 'alias');
 
-  it('starts at the column edge and tiles the arc with no gap', () => {
+  it('starts at the rear edge and tiles the arc with no gap', () => {
     const sorted = [...clouds].sort((a, b) => a.lon0 - b.lon0);
     expect(sorted[0].lon0).toBeCloseTo(wall.arc.start, 9);
     expect(sorted[sorted.length - 1].lon1).toBeCloseTo(wall.arc.end, 9);

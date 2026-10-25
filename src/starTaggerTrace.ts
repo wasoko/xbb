@@ -29,6 +29,14 @@ export interface StarTaxonomyRow {
   burst?: number;
   /** Channel that carried the highest-scoring row. */
   top?: string;
+  /** Rows in the trend pass's recent head that kept it. */
+  recent?: number;
+  /** Rows in the trend pass's older tail that kept it. */
+  base?: number;
+  /** Recent rate over older rate; absent when neither slice kept it. */
+  lift?: number;
+  /** Trend score when the tag emerged; absent otherwise. */
+  trend?: number;
 }
 
 /** The generated section and the facts a caller may want to assert on. */
@@ -144,6 +152,7 @@ export function buildStarTaxonomy(
   const table: StarTaxonomyRow[] = [...kept].map((tag) => {
     const stat = stats.get(tag);
     const lambda = graph.lambda.get(tag);
+    const reading = seed.trend?.get(tag);
     return {
       tag,
       reach: seed.reach.get(tag) ?? 'own',
@@ -154,6 +163,10 @@ export function buildStarTaxonomy(
       ...(lambda === undefined ? {} : { lambda }),
       ...(stat?.burst === undefined ? {} : { burst: stat.burst }),
       ...(stat?.top === undefined ? {} : { top: stat.top }),
+      ...(reading === undefined ? {} : {
+        recent: reading.recent, base: reading.base, lift: reading.lift,
+      }),
+      ...(reading?.emerging === true ? { trend: reading.score } : {}),
     };
   }).sort((a, b) => b.weight - a.weight || b.score - a.score || a.tag.localeCompare(b.tag));
 
@@ -177,13 +190,15 @@ export function buildStarTaxonomy(
   for (const note of setup.notes) header.push(`note: ${note}`);
 
   const rows: string[] = [
-    '| tag | reach | kind | score | weight | freq | λ | burst | top |',
-    '|---|---|---|---|---|---|---|---|---|',
+    '| tag | reach | kind | score | weight | freq | λ | burst | top | recent | base | lift | trend |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|---|',
   ];
   for (const row of table.slice(0, limits.trace)) {
     rows.push(`| ${cell(row.tag)} | ${row.reach} | ${row.kind} | ${fixed(row.score, 3)}`
       + ` | ${row.weight} | ${row.freq} | ${fixed(row.lambda)}`
-      + ` | ${row.burst === undefined ? '-' : row.burst} | ${row.top ?? '-'} |`);
+      + ` | ${row.burst === undefined ? '-' : row.burst} | ${row.top ?? '-'}`
+      + ` | ${row.recent ?? '-'} | ${row.base ?? '-'} | ${fixed(row.lift)}`
+      + ` | ${fixed(row.trend)} |`);
   }
   if (table.length > limits.trace) {
     rows.push(`\ntrace cut at ${limits.trace} of ${table.length} nodes.`);

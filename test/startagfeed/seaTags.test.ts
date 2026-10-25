@@ -146,6 +146,22 @@ describe('pin cards as columns', () => {
     expect(cards[0].columns).toEqual([['alpha', 'area']]);
   });
 
+  it('reads the next heading level as each column’s children', () => {
+    const cards = seaPinsOf([
+      card('pin:a', '# #alpha\n## #beta\n# #area\n## #gamma', new Date('2026-01-01')),
+    ], graph);
+    expect(cards[0].columns).toEqual([['alpha'], ['area']]);
+    expect(cards[0].children).toEqual([['beta'], ['gamma']]);
+  });
+
+  it('does not repeat a top heading as another column’s child', () => {
+    const cards = seaPinsOf([
+      card('pin:a', '# #alpha\n## #area\n# #area', new Date('2026-01-01')),
+    ], graph);
+    expect(cards[0].columns).toEqual([['alpha'], ['area']]);
+    expect(cards[0].children).toEqual([[], []]);
+  });
+
   it('orders the cards by the later of their dt and modAt', () => {
     const cards = seaPinsOf([
       card('pin:old', '## #alpha', new Date('2026-01-01')),
@@ -167,6 +183,12 @@ describe('cropText and rows', () => {
     const row = seaRowOf({ ref: 'https://example.com/a', txt: 'a long title', type: 'tab', rec: {} });
     expect(row.action).toBe('link');
     expect(row.text).toBe('a long title');
+
+    const stamped = seaRowOf({
+      ref: 'https://example.com/b', txt: 'b', type: 'tab', rec: { visitTime: 999 },
+      dt: new Date(1), modAt: new Date(2),
+    });
+    expect(stamped.stamp).toBe(999);
   });
 });
 

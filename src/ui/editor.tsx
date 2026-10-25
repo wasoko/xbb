@@ -1,7 +1,7 @@
 // src/components/EditorSplitPane.tsx
 
 // src/components/Chat.tsx
-import { useState, useEffect, useRef, useSyncExternalStore } from 'react';
+import { useState, useEffect, useRef, useSyncExternalStore, useCallback, useMemo } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import * as li from 'lucide-react';
 import { toast } from 'sonner';
@@ -32,7 +32,6 @@ import {
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
 import { markdown } from '@codemirror/lang-markdown';
-import { search } from '@codemirror/search';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { LocalErrorBoundary } from './ErrorBoundaryOutlet';
 import { useTabSyncState } from './tabSync';
@@ -46,10 +45,25 @@ import { subscribeNav } from './navStore';
 import { MdText } from './MdText';
 import { openLinks } from './openLinks';
 
-/** Extensions every row gets. `search()` must be part of the configured extensions: the
- *  find command otherwise appends it for that one transaction, and react-codemirror
- *  reconfigures on every render, which drops appended extensions and closes the panel. */
-const BASE_EXTENSIONS = [search(), openLinks];
+/** Extensions every row gets.
+ *
+ *  `search()` is not configured here: `basicSetup` already carries `searchKeymap`, and
+ *  `openSearchPanel` appends the search extension itself. The panel then stays open only
+ *  because the editor's props keep their identity across renders (see `BASIC_SETUP`,
+ *  `extensions` and `handleContentChange`); a reconfigure discards appended extensions.
+ *  Importing `@codemirror/search` directly would also let a downstream bundle resolve that
+ *  one package from a different tree, mixing two `@codemirror/state` instances. */
+const BASE_EXTENSIONS = [openLinks];
+
+/** `basicSetup` options, held at module scope so the editor does not reconfigure on render. */
+const BASIC_SETUP = {
+  lineNumbers: true,
+  highlightActiveLineGutter: true,
+  foldGutter: true,
+  dropCursor: true,
+  allowMultipleSelections: true,
+  indentOnInput: true,
+};
 
 /**
  * The text a tab with no row yet opens with.
@@ -278,7 +292,17 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
   const activeVisual: ReturnType<typeof tabVisual> = diffTarget || recrTab
     ? { glyph: '' }
     : tabVisual(syncState);
-  
+  /** Extensions for the active row, memoized: a fresh array each render would make
+   *  react-codemirror reconfigure the state, which discards the search extension
+   *  `openSearchPanel` appended on the first find. */
+  const extensions = useMemo(() => {
+    const row = recrTab ?? activeTab;
+    if (!row) return BASE_EXTENSIONS;
+    if (row.endsWith('.md')) return [markdown(), ...BASE_EXTENSIONS];
+    if (/\.(ts|tsx|js|jsx)$/.test(row)) return [javascript({ jsx: true }), ...BASE_EXTENSIONS];
+    return BASE_EXTENSIONS;
+  }, [activeTab, recrTab]);
+
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
@@ -355,7 +379,9 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
   }, [openTabs]);
 
   const softGreetAt = useRef(0);
-  const handleContentChange = (value: string) => {
+  /** Stable while the tab stays put, so react-codemirror does not reconfigure the editor (and
+   *  drop the appended search panel) on each keystroke. */
+  const handleContentChange = useCallback((value: string) => {
     if (burstAt.current === 0) burstAt.current = Date.now();
     // an early round while the user types: cheap, throttled, and it keeps an ancestor shelved
     if (Date.now() - softGreetAt.current > 5000) {
@@ -366,7 +392,7 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
       ...prev,
       [activeTab]: value
     }));
-  };
+  }, [activeTab]);
 
   const openDropdown = async (tab: string, e: React.MouseEvent) => {
     if (dropdownTab === tab) {
@@ -746,25 +772,10 @@ export function Artfact({ openTabs, activeTab, onTabChange }: ArtfactProps) {
             value={contents[activeTab] || ''}
             onChange={recrTab ? undefined : handleContentChange}
             editable={!recrTab}
-            extensions={
-              (() => {
-                const row = recrTab ?? activeTab;
-                if (!row) return BASE_EXTENSIONS;
-                if (row.endsWith('.md')) return [markdown(), ...BASE_EXTENSIONS];
-                if (/\.(ts|tsx|js|jsx)$/.test(row)) return [javascript({ jsx: true }), ...BASE_EXTENSIONS];
-                return BASE_EXTENSIONS;
-              })()
-            }
+            extensions={extensions}
             theme={oneDark}
             height="100%"
-            basicSetup={{
-              lineNumbers: true,
-              highlightActiveLineGutter: true,
-              foldGutter: true,
-              dropCursor: true,
-              allowMultipleSelections: true,
-              indentOnInput: true,
-            }}
+            basicSetup={BASIC_SETUP}
           />
         </div>
       )}

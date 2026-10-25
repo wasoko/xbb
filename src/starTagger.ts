@@ -41,6 +41,24 @@ export const STAR_GRAPH_DEFAULT = 1111;
 /** Upper bound on a hand-written `maxGraph`. */
 export const STAR_GRAPH_MAX = 5_000;
 
+/** `recent` default: newest rows that make the trend pass's recent head. */
+export const STAR_RECENT_DEFAULT = 500;
+
+/** Upper bound on a hand-written `recent`. */
+export const STAR_RECENT_MAX = 50_000;
+
+/** `minRecent` default: recent rows a tag needs before it can emerge. */
+export const STAR_MIN_RECENT_DEFAULT = 3;
+
+/** Upper bound on a hand-written `minRecent`. */
+export const STAR_MIN_RECENT_MAX = 1_000;
+
+/** `minLift` default: recent rate over older rate a tag needs to emerge. */
+export const STAR_MIN_LIFT_DEFAULT = 2;
+
+/** Upper bound on a hand-written `minLift`, so one line cannot hide every tag. */
+export const STAR_MIN_LIFT_MAX = 100;
+
 /** The overrides one `star.tagger.md` carries. */
 export interface StarTaggerSetup {
   /** Tab/tag rows pulled for the seed; absent reads {@link STAR_BASE_DEFAULT}. */
@@ -49,6 +67,12 @@ export interface StarTaggerSetup {
   trace?: number;
   /** Graph nodes built before the trace is cut; absent reads {@link STAR_GRAPH_DEFAULT}. */
   maxGraph?: number;
+  /** Newest rows that make the trend pass's recent head. */
+  recent?: number;
+  /** Recent rows a tag needs before it can emerge. */
+  minRecent?: number;
+  /** Recent rate over older rate a tag needs to emerge, unless the older rate is zero. */
+  minLift?: number;
   /** Alias -> canonical tag, as written in `alias:` lines. */
   alias: Record<string, string>;
   /** `reset: yes` asks for one forced trace rebuild. */
@@ -88,6 +112,9 @@ export const STAR_TAGGER_DOC = `# star.tagger
 # base: 5000
 # trace: 555
 # maxGraph: 1111
+# recent: 500
+# minRecent: 3
+# minLift: 2
 # alias: js = javascript, k8s = kubernetes
 # reset: no
 
@@ -101,6 +128,9 @@ default; a missing key leaves the qarf profile in force.
 - base: how many recent tab/tag rows the star reads. Bigger sees more, slower.
 - trace: how many tags the generated table lists. 0 writes no table rows.
 - maxGraph: how many tags the graph may build before that table is cut.
+- recent: how many of the newest rows make the trend pass's recent head.
+- minRecent: recent rows a tag needs before the sea may draw it as emerging.
+- minLift: how many times its older rate a tag's recent rate must reach.
 - alias: another spelling of the same tag, e.g. js = javascript.
 - reset: write yes to rebuild the table once; it clears itself back to no.
 - alpha/floor/ceil: optional qarf weighting overrides.
@@ -201,10 +231,13 @@ function parseSetup(body: string[]): StarTaggerSetup {
     const limits = key === 'alpha'
       ? { min: 0, max: 1_000 }
       : key === 'floor' || key === 'ceil' ? { min: 0, max: 1 }
-        : key === 'trace' ? { min: 0, max: STAR_TRACE_MAX, integer: true }
-          : key === 'maxgraph' ? { min: 1, max: STAR_GRAPH_MAX, integer: true }
-            : key === 'base' ? { min: 1, max: STAR_BASE_MAX, integer: true }
-              : undefined;
+        : key === 'minlift' ? { min: 0, max: STAR_MIN_LIFT_MAX }
+          : key === 'trace' ? { min: 0, max: STAR_TRACE_MAX, integer: true }
+            : key === 'maxgraph' ? { min: 1, max: STAR_GRAPH_MAX, integer: true }
+              : key === 'recent' ? { min: 1, max: STAR_RECENT_MAX, integer: true }
+                : key === 'minrecent' ? { min: 1, max: STAR_MIN_RECENT_MAX, integer: true }
+                  : key === 'base' ? { min: 1, max: STAR_BASE_MAX, integer: true }
+                    : undefined;
     if (limits === undefined) continue;
     const n = readNumber(value, limits);
     if (n === undefined) {
@@ -216,6 +249,9 @@ function parseSetup(body: string[]): StarTaggerSetup {
     else if (key === 'ceil') setup.ceil = n;
     else if (key === 'trace') setup.trace = n;
     else if (key === 'maxgraph') setup.maxGraph = n;
+    else if (key === 'recent') setup.recent = n;
+    else if (key === 'minrecent') setup.minRecent = n;
+    else if (key === 'minlift') setup.minLift = n;
     else if (key === 'base') setup.base = n;
   }
   return setup;
@@ -358,6 +394,9 @@ export interface StarLimits {
   base: number;
   trace: number;
   maxGraph: number;
+  recent: number;
+  minRecent: number;
+  minLift: number;
 }
 
 /**
@@ -365,7 +404,7 @@ export interface StarLimits {
  * bound is clamped, and `trace` never asks for more nodes than `maxGraph`.
  *
  * @param setup parsed Setup
- * @returns the three counts the seed and trace use
+ * @returns the counts the seed and trace use, plus the trend thresholds
  */
 export function starLimits(setup: StarTaggerSetup): StarLimits {
   const base = Math.min(STAR_BASE_MAX, Math.max(1, Math.round(setup.base ?? STAR_BASE_DEFAULT)));
@@ -373,7 +412,13 @@ export function starLimits(setup: StarTaggerSetup): StarLimits {
     Math.round(setup.maxGraph ?? STAR_GRAPH_DEFAULT)));
   const trace = Math.min(maxGraph, Math.min(STAR_TRACE_MAX,
     Math.max(0, Math.round(setup.trace ?? STAR_TRACE_DEFAULT))));
-  return { base, trace, maxGraph };
+  const recent = Math.min(base, Math.min(STAR_RECENT_MAX,
+    Math.max(1, Math.round(setup.recent ?? STAR_RECENT_DEFAULT))));
+  const minRecent = Math.min(STAR_MIN_RECENT_MAX,
+    Math.max(1, Math.round(setup.minRecent ?? STAR_MIN_RECENT_DEFAULT)));
+  const minLift = Math.min(STAR_MIN_LIFT_MAX,
+    Math.max(0, setup.minLift ?? STAR_MIN_LIFT_DEFAULT));
+  return { base, trace, maxGraph, recent, minRecent, minLift };
 }
 
 /** A stable dependency key for the Setup block, with `reset` left out. */
@@ -381,6 +426,7 @@ export function starSetupFingerprint(setup: StarTaggerSetup): string {
   const alias = Object.entries(setup.alias).sort(([a], [b]) => a.localeCompare(b));
   return JSON.stringify({
     base: setup.base, trace: setup.trace, maxGraph: setup.maxGraph,
+    recent: setup.recent, minRecent: setup.minRecent, minLift: setup.minLift,
     alias, alpha: setup.alpha, floor: setup.floor, ceil: setup.ceil,
   });
 }

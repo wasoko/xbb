@@ -3,23 +3,24 @@
  * camera body that is dragged through it.
  *
  * `star.tagger.md`'s generated taxonomy is packed once by `seaWall.buildWall` into rectangles
- * on the cylinder: the pinned headings stand in one band at sea level, a column each, the
- * newest pin card's columns at the star; each cluster's clouds fill the wall above or below
- * sea level according to the pin they answer for, and every row a tag was kept by is a point
- * inside its region. Nothing is sampled or invented.
+ * on the cylinder. The star is the split meridian: emerging recent tags keep the left band,
+ * pin-card top headings keep the right band, and each top-level heading owns the next heading
+ * level (or the tag's one-hop neighbours) as a treemap below it. The rest of the tags stay on
+ * the rear half, where a horizontal spacing change can bring them round. Every row a tag was
+ * kept by is a point inside its region. Nothing is sampled or invented.
  *
  * The camera is the one the feel module describes: a spring-damped body, scroll and yaw that
- * coast, five pitch detents, and a field of view the wheel opens. Sea level also tilts the
- * aim, up above the horizon and down below it, so a dive looks into the deep while the star
- * and its ring stay overhead. Sea level is rise 0; the pinned band hangs from there, the
- * newest card's columns at a star whose ring runs round the whole cylinder.
- * Above the horizon the canvas is almost black and catches the star's light; below it is tinted
- * and readable.
+ * coast, five pitch detents, and a field of view the feel eases. Sea level is rise 0; the
+ * star marks the split meridian, with the newest recent tag to its left and the newest pinned
+ * heading to its right. Above the horizon the canvas is almost black and catches the star's
+ * light; below it is tinted and readable.
  *
  * The only DOM is the hover card. It names the tag, says what the taxonomy calls it, lists the
  * relations the table itself records, and offers the rows that can be opened. A pinch splits
- * into its horizontal and vertical parts and moves the wall's spacing apart; labels keep their
- * size.
+ * into its horizontal and vertical parts and moves the wall's spacing apart; Ctrl/⌘ + wheel
+ * moves the vertical spacing and Shift on the same gesture moves the horizontal one, so the
+ * rear tail can be brought into view. Labels fit the region at the spacing it is drawn at,
+ * so a compressed wall also compresses its names.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -44,6 +45,7 @@ import { SEA_MOMENTUM_KEY } from './seaMotion';
 import { SeaRenderer, type SeaHover, type SeaWallPick } from './seaRender';
 import { noteSeaFrame } from '../perfWatch';
 import { buildWall, type WallRegion } from './seaWall';
+import { EMERGING_CHILDREN, EMERGING_COLUMNS, emergingTags } from './seaTrend';
 import type { TagGraph } from './restGraph';
 
 /** Pointer travel under this, in pixels, is a click rather than a drag. */
@@ -240,8 +242,8 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     () => (tags.length === 0
       ? null
       : buildWall(graph, tags, (tag) => rowsByTag.get(tag) ?? [], {
-        /* The wall opens at the feel's narrow field of view, so a column is narrower than the
-           old wide-wall packing and the strips come into view beside the band. */
+        /* The wall opens at the feel's narrow field of view, so the column is narrower than
+           the old wide-wall packing and the strips come into view beside it. */
         pinCol: 32,
         shelfGap: 5,
         areaPerRow: 4,
@@ -253,6 +255,22 @@ export function SeaView({ foreground }: { foreground: boolean }) {
           recency: (tag: string) => seed.recency.get(tag),
           pins: seaPinsOf(seed.pins, graph),
         }),
+        emerging: seed === null
+          ? tags
+            .filter((tag) => tag.trend !== undefined && tag.trend > 0
+              && !graph.roots.has(tag.tag) && graph.alias.get(tag.tag) === undefined)
+            .sort((a, b) => (b.trend ?? 0) - (a.trend ?? 0) || b.weight - a.weight)
+            .slice(0, EMERGING_COLUMNS)
+            .map((tag) => ({
+              tag: tag.tag, score: tag.trend ?? 0,
+              children: [...(graph.edges.get(tag.tag) ?? [])]
+                .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+                .slice(0, EMERGING_CHILDREN)
+                .map(([child]) => child),
+            }))
+          : emergingTags(graph, seed.trend, {
+            maxEmerging: EMERGING_COLUMNS, maxChildren: EMERGING_CHILDREN,
+          }),
       })),
     [graph, tags, rowsByTag, seed],
   );
@@ -339,10 +357,8 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       .then((loaded) => {
         if (!live) return;
         setSeed(loaded);
-        /* A rest-list pass owns the store once one has landed; the sea's own seed only
-           fills an empty one, so the omnibox reads whichever pass ran first. */
-        if (restTagStore.size === 0) {
-          restTagStore.set(loaded.reports, loaded.rows);
+        if (restTagStore.version === 0) {
+          restTagStore.set(loaded.reports, loaded.rows, loaded.pins);
         }
         void writeStarTaggerTrace(loaded, loaded.setup, loaded.timings).catch((error: unknown) => {
           console.debug('[star.tagger] trace skipped', error);
@@ -499,12 +515,22 @@ export function SeaView({ foreground }: { foreground: boolean }) {
 
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
-      if (event.ctrlKey || event.metaKey) {
-        /* Ctrl or ⌘ with the wheel opens the vertical spacing only; the labels keep their
-           size, so the wall reads as a wider or tighter canvas rather than a zoomed view. */
+      const horizontalGesture = event.deltaX !== 0
+        && Math.abs(event.deltaX) > Math.abs(event.deltaY);
+      if (event.ctrlKey || event.metaKey || horizontalGesture) {
+        /* Ctrl or ⌘ with the wheel changes the vertical spacing; Shift on the same gesture
+           changes the horizontal one, which is what pulls the rear tail into the front
+           half. A horizontal wheel or pinch is the same horizontal gesture. Labels are
+           fitted to the region at that spacing, so the text shrinks with its cell. */
         const spacing = spacingRef.current;
-        spacing.y = Math.min(SPACING_MAX, Math.max(SPACING_MIN,
-          spacing.y * Math.exp(-event.deltaY * 0.0015)));
+        const horizontal = event.shiftKey || horizontalGesture;
+        const delta = horizontal ? (event.deltaX || event.deltaY) : event.deltaY;
+        const factor = Math.exp(-delta * 0.0015);
+        if (horizontal) {
+          spacing.x = Math.min(SPACING_MAX, Math.max(SPACING_MIN, spacing.x * factor));
+        } else {
+          spacing.y = Math.min(SPACING_MAX, Math.max(SPACING_MIN, spacing.y * factor));
+        }
         renderer.setSpacing(spacing.x, spacing.y);
         return;
       }
@@ -514,6 +540,7 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     const onPointerDown = (event: PointerEvent) => {
       if (event.pointerType === 'mouse' && event.button !== 0) return;
       pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (event.pointerType !== 'mouse') renderer.setStarTouch(true);
       try {
         host.setPointerCapture(event.pointerId);
       } catch {
@@ -590,6 +617,7 @@ export function SeaView({ foreground }: { foreground: boolean }) {
 
     const onPointerUp = (event: PointerEvent) => {
       pointers.delete(event.pointerId);
+      if (pointers.size === 0) renderer.setStarTouch(false);
       if (pointers.size < 2) pinch = null;
       if (host.hasPointerCapture(event.pointerId)) host.releasePointerCapture(event.pointerId);
       if (!dragging) return;
@@ -632,6 +660,11 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       rig.vYaw = Math.max(-1.75, Math.min(1.75, yawSpeed));
       rig.vScroll = Math.max(-SEA_FEEL.scrollMax, Math.min(SEA_FEEL.scrollMax, scrollSpeed));
       setCursor(false);
+    };
+
+    const onPointerLeave = () => {
+      renderer.setPointer(-1, -1);
+      renderer.setStarHover(false);
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -752,6 +785,7 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     host.addEventListener('pointermove', onPointerMove);
     host.addEventListener('pointerup', onPointerUp);
     host.addEventListener('pointercancel', onPointerUp);
+    host.addEventListener('pointerleave', onPointerLeave);
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', onBlur);
@@ -826,6 +860,7 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       host.removeEventListener('pointermove', onPointerMove);
       host.removeEventListener('pointerup', onPointerUp);
       host.removeEventListener('pointercancel', onPointerUp);
+      host.removeEventListener('pointerleave', onPointerLeave);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
@@ -861,6 +896,7 @@ export function SeaView({ foreground }: { foreground: boolean }) {
           {region.lambda === undefined ? '' : ` · λ ${region.lambda.toFixed(2)}`}
           {region.top === undefined ? '' : ` · ${region.top}`}
           {region.burst === undefined ? '' : ` · burst #${region.burst}`}
+          {region.trend === undefined ? '' : ` · trend ${region.trend.toFixed(2)}`}
         </div>
         {activeRelations.length > 0 && (
           <>

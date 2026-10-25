@@ -35,6 +35,9 @@ the sea writes this section on each seed.
 | `base` | 5000 | Ceiling on the newest `type='tab'` and `type='tag'` rows pulled as qarf input. The scan is newest `tid` first; a larger `base` sees a wider taxonomy and spends more scan/score time. Capped at 50,000. |
 | `trace` | 555 | Maximum graph nodes written into the table. `0` writes no rows, leaving the header, timings, and relation sections. Never writes more than `maxGraph`. |
 | `maxGraph` | 1111 | Maximum nodes built into the taxonomy graph before the table is cut. Capped at 5,000. |
+| `recent` | 500 | Newest rows that make the trend pass's recent head. Rows are ordered by their newest `rec.visitTime` when one exists, otherwise by `daStamp` (`dt` then `modAt`). Capped at `base`. |
+| `minRecent` | 3 | Recent-head rows a tag must be kept by before the sea may draw it as emerging. |
+| `minLift` | 2 | Recent rate over older rate a tag must reach, unless its older rate is zero. |
 | `alias` | none | `alias = tag` pairs, comma-separated. An explicit alias wins over the spelling similarity merge. Chains resolve transitively; a cycle is noted in the trace instead of looping. |
 | `reset` | no | `yes` rebuilds `## Taxonomy` once on the next seed and is then written back as `no`. It never edits tags on `db.das` rows. |
 | `alpha` / `floor` / `ceil` | `DEFAULT_QARF` | Optional qarf weighting overrides; only the keys written here replace the profile's values. |
@@ -76,10 +79,10 @@ and `## Notes`, not this section.
 seeded 2026-10-17T00:00:00.000Z · rows 5000/4987 · pins 1 · nodes 1111/1111 · trace 555 · edges 2480 · λ̄ 0.541 · α 1.00 · floor 0.10 · ceil 0.90
 time: config 1ms · scan 42ms · score 287ms · graph 9ms · total 339ms
 
-| tag | reach | kind | score | weight | freq | λ | burst | top |
-|---|---|---|---|---|---|---|---|---|
-| deepseek | pinned | pinned | 1.000 | 42 | 57 | 0.43 | 3 | bm25 |
-| portfolioRisk | related | head | 0.900 | 12 | 14 | 0.71 | 7 | textrank |
+| tag | reach | kind | score | weight | freq | λ | burst | top | recent | base | lift | trend |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| deepseek | pinned | pinned | 1.000 | 42 | 57 | 0.43 | 3 | bm25 | 8 | 34 | 1.10 | - |
+| portfolioRisk | related | head | 0.900 | 12 | 14 | 0.71 | 7 | textrank | 9 | 3 | 4.20 | 12.10 |
 ```
 
 | Column | Meaning |
@@ -93,6 +96,10 @@ time: config 1ms · scan 42ms · score 287ms · graph 9ms · total 339ms
 | `λ` | Mean lexical share of the rows that kept the tag (`qarf`). |
 | `burst` | Cluster of the highest-scoring row. |
 | `top` | Channel that carried that highest-scoring row (`bm25`, `textrank`, `priority`, …). |
+| `recent` | Rows in the trend pass's recent head that kept the tag. |
+| `base` | Rows in the older tail that kept the tag. |
+| `lift` | Recent rate over older rate; a tag absent from the tail has an unbounded lift. |
+| `trend` | Trend score when the tag cleared `minRecent` and `minLift`; `-` otherwise. |
 
 The relation sections are not cut by `trace`; they always describe the whole
 graph the table was read from:
@@ -127,6 +134,11 @@ language.
   rows, leaving the header, timings, and relation sections.[^trace]
 - `maxGraph` is how many tags the graph may hold before the table is cut. 1111 is
   the default; the table can never print more than this.[^maxgraph]
+- `recent` is how many newest rows the trend pass compares with the older tail. The
+  head is ordered by browser visit time when a row has one, otherwise by the later of
+  `dt` and `modAt`; 500 is the default. `minRecent` is the least recent support a tag
+  needs, and `minLift` is how many times its older rate its recent rate must reach.
+  A tag with no older rows passes on `minRecent` alone.
 - `alias` gives another spelling for the same tag: `js = javascript` makes `js`
   count as `javascript` in the priority tags, the scores, and the graph.[^alias]
 - `reset: yes` asks for one rebuild of the generated section. It clears itself to

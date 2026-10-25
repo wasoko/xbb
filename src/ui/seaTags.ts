@@ -14,6 +14,7 @@
 import { daStamp, type Da } from '../sdb';
 import { pinHeadingRows } from '../srctag';
 import type { PinGraphSeed } from './seaPinGraph';
+import { recentStamp } from './seaTrend';
 import {
   GRAPH_NODE_KIND, GRAPH_REACH, headingTags, pinReach, type AnyNodeKind, type GraphNodeKind,
   type GraphReach, type TagGraph,
@@ -32,6 +33,14 @@ export interface SeaTag {
   lambda?: number;
   burst?: number;
   top?: string;
+  /** Rows in the trend pass's recent head that kept it. */
+  recent?: number;
+  /** Rows in the trend pass's older tail that kept it. */
+  base?: number;
+  /** Recent rate over older rate. */
+  lift?: number;
+  /** Non-zero when the tag emerged from the recent head. */
+  trend?: number;
 }
 
 /** Where a row's click goes. */
@@ -47,6 +56,8 @@ export interface SeaRow {
   label: string;
   action: SeaAction;
   type: string;
+  /** Newest visit time, or the later of `dt` and `modAt`, in epoch ms. */
+  stamp?: number;
 }
 
 /** One pin card as the wall's band reads it: its top level heading columns and its date. */
@@ -55,6 +66,12 @@ export interface SeaPin {
   ref: string;
   /** Tags each top level heading names, in card order; one heading is one column. */
   columns: string[][];
+  /**
+   * Tags named by the next heading level under each column, aligned with `columns`.
+   * Absent when the card has no lower heading level; an empty list means that column
+   * has no children.
+   */
+  children?: string[][];
   /** The card's effective update time, the later of its `dt` and `modAt`, in epoch ms. */
   stamp: number;
 }
@@ -105,6 +122,7 @@ export function seaRowOf(da: Da): SeaRow {
     label: cropText(da.txt || da.ref, ROW_CROP),
     action: rowAction(da),
     type: da.type,
+    stamp: recentStamp(da),
   };
 }
 
@@ -167,6 +185,10 @@ export function parseTaxonomy(text: string): SeaTag[] {
     const lambda = num(parts[6]);
     const burst = num(parts[7]);
     const top = parts[8];
+    const recent = num(parts[9]);
+    const base = num(parts[10]);
+    const lift = num(parts[11]);
+    const trend = num(parts[12]);
     out.push({
       tag,
       reach: reachOf(parts[1]),
@@ -177,6 +199,10 @@ export function parseTaxonomy(text: string): SeaTag[] {
       ...(lambda === undefined ? {} : { lambda }),
       ...(burst === undefined ? {} : { burst }),
       ...(top === undefined || top === '' || top === '-' ? {} : { top }),
+      ...(recent === undefined ? {} : { recent }),
+      ...(base === undefined ? {} : { base }),
+      ...(lift === undefined ? {} : { lift }),
+      ...(trend === undefined ? {} : { trend }),
     });
   }
   return out;
@@ -198,6 +224,7 @@ export function seaTagsFromSeed(seed: PinGraphSeed): SeaTag[] {
   const out: SeaTag[] = [];
   for (const [tag, weight] of seed.graph.weight) {
     const lambda = seed.graph.lambda.get(tag);
+    const reading = seed.trend?.get(tag);
     out.push({
       tag,
       reach: reach.get(tag) ?? (seed.graph.roots.has(tag) ? 'pinned' : 'own'),
@@ -206,6 +233,10 @@ export function seaTagsFromSeed(seed: PinGraphSeed): SeaTag[] {
       weight,
       freq: weight,
       ...(lambda === undefined ? {} : { lambda }),
+      ...(reading === undefined ? {} : {
+        recent: reading.recent, base: reading.base, lift: reading.lift,
+        ...(reading.emerging ? { trend: reading.score } : {}),
+      }),
     });
   }
   out.sort((a, b) => REACH_ORDER[a.reach] - REACH_ORDER[b.reach]
@@ -232,8 +263,10 @@ export function seaTagPool(taxonomy: readonly SeaTag[], seed: PinGraphSeed | nul
  * headings, `##` when it starts at the second — because that is the level the card's own
  * structure reads at. Every heading line at that level is one column, and the tags it names
  * stack down that column, so a card that writes two tags in one heading keeps them together.
- * Names are folded to the graph's node names the way the roots were, and a tag an earlier
- * line already named keeps that line's column.
+ * The next heading level below the top is the column's treemap: those tags are read as the
+ * top heading's second level, and only that level is kept. Names are folded to the graph's
+ * node names the way the roots were, and a tag an earlier line already named keeps that
+ * line's column.
  *
  * @param pins the pin cards the seed read, in any order
  * @param graph the graph over that seed, for each heading's node name
@@ -241,25 +274,58 @@ export function seaTagPool(taxonomy: readonly SeaTag[], seed: PinGraphSeed | nul
  */
 export function seaPinsOf(pins: readonly Da[], graph: TagGraph): SeaPin[] {
   const out: SeaPin[] = [];
-  const seen = new Set<string>();
+  const topSeen = new Set<string>();
+  const childSeen = new Set<string>();
   for (const pin of pins) {
     const rows = pinHeadingRows(pin.txt ?? '');
     if (rows.length === 0) continue;
     const top = Math.min(...rows.map((row) => row.level));
+    const childLevel = rows.reduce((level, row) => (
+      row.level > top ? Math.min(level, row.level) : level), Number.POSITIVE_INFINITY);
     const columns: string[][] = [];
+    const children: string[][] = [];
+    let current = -1;
     for (const row of rows) {
-      if (row.level !== top) continue;
-      const tags: string[] = [];
+      if (row.level === top) {
+        const tags: string[] = [];
+        for (const raw of row.tags) {
+          const name = graph.name(raw);
+          if (!graph.roots.has(name) || topSeen.has(name)) continue;
+          topSeen.add(name);
+          tags.push(name);
+        }
+        if (tags.length === 0) {
+          current = -1;
+          continue;
+        }
+        columns.push(tags);
+        children.push([]);
+        current = columns.length - 1;
+        continue;
+      }
+      if (row.level !== childLevel || current < 0) continue;
       for (const raw of row.tags) {
         const name = graph.name(raw);
-        if (!graph.roots.has(name) || seen.has(name)) continue;
-        seen.add(name);
-        tags.push(name);
+        if (topSeen.has(name) || childSeen.has(name)) continue;
+        childSeen.add(name);
+        children[current].push(name);
       }
-      if (tags.length > 0) columns.push(tags);
     }
     if (columns.length === 0) continue;
-    out.push({ ref: pin.ref, columns, stamp: daStamp(pin) });
+    /* A tag that heads a later column is not also that column's sibling; drop it from the
+       child lists after every top heading has been read. */
+    const topAll = new Set(columns.flat());
+    const kids = children.map((list) => list.filter((tag) => !topAll.has(tag)));
+    out.push({
+      ref: pin.ref, columns, stamp: daStamp(pin),
+      ...(Number.isFinite(childLevel) ? { children: kids } : {}),
+    });
+  }
+  /* A tag that heads any column anywhere is not a child of another card's column either. */
+  const allTop = new Set(out.flatMap((card) => card.columns.flat()));
+  for (const card of out) {
+    if (card.children === undefined) continue;
+    card.children = card.children.map((list) => list.filter((tag) => !allTop.has(tag)));
   }
   return out.sort((a, b) => b.stamp - a.stamp);
 }

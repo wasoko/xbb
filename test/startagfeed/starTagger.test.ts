@@ -44,6 +44,7 @@ function seedOf(graph: TagGraph, pins: Da[], rows: Da[], reports: Map<number, Ro
     pins, rows, reports, graph,
     reach: pinReach(graph),
     recency: new Map(),
+    trend: new Map(),
     setup: defaultStarSetup(),
     priorityTags: [],
     timings: timing,
@@ -57,6 +58,9 @@ describe('parseStarTaggerDoc', () => {
     expect(doc.setup.base).toBeUndefined();
     expect(doc.setup.trace).toBeUndefined();
     expect(doc.setup.maxGraph).toBeUndefined();
+    expect(doc.setup.recent).toBeUndefined();
+    expect(doc.setup.minRecent).toBeUndefined();
+    expect(doc.setup.minLift).toBeUndefined();
     expect(doc.notes).toContain('Edit Setup and Notes');
   });
 
@@ -68,6 +72,9 @@ describe('parseStarTaggerDoc', () => {
 base: 10000
 trace: 555
 maxGraph: 1111
+recent: 300
+minRecent: 4
+minLift: 1.5
 alias: js = javascript, k8s = kubernetes
 reset: yes
 alpha: 2
@@ -82,6 +89,9 @@ mine
     expect(doc.setup.base).toBe(10_000);
     expect(doc.setup.trace).toBe(555);
     expect(doc.setup.maxGraph).toBe(1111);
+    expect(doc.setup.recent).toBe(300);
+    expect(doc.setup.minRecent).toBe(4);
+    expect(doc.setup.minLift).toBe(1.5);
     expect(doc.setup.alias).toEqual({ js: 'javascript', k8s: 'kubernetes' });
     expect(doc.setup.reset).toBe(true);
     expect(doc.setup.alpha).toBe(2);
@@ -93,9 +103,10 @@ mine
 });
 
 describe('starLimits', () => {
-  it('uses base 5000, trace 555 and maxGraph 1111 by default', () => {
+  it('uses base 5000, trace 555, maxGraph 1111 and the trend defaults', () => {
     expect(starLimits(defaultStarSetup())).toEqual({
       base: 5000, trace: STAR_TRACE_DEFAULT, maxGraph: STAR_GRAPH_DEFAULT,
+      recent: 500, minRecent: 3, minLift: 2,
     });
   });
 
@@ -159,7 +170,7 @@ describe('buildStarTaxonomy', () => {
     const seed = seedOf(graph, pins, rows, reports);
     const trace = buildStarTaxonomy(seed, setup, timing, new Date('2026-10-17T00:00:00Z'));
     expect(trace.text).toContain('seeded 2026-10-17T00:00:00.000Z');
-    expect(trace.text).toContain('| tag | reach | kind | score | weight | freq | λ | burst | top |');
+    expect(trace.text).toContain('| tag | reach | kind | score | weight | freq | λ | burst | top | recent | base | lift | trend |');
     expect(trace.text).toContain('### Aliases');
     expect(trace.text).toContain('### Bursts');
     expect(trace.text).toContain('### Web');

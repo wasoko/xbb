@@ -6,7 +6,8 @@
  * seed is the pin cards plus up to `base` newest `type='tab'`/`type='tag'` rows, scored with
  * `qarf` so the fused lists are the adaptive ones, and the graph is built with its aliases
  * kept — a table that spells one curated tag two ways is saying something about itself, and
- * folding the spelling away hides it.
+ * folding the spelling away hides it. The same reports feed a recent-versus-tail trend pass,
+ * so the wall's right band can name what the newest rows are using without a second scan.
  *
  * It is not the pass the rest list draws. That pass walks the rows a reader is looking at
  * and publishes to `restTagStore`; this one reads the sea's own window, because a hop is a
@@ -20,6 +21,7 @@ import { QARF_TAG_SCORE, qarfAdaptive, qarfTagReports } from '../qarf';
 import { runRestPass } from '../rstag';
 import { isPinCardRow } from './cardTab';
 import { buildTagGraph, headingTags, pinReach, type GraphReach, type TagGraph } from './restGraph';
+import { tagTrends, type TagTrend } from './seaTrend';
 import {
   DEFAULT_STAR_SETUP, STAR_BASE_DEFAULT, foldAlias, isTaggerRef, resolveAliases,
   starLimits, type StarTaggerSetup,
@@ -61,6 +63,8 @@ export interface PinGraphSeed {
   reach: Map<string, GraphReach>;
   /** How new each node's evidence is, `1` for a tag only the newest rows kept. */
   recency: Map<string, number>;
+  /** Each tag's recent-versus-tail reading, from the same scored window. */
+  trend: Map<string, TagTrend>;
   /** The overrides the seed ran with. */
   setup: StarTaggerSetup;
   /** Pin headings after aliases were folded, as the qarf pass saw them. */
@@ -142,7 +146,7 @@ async function loadSeedRows(base: number): Promise<Da[]> {
  *
  * @param setup the tagger row's overrides; omitted leaves every default
  * @param clock millisecond clock, injectable for a timing test
- * @returns the pins, rows, reports, graph, reach, recency, and stage timings
+ * @returns the pins, rows, reports, graph, reach, recency, trend, and stage timings
  */
 export async function loadPinGraph(
   setup: StarTaggerSetup = DEFAULT_STAR_SETUP,
@@ -191,12 +195,16 @@ export async function loadPinGraph(
     alias: fold,
     maxNodes: limits.maxGraph,
   });
+  const trend = tagTrends(rows, reports, graph, {
+    recent: limits.recent, minRecent: limits.minRecent, minLift: limits.minLift,
+  });
   const graphDone = clock();
   const window = [...pins, ...rows].sort(byNewest);
   return {
     pins, rows, reports, graph,
     reach: pinReach(graph),
     recency: tagRecency(graph, window, reports),
+    trend,
     setup: { ...setup, notes: [...setup.notes, ...resolved.notes] },
     priorityTags,
     timings: {

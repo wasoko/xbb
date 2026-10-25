@@ -21,13 +21,15 @@ tags rows (the omnibox and the settings rows).
 
 ```
 src/ui/seaPinGraph.ts   loadPinGraph: pins + up to `base` tab/tag rows, scored with qarf
-        │  PinGraphSeed { pins, rows, reports, graph, reach, recency }
+        │  PinGraphSeed { pins, rows, reports, graph, reach, recency, trend }
         ▼
 src/ui/restGraph.ts     buildTagGraph · pinReach · tagGraphLayout   (tags, not pixels)
         │
-        ├──▶ src/ui/seaRegion.ts    the packing: seaRegions · regionTiers
+        ├──▶ src/ui/seaWall.ts      the live wall: buildWall · pinned · recent · rear tail
         │            │
         │            ▼
+        │    src/ui/seaRegion.ts    alternate packing: seaRegions · regionTiers
+        │            │
         │    src/ui/seaStars.ts     one mark per region, and the edges among them
         │            │
         │            ▼
@@ -86,8 +88,9 @@ near 180 the frustum spans hundreds of grid steps, a grid finer than a screen ca
 `type='tab'` and `type='tag'` rows, because a hop is a statement about the whole window
 rather than about the rows a reader happens to have scrolled to. It scores them with the
 `qarf` profile and returns `PinGraphSeed`: the pins, the rows, one report per scored row, the
-graph over them with a pin's variant spellings kept apart, each node's reach and each tag's
-`recency` (where the newest row that kept it sits in the window). The overrides and the
+graph over them with a pin's variant spellings kept apart, each node's reach, each tag's
+`recency` (where the newest row that kept it sits in the window) and its `trend`
+(recent-head support against the older tail). The overrides and the
 generated taxonomy live in `star.tagger.md`; see
 [row=star.tagger.md](row=star.tagger.md).
 
@@ -97,12 +100,19 @@ omnibox's suggestion zone has hints before the rest list has ever run; the list'
 then publishes over it. A seed that never lands writes the reason into the readout's legend
 instead of the bands, so an empty sky reads as an unread table.
 
-### The packing
+### The live wall's bands
 
-`seaRegions(graph, { recency, kind, …shape })` reads the graph in `pinReach` by default and
-returns one `SeaRegion` — `{ tag, kind, rows, lon0, lon1, rise0, rise1, cluster? }` — per tag
-it kept: every root, then the widest others up to `maxRegions` (220). The wall has three
-parts, and the reason for each is what it is read for:
+`SeaView` draws `buildWall`, which splits the wall at the star meridian (longitude 0, rise 0):
+
+- **left** (`lon >= 0`): the emerging tags from the recent head, strongest first. Each column's second level is its one-hop graph neighbours, tiled below it. A pinned tag never appears on this side.
+- **right** (`lon <= 0`): one column per top-level pin-card heading, newest first. The next heading level under a top heading tiles below it as that column's treemap; a spelling keeps its thin band under the heading.
+- **rear** (`lon` from 90 to 270, less whatever the two front bands take): the remaining cloud tags. They stay out of the opening view; a horizontal wheel, Ctrl/⌘ + Shift + wheel, or a horizontal pinch opens the horizontal spacing and brings them round.
+
+Double-click or the compass still resets the camera to the star at longitude 0, rise 0, pitch 0, so the split is vertical through the centre of the view.
+
+### The alternate region packing (not routed)
+
+`seaRegions(graph, { recency, kind, …shape })` is the DOM-less region packer kept for its tests and the paused `SeaRegions.tsx` view. It returns one `SeaRegion` — `{ tag, kind, rows, lon0, lon1, rise0, rise1, cluster? }` — per tag it kept: every root, then the widest others up to `maxRegions` (220). The wall has three parts, and the reason for each is what it is read for:
 
 - **the column** is the curated half — the one part a reader scans in time order. The pins
   stand in a 96 degree column down the middle, newest `recency` first, each band as tall as
@@ -184,7 +194,7 @@ frame-rate independent; `glideRelease`, `glideWheel` and `glideAtRest` are the r
 `treeCac['seaMomentum']` (0–100) is the one user control: 0 stops the sky the instant the
 pointer lets go, 100 carries for seconds, and an absent or unreadable value leaves
 `SEA_MOTION` standing, so a table that has never been told otherwise behaves as shipped.
-A plain wheel pans; Ctrl or ⌘ with the wheel narrows the field of view, and with it the grid.
+A plain wheel pans; Ctrl or ⌘ with the wheel changes vertical spacing, and Shift on the same gesture changes horizontal spacing. A plain horizontal wheel does the same as the horizontal gesture. The field of view follows the feel's zoom range.
 
 ### Camera, pointer and readout
 
@@ -197,6 +207,12 @@ past the camera.
 Sea level also tilts the aim by up to `SEA_FEEL.levelPitch` (6) degrees: up above the
 horizon, down below it. A dive therefore looks into the deep while the star and its ring stay
 overhead, which is what makes the wall read as exploration rather than a flat pan.
+
+The sea-level star rests as a minimal mark. It opens to its full glow only while a tag is
+hovered or a touch is down, and its light dims with the newest `rec.visitTime` (falling back
+to `modAt`/`dt`) of the pinned tag it marks; a star with no row keeps its full light. Row
+stars dim the same way, and only the pointer lifts one. A horizontal or vertical spacing
+change scales the region and the name fitted inside it together.
 
 A click — pointer travel under `CLICK_SLOP` (5) pixels — selects the grid cell under the
 pointer, outlines it and lists the tags that cell holds. That read happens once per click
