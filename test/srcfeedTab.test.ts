@@ -8,7 +8,7 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { parseExtSrcDoc } from '../src/srcfeed';
-import { EXTSRC_DOC, EXTSRC_EXTRACT_BODY } from '../src/srcfeedRows';
+import { EXTSRC_DOC, EXTSRC_EXTRACT_BODY, GR_EXTRACT_BODY } from '../src/srcfeedRows';
 import {
   isExtensionPage, resetTabEnv, runTabRow, tabEnv, tabFailure, wrapTabBody,
   type ExtTab, type TabClient,
@@ -31,6 +31,13 @@ interface WrappedResult {
 /** Evaluate the wrapper the way `chrome.userScripts.execute` does. */
 async function runInTab(source: Record<string, unknown>): Promise<WrappedResult> {
   const code = wrapTabBody(EXTSRC_EXTRACT_BODY, { ref: 'extsrc/extract.js', args: { source } });
+  const run = new Function(`return ${code}`) as () => Promise<WrappedResult>;
+  return run();
+}
+
+/** Evaluate one seeded body against the document, as a tab injection does. */
+async function runBody(body: string, source: Record<string, unknown>): Promise<WrappedResult> {
+  const code = wrapTabBody(body, { ref: 'extdom/gr', args: { source } });
   const run = new Function(`return ${code}`) as () => Promise<WrappedResult>;
   return run();
 }
@@ -171,6 +178,63 @@ describe('tab body', () => {
     const res = await runInTab({});
     expect(res.ok).toBe(false);
     expect(res.error).toContain('source.url is missing');
+  });
+});
+
+describe('Grok history body', () => {
+  const source = {
+    name: 'gr', url: 'https://grok.com/*', item: 'a[href^="/c/"]',
+    prompt: 'open "See all" (history) or the sidebar in the Grok tab',
+  };
+
+  it('declares the tab requirement its row runs under', () => {
+    expect(rowMeta(GR_EXTRACT_BODY).requires).toEqual(['tab', 'user-scripts']);
+  });
+
+  it('reads the See all popup by aria-label and drops the sidebar duplicates', async () => {
+    document.body.innerHTML = '<aside><a href="/c/1">First chat · 2 m</a></aside>'
+      + '<div role="dialog"><a href="/c/1" aria-label="First chat"></a>'
+      + '<a href="/c/2" aria-label="Second chat"></a></div>';
+    const res = await runBody(GR_EXTRACT_BODY, source);
+
+    expect(res.ok).toBe(true);
+    expect(res.value?.rows.map((row) => row.txt)).toEqual(['First chat', 'Second chat']);
+    expect(res.value?.rows[0].ref.endsWith('/c/1')).toBe(true);
+    expect(res.value?.notes).toEqual([]);
+  });
+
+  it('reads the sidebar and names the See all popup when it is closed', async () => {
+    document.body.innerHTML = '<aside><a href="/c/1">First chat</a>'
+      + '<a href="/c/2">Second chat</a></aside>'
+      + '<div role="dialog"><a href="/c/9" aria-label="One preview"></a></div>';
+    const res = await runBody(GR_EXTRACT_BODY, source);
+
+    expect(res.value?.rows.map((row) => row.txt)).toEqual(['First chat', 'Second chat']);
+    expect(res.value?.notes.join('\n')).toContain('See all');
+  });
+
+  it('asks for the prompt when neither list is present', async () => {
+    document.body.innerHTML = '<div></div>';
+    const res = await runBody(GR_EXTRACT_BODY, source);
+
+    expect(res.value?.rows).toEqual([]);
+    expect(res.value?.needsUser).toBe(source.prompt);
+  });
+
+  it('caps the popup at Max', async () => {
+    document.body.innerHTML = '<div role="dialog">'
+      + '<a href="/c/1" aria-label="One"></a><a href="/c/2" aria-label="Two"></a>'
+      + '<a href="/c/3" aria-label="Three"></a></div>';
+    const res = await runBody(GR_EXTRACT_BODY, { ...source, max: 2 });
+
+    expect(res.value?.rows.map((row) => row.txt)).toEqual(['One', 'Two']);
+  });
+
+  it('keeps a link with neither label nor text by its href', async () => {
+    document.body.innerHTML = '<div role="dialog"><a href="/c/7"></a></div>';
+    const res = await runBody(GR_EXTRACT_BODY, source);
+
+    expect(res.value?.rows[0].txt.endsWith('/c/7')).toBe(true);
   });
 });
 

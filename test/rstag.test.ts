@@ -318,6 +318,8 @@ describe('pre-processing', () => {
   it('reads a provenance tag as capture context, not as a topic', () => {
     expect(isProvenanceTag('suffix_GoogleSearch')).toBe(true);
     expect(isProvenanceTag('dev_saOpera')).toBe(true);
+    expect(isProvenanceTag('FIXMEchange_rejected')).toBe(true);
+    expect(isProvenanceTag('FIXME_dup_ref')).toBe(true);
     expect(isProvenanceTag('react')).toBe(false);
     expect(isProvenanceTag('pin')).toBe(false);
   });
@@ -340,10 +342,13 @@ describe('pre-processing', () => {
   });
 
   it('drops the terms of the row\'s own provenance tags whatever their frequency', async () => {
-    const rows = spread(10, 'topic', ['dev_saOpera', 'suffix_GoogleSearch']);
+    const rows = spread(10, 'topic', ['dev_saOpera', 'suffix_GoogleSearch', 'FIXME_dup_ref']);
     const tags = (await rrfTagReports(rows, { priorityTags: [], global: { maxDf: 1, minRows: 0 } }))
       .flatMap((r) => r.tags.map((t) => t.tag));
-    for (const term of ['dev', 'saopera', 'suffix', 'googlesearch']) expect(tags).not.toContain(term);
+    for (const term of ['dev', 'saopera', 'suffix', 'googlesearch', 'fixme', 'dup', 'ref']) {
+      expect(tags).not.toContain(term);
+    }
+    expect(tags).not.toContain('FIXME_dup_ref');
   });
 
   it('never proposes a term the caller named', async () => {

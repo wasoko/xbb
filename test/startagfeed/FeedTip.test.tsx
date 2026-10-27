@@ -38,6 +38,22 @@ const CONFIG = row(`# Feeds
 /** The registry value `loadSrcRegistry` would return for {@link CONFIG}. */
 const REGISTRY = { registry: parseSrcFeedDoc(CONFIG.txt) };
 
+/** A registry with one implicit entry and one `Src:` adapter. */
+const MIXED = row(`# Feeds
+
+## Sources
+
+### wallstreetcn
+* URL: https://wallstreetcn.com/live/global
+
+### bb-hist
+* URL: https://www.bilibili.com/history
+* Src: bb-hist
+`, 'srcfeed.md');
+
+/** The registry value for {@link MIXED}. */
+const MIXED_REGISTRY = { registry: parseSrcFeedDoc(MIXED.txt) };
+
 beforeEach(() => {
   queue.length = 0;
 });
@@ -58,6 +74,22 @@ describe('FeedTip', () => {
     const html = renderToStaticMarkup(<FeedTip feedRef="probe.feed.md" />);
     expect(html).toContain('not in srcfeed.md: gone');
     expect(html).toContain('wallstreetcn.com');
+  });
+
+  it('lists only the implicit entries when sources: is empty', () => {
+    queue.push({ row: row(W_FEED_DOC, 'probe.feed.md') }, MIXED_REGISTRY);
+    const html = renderToStaticMarkup(<FeedTip feedRef="probe.feed.md" />);
+    expect(html).toContain('wallstreetcn.com');
+    expect(html).not.toContain('bilibili.com');
+    expect(html).not.toContain('bb-hist');
+  });
+
+  it('lists an adapter only when sources: names it', () => {
+    const doc = W_FEED_DOC.replace(/^sources:.*$/m, 'sources: bb-hist');
+    queue.push({ row: row(doc, 'probe.feed.md') }, MIXED_REGISTRY);
+    const html = renderToStaticMarkup(<FeedTip feedRef="probe.feed.md" />);
+    expect(html).toContain('bilibili.com');
+    expect(html).toContain('bb-hist');
   });
 
   it('says which list it is still reading while the registry query runs', () => {

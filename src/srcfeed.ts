@@ -98,6 +98,8 @@ export interface WFeedSetup {
   nextText: string;
   /** `sources:` entry names of `srcfeed.md`; empty means every entry without a `Src:` row. */
   sources: string[];
+  /** `max:` rows kept per source for this read; 0 leaves the source's own cap. */
+  max: number;
   /** Every other `key: value` line, keyed by its lowercased key. */
   values: Record<string, string>;
   /** The section's other lines, in order. */
@@ -181,7 +183,7 @@ function splitFeedSections(md: string): { head: string; sections: FeedSection[] 
 /** The `## Setup` section, with the keys this module acts on read out of it. */
 function parseSetup(body: string[]): WFeedSetup {
   const setup: WFeedSetup = {
-    freqMs: 0, freqText: '', nextAt: null, nextText: '', sources: [], values: {}, lines: [],
+    freqMs: 0, freqText: '', nextAt: null, nextText: '', sources: [], max: 0, values: {}, lines: [],
   };
   for (const line of body) {
     const m = line.match(KEY_RX);
@@ -203,6 +205,10 @@ function parseSetup(body: string[]): WFeedSetup {
     }
     if (key === 'sources' || key === 'source') {
       setup.sources = value.split(/[\s,]+/).map((s) => s.trim()).filter((s) => s !== '');
+      continue;
+    }
+    if (key === 'max') {
+      setup.max = Math.max(0, Math.floor(Number(value) || 0));
       continue;
     }
     setup.values[key] = value;
@@ -401,6 +407,58 @@ button a pin card's \`{w.feed.md}\` token shows on hover.
  */
 export const feedDraft = (ref: string): string =>
   W_FEED_DOC.replace(/^# .*$/m, () => `# ${ref.replace(/\.md$/i, '')}`);
+
+/** One `### name` block a registry seed adds. */
+export interface SourceEntrySeed {
+  /** Entry name, as it appears after `###` and in `sources:`. */
+  name: string;
+  /** The whole block, heading included. */
+  block: string;
+}
+
+/**
+ * The registry with any missing `### name` blocks appended under `## Sources`.
+ *
+ * An existing block is never rewritten, so a user's edited URL, `Src:` or `Max:`
+ * survives a seed. The blocks go after the last entry of the section and before the
+ * next `##` section, which keeps `## Fallback` last. A document with no `## Sources`
+ * gains one at its end.
+ *
+ * @param md the registry text
+ * @param entries the blocks to add when their names are absent
+ * @returns the text, and the names actually added
+ */
+export function appendSourceEntries(
+  md: string,
+  entries: readonly SourceEntrySeed[],
+): { text: string; added: string[] } {
+  if (entries.length === 0) return { text: md, added: [] };
+  const lines = md.replace(/\s+$/, '').split('\n');
+  const { sections } = splitFeedSections(md);
+  const sources = sections.find((section) => section.name.toLowerCase() === 'sources');
+  const held = new Set<string>();
+  for (const line of sources?.body ?? []) {
+    const name = line.match(/^###\s+(\S+)\s*$/)?.[1];
+    if (name) held.add(name);
+  }
+  const missing = entries.filter((entry) => !held.has(entry.name));
+  if (missing.length === 0) return { text: md, added: [] };
+  const insertion = missing.map((entry) => entry.block.trim()).join('\n\n');
+
+  if (sources === undefined) {
+    const head = lines.join('\n').replace(/\s+$/, '');
+    const text = [head, '## Sources', insertion].filter((part) => part.trim() !== '').join('\n\n') + '\n';
+    return { text, added: missing.map((entry) => entry.name) };
+  }
+
+  const end = sections.find((section) => section.at > sources.at)?.at ?? lines.length;
+  let at = end;
+  while (at > sources.at + 1 && lines[at - 1].trim() === '') at--;
+  const before = lines.slice(0, at).join('\n').replace(/\s+$/, '');
+  const after = lines.slice(end).join('\n').replace(/^\s+/, '');
+  const text = [before, insertion, after].filter((part) => part.trim() !== '').join('\n\n') + '\n';
+  return { text, added: missing.map((entry) => entry.name) };
+}
 
 /** Row ref holding the one source registry. */
 export const SRCFEED_REF = 'srcfeed.md';
@@ -794,6 +852,10 @@ async function readEntry(
     boundary: { text: string; ref: string } | null;
     /** Whether the feed already stores an item, which is where an API walk stops. */
     seen: (item: { ref: string; txt: string }) => boolean;
+    /** `## Setup`'s `max:` for this read; 0 leaves the source's own cap. */
+    max: number;
+    /** `## Setup`'s `url:` for this read; '' when the document names none. */
+    url: string;
   },
 ): Promise<EntryRead> {
   if (entry.src === '') {
@@ -801,7 +863,7 @@ async function readEntry(
       /* The feed's own last post is the boundary, not rows another caller committed
          to `db.das`, and a document `* Limit:` must not cap a feed read. */
       existing: [],
-      limit: 0,
+      limit: ctx.max > 0 ? ctx.max : 0,
       stopAtKnown: false,
       boundary: ctx.boundary,
       seen: ctx.seen,
@@ -825,7 +887,11 @@ async function readEntry(
     const { value, path } = await runBodyWithPath(row.txt, {
       db: ctx.store.db,
       ref: entry.src,
-      args: { source: sourceBlock(entry), fallback: ctx.fallback },
+      args: {
+        source: sourceBlock(entry), fallback: ctx.fallback,
+        ...(ctx.max > 0 ? { max: ctx.max } : {}),
+        ...(ctx.url !== '' ? { url: ctx.url } : {}),
+      },
       console: ctx.log,
     });
     return {
@@ -1013,6 +1079,8 @@ export async function runSrcFeed(opts: SrcFeedRunOptions): Promise<SrcFeedReport
       log,
       boundary: boundaries.get(entry.name) ?? null,
       seen: (item) => alreadyStored(kept, item),
+      max: doc.setup.max,
+      url: doc.setup.values.url ?? '',
     })
       .catch((e: unknown): EntryRead => ({
         name: entry.name, rows: [], answered: false,

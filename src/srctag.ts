@@ -1266,8 +1266,9 @@ function msOf(v: unknown): number {
  * Sort key of a row on one dimension.
  *
  * `dt` uses the later of the server `dt` and the local `modAt`, matching
- * `sdb.daStamp`. `visitTime` takes the newest of `rec.visitTime`, the typo
- * `rec.visitTIme`, and the keys of `rec.access2discard`.
+ * `sdb.daStamp`. `visitTime` takes the newest of `rec.visitTime`, the
+ * `rec.visitTimes` visit map, the legacy misspelling `rec.visitTIme`, and the
+ * keys of `rec.access2discard`.
  *
  * @param row row to read
  * @param dim dimension to read
@@ -1283,7 +1284,7 @@ export function rowStamp(row: TagRow, dim: TagDim): number {
   }
   const rec = row.rec;
   const num = typeof rec?.visitTime === 'number' && !Number.isNaN(rec.visitTime) ? rec.visitTime : undefined;
-  const best = Math.max(num ?? -Infinity, maxRecKey(rec, 'visitTime', 'visitTIme', 'access2discard') ?? -Infinity);
+  const best = Math.max(num ?? -Infinity, maxRecKey(rec, 'visitTime', 'visitTimes', 'visitTIme', 'access2discard') ?? -Infinity);
   return Number.isFinite(best) ? best : 0;
 }
 

@@ -350,14 +350,16 @@ export function rankedTerms(scores: SparseVector, limit = Infinity): string[] {
 // ─── Pre-processing: the terms that are not evidence ───────────────────────
 
 /**
- * Tag families that describe how a row was captured rather than what it is
+ * Tag families that describe how a row was captured or maintained rather than what it is
  * about. A row's own provenance tag is dropped from its evidence whatever its
  * frequency, because `dev_saOpera` on every row of a list says which browser
  * opened them, not what any one of them is: `suffix_` is the title tail
- * `fc.txtRx` strips, `dev_` is what `sdb.dev_PREFFIX` names, and `ref_` is the
- * domain tag that family reserved.
+ * `fc.txtRx` strips, `dev_` is what `sdb.dev_PREFFIX` names, `ref_` is the
+ * domain tag that family reserved, and `FIXME…` is the maintenance family the
+ * store writes (`FIXMEchange_rejected`, `FIXME_dup_ref`) — the prefix matches
+ * every such marker, including the older spelling without an underscore.
  */
-export const PROVENANCE_TAG_PREFIXES = ['suffix_', 'dev_', 'ref_'];
+export const PROVENANCE_TAG_PREFIXES = ['suffix_', 'dev_', 'ref_', 'FIXME'];
 
 /**
  * Whether a tag names how a row was captured rather than what it is about.

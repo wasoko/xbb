@@ -6,6 +6,8 @@
  * the items the last read stored. The `refresh` button runs one read now
  * (`src/srcfeed.ts`); a document whose `next` has already passed is read once by
  * itself when the preview opens, so a stale feed catches up as soon as it is looked at.
+ * A Bilibili read that needs the account shows a QR login button in the webapp and
+ * the passport link in the extension.
  *
  * The body reads the row through a live query, so the read's own write lands back in
  * the preview without anyone passing the result along.
@@ -13,7 +15,10 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
+import { toast } from 'sonner';
 import { cleanDomain, fmtAgo } from '../fc';
+import { BB_LOGIN_URL, BB_SIGNIN_HINT, hasBbFetch } from '../bb';
+import { signinGoogle } from '../greet';
 import { daRead, type Da } from '../sdb';
 import {
   feedDraft, isFeedRef, latestPosts, loadSrcRegistry, nextRefreshAt, parseWFeedDoc,
@@ -21,6 +26,7 @@ import {
   type SrcFeedItem, type SrcFeedReport,
 } from '../srcfeed';
 import { sdbSrcFeedStore } from '../srcfeedStore';
+import { openBbLogin, useBbLoginVersion } from './bbLogin';
 
 /** Items the preview lists; the block itself keeps more. */
 const TIP_ITEMS = 5;
@@ -38,6 +44,10 @@ const ITEM: React.CSSProperties = {
   display: 'flex', gap: 6, alignItems: 'baseline', whiteSpace: 'nowrap', overflow: 'hidden',
 };
 const ITEM_REF: React.CSSProperties = { color: '#7ab8ff', textDecoration: 'underline' };
+const LINK_BUTTON: React.CSSProperties = {
+  ...ITEM_REF, padding: 0, border: 0, background: 'transparent', fontSize: 12,
+  fontFamily: 'inherit', cursor: 'pointer',
+};
 const BUTTON: React.CSSProperties = {
   marginTop: 6, padding: '2px 8px', fontSize: 12, borderRadius: 4, cursor: 'pointer',
   background: 'rgba(255,255,255,0.08)', color: 'inherit',
@@ -59,6 +69,7 @@ export function FeedTip({ feedRef }: { feedRef: string }) {
   const config = useLiveQuery(async () => ({ registry: await loadSrcRegistry(sdbSrcFeedStore()) }), [], null);
   const [report, setReport] = useState<SrcFeedReport | null>(null);
   const [busy, setBusy] = useState(false);
+  const loginVersion = useBbLoginVersion();
 
   const row: Da | undefined = held?.row;
   /* A ref with no row yet is read through the template it opens with, so the preview says
@@ -71,7 +82,11 @@ export function FeedTip({ feedRef }: { feedRef: string }) {
      before this document has been read once. */
   const hosts = useMemo(
     () => (config?.registry.entries ?? [])
-      .map((entry) => ({ name: entry.name, host: entry.url ? cleanDomain(entry.url) : '' })),
+      .map((entry) => ({
+        name: entry.name,
+        host: entry.url ? cleanDomain(entry.url) : '',
+        src: entry.src,
+      })),
     [config],
   );
   const last = latestPosts(doc);
@@ -87,6 +102,14 @@ export function FeedTip({ feedRef }: { feedRef: string }) {
     }
   }, [feedRef]);
 
+  /* The QR dialog closes only after a successful scan. A preview that was open
+     while that happened reruns the same read, so the new cookie is used without
+     another click. */
+  useEffect(() => {
+    if (loginVersion === 0) return;
+    void read();
+  }, [loginVersion, read]);
+
   /* A due document reads itself once when the preview opens; the window keeps a document
      whose source keeps refusing from asking again on every hover. */
   const pending = held === null;
@@ -99,10 +122,12 @@ export function FeedTip({ feedRef }: { feedRef: string }) {
   }, [pending, due, feedRef, read]);
 
   /* The entries `## Setup` names: the ones `srcfeed.md` declares, and the ones it does not,
-     which the line below reports by name rather than silently reading nothing. */
+     which the line below reports by name rather than silently reading nothing. An empty
+     `sources:` reads only entries without a `Src:` row, so the readout lists exactly those,
+     not every adapter the registry happens to hold. */
   const chosen = doc.setup.sources;
   const named = chosen.length === 0
-    ? hosts
+    ? hosts.filter((h) => h.src === '')
     : hosts.filter((h) => chosen.includes(h.name));
   const missingSources = chosen.filter((name) => !hosts.some((h) => h.name === name));
   const shown = items.slice(0, TIP_ITEMS);
@@ -118,6 +143,17 @@ export function FeedTip({ feedRef }: { feedRef: string }) {
   const lastText = last === undefined
     ? 'nothing read yet'
     : `${fmtAgo(last.asOf?.getTime())} · ${last.items.length} item(s)`;
+  const loginNeeded = report?.notes.some((note) => note.includes('passport.bilibili.com/login')) ?? false;
+  const signInNeeded = report?.notes.some((note) => note.includes(BB_SIGNIN_HINT)) ?? false;
+
+  const signIn = useCallback(async () => {
+    try {
+      const [, error] = await signinGoogle();
+      if (error) toast.error(error);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
 
   return (
     <div style={{ minWidth: 320 }}>
@@ -141,7 +177,7 @@ export function FeedTip({ feedRef }: { feedRef: string }) {
             <span style={KEY}>
               {chosen.length > 0
                 ? `${chosen.join(', ')} not in srcfeed.md (it declares ${hosts.map((h) => h.name).join(', ') || 'no entry'})`
-                : 'srcfeed.md declares no source'}
+                : 'no source without a Src row; name one in sources:'}
             </span>
           ))}
         {missingSources.length > 0 && named.length > 0 && (
@@ -170,6 +206,22 @@ export function FeedTip({ feedRef }: { feedRef: string }) {
           {busy ? 'reading…' : 'refresh'}
         </button>
         {report !== null && <span style={{ ...KEY, fontSize: 12 }}>{reportLine(report)}</span>}
+        {loginNeeded && (hasBbFetch()
+          ? (
+            <button type="button" style={LINK_BUTTON} onClick={() => openBbLogin()}>
+              bilibili QR login
+            </button>
+          )
+          : (
+            <a href={BB_LOGIN_URL} target="_blank" rel="noreferrer" style={{ ...ITEM_REF, fontSize: 12 }}>
+              bilibili login
+            </a>
+          ))}
+        {signInNeeded && (
+          <button type="button" style={LINK_BUTTON} onClick={() => void signIn()}>
+            sign in to webapp
+          </button>
+        )}
         {report === null && !busy && doc.setup.freqText === '' && (
           <span style={{ ...KEY, fontSize: 12 }}>no freq, so nothing reads on its own</span>
         )}

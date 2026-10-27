@@ -44,8 +44,19 @@ const reportsOf = (...rs: RowTagReport[]) => new Map(rs.map((r) => [r.tid!, r]))
 
 describe('headingTags', () => {
   it('drops the board marker, the tombstone and the capture provenance', () => {
-    expect(headingTags(row(1, ['pin', '[del]', 'dev_saOpera', 'suffix_GoogleSearch', 'react'])))
+    expect(headingTags(row(1, ['pin', '[del]', 'dev_saOpera', 'suffix_GoogleSearch',
+      'FIXMEchange_rejected', 'FIXME_dup_ref', 'react'])))
       .toEqual(['react']);
+  });
+});
+
+describe('maintenance tags', () => {
+  it('never become a node, even when a report carries one', () => {
+    const graph = buildTagGraph([pin(['react'])], [row(1)], reportsOf(
+      report(1, [tag('react'), tag('FIXME_dup_ref')]),
+    ));
+    expect(graph.weight.has('FIXME_dup_ref')).toBe(false);
+    expect(graph.edges.has('FIXME_dup_ref')).toBe(false);
   });
 });
 

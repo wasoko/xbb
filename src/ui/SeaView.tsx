@@ -2,7 +2,7 @@
  * SeaView.tsx — the sea as a wall: a tag canvas on a cylinder, the star at sea level, and the
  * camera body that is dragged through it.
  *
- * `star.tagger.md`'s generated taxonomy is packed once by `seaWall.buildWall` into rectangles
+ * The taxonomy the star's seed produces is packed once by `seaWall.buildWall` into rectangles
  * on the cylinder. The star is the split meridian: emerging recent tags keep the left band,
  * pin-card top headings keep the right band, and each top-level heading owns the next heading
  * level (or the tag's one-hop neighbours) as a treemap below it. The rest of the tags stay on
@@ -15,12 +15,13 @@
  * heading to its right. Above the horizon the canvas is almost black and catches the star's
  * light; below it is tinted and readable.
  *
- * The only DOM is the hover card. It names the tag, says what the taxonomy calls it, lists the
- * relations the table itself records, and offers the rows that can be opened. A pinch splits
- * into its horizontal and vertical parts and moves the wall's spacing apart; Ctrl/⌘ + wheel
- * moves the vertical spacing and Shift on the same gesture moves the horizontal one, so the
- * rear tail can be brought into view. Labels fit the region at the spacing it is drawn at,
- * so a compressed wall also compresses its names.
+ * The only DOM is the card. It names the tag, says what the taxonomy calls it, lists the
+ * relations the table itself records, and offers the rows that can be opened. A tap or click
+ * on a row star pins the card where it landed; the card can be dragged by its header and
+ * resized from its corner. A click on a region still locks the camera. A pinch splits into
+ * its horizontal and vertical parts and moves the wall's spacing apart; Ctrl/⌘ + wheel moves
+ * the vertical spacing and Shift + wheel moves the horizontal one. Labels fit the
+ * region at the spacing it is drawn at, so a compressed wall also compresses its names.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -30,11 +31,12 @@ import { daRead, treeCac } from '../sdb';
 import {
   STAR_TAGGER_REF, parseStarTaggerDoc, starSetupFingerprint,
 } from '../starTagger';
-import { ensureStarTaggerRow, writeStarTaggerTrace } from './starTaggerRun';
+import { dasStamp, ensureStarTaggerRow, readStarCache, sameStamp, saveStarSeed } from './starTaggerRun';
 import { loadPinGraph, type PinGraphSeed } from './seaPinGraph';
 import { restTagStore } from './restGrouper';
 import {
-  kindLabel, parseTaxonomyDoc, relationsOf, seaPinsOf, seaRowsByTag, seaTagPool, graphFromTags,
+  kindLabel, parseRelations, parseTaxonomy, parseTaxonomyDoc, relationsOf, seaPinsOf,
+  seaRowsByTag, seaTagPool, graphFromTags,
   NO_RELATIONS, type SeaAction, type SeaRelations, type SeaRow, type TagRelation,
 } from './seaTags';
 import {
@@ -92,6 +94,23 @@ interface LockState {
   target: SeaHover;
 }
 
+/** A card's position and size, in CSS pixels. */
+interface CardBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** One card drag or resize in progress. */
+interface CardDrag {
+  id: number;
+  mode: 'move' | 'resize';
+  x: number;
+  y: number;
+  box: CardBox;
+}
+
 /** Where the sea is put: full screen, behind the app's own chrome. */
 const MOUNT: React.CSSProperties = {
   position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', zIndex: 0,
@@ -101,14 +120,35 @@ const MOUNT: React.CSSProperties = {
 /** The canvas host inside that element. */
 const CANVAS_HOST: React.CSSProperties = { position: 'absolute', inset: 0 };
 
-/** The hover card. */
+/** The card's default and minimum size, in CSS pixels. */
+const CARD_W = 340;
+const CARD_H = 320;
+const CARD_MIN_W = 220;
+const CARD_MIN_H = 120;
+
+/** The card: moved and resized by its header and corner. */
 const CARD: React.CSSProperties = {
-  position: 'fixed', zIndex: 3, width: 340, maxHeight: 320, overflow: 'hidden',
-  padding: '9px 11px', borderRadius: 10, color: 'rgba(232,240,248,0.94)',
+  position: 'fixed', zIndex: 3, display: 'flex', flexDirection: 'column',
+  overflow: 'hidden', borderRadius: 10, color: 'rgba(232,240,248,0.94)',
   background: 'rgba(5,8,13,0.9)', border: '1px solid rgba(255,255,255,0.14)',
   backdropFilter: 'blur(10px)', fontSize: 12, lineHeight: '16px',
   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-  boxShadow: '0 12px 40px rgba(0,0,0,0.55)',
+  boxShadow: '0 12px 40px rgba(0,0,0,0.55)', boxSizing: 'border-box',
+};
+
+const CARD_HEAD: React.CSSProperties = {
+  cursor: 'move', touchAction: 'none', userSelect: 'none', flex: '0 0 auto',
+  padding: '9px 11px 4px', background: 'rgba(5,8,13,0.96)',
+};
+
+const CARD_BODY: React.CSSProperties = {
+  flex: '1 1 auto', overflow: 'auto', touchAction: 'pan-y', padding: '0 11px 9px',
+};
+
+const CARD_GRIP: React.CSSProperties = {
+  position: 'absolute', right: 2, bottom: 2, width: 14, height: 14,
+  cursor: 'nwse-resize', touchAction: 'none', borderRadius: 2,
+  background: 'linear-gradient(135deg, transparent 48%, rgba(255,255,255,0.28) 50%)',
 };
 
 const CARD_TAG: React.CSSProperties = {
@@ -130,13 +170,16 @@ const CARD_REL: React.CSSProperties = {
   display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 2,
 };
 
-const relationStyle = (kind: TagRelation['kind']): React.CSSProperties => ({
-  padding: '1px 5px', borderRadius: 4, fontSize: 10,
+/** One relation chip. The kind is carried by the chip's colour, so the list keeps a single
+ *  dot before each tag instead of repeating `burst ·` or `web ·` on every chip. */
+const relationStyle = (kind: TagRelation['kind'], jumpable: boolean): React.CSSProperties => ({
+  padding: '1px 5px', borderRadius: 4, fontSize: 10, border: 'none', fontFamily: 'inherit',
+  background: 'rgba(255,255,255,0.06)', cursor: jumpable ? 'pointer' : 'default',
+  opacity: jumpable ? 1 : 0.55,
   color: kind === 'pin' ? '#ffe6b8'
     : kind === 'theme' ? '#c7a6ff'
       : kind === 'burst' ? '#ffb27a'
         : kind === 'alias' ? '#d6d9ff' : '#8fe3ff',
-  background: 'rgba(255,255,255,0.06)',
 });
 
 const CARD_ROW: React.CSSProperties = {
@@ -162,6 +205,26 @@ const WAITING: React.CSSProperties = {
   pointerEvents: 'none', fontFamily: 'ui-monospace, monospace',
 };
 
+/** Keep a card inside the viewport and above its minimum size. */
+function clampCard(box: CardBox): CardBox {
+  const w = Math.min(Math.max(CARD_MIN_W, box.w), Math.max(CARD_MIN_W, window.innerWidth - 16));
+  const h = Math.min(Math.max(CARD_MIN_H, box.h), Math.max(CARD_MIN_H, window.innerHeight - 16));
+  return {
+    w,
+    h,
+    x: Math.min(Math.max(8, box.x), Math.max(8, window.innerWidth - w - 8)),
+    y: Math.min(Math.max(8, box.y), Math.max(8, window.innerHeight - h - 8)),
+  };
+}
+
+/** Where a card opens for a pointer or a lock. */
+function defaultCardBox(active: HoverState): CardBox {
+  return clampCard({
+    x: active.x + 18, y: active.y + 18,
+    w: CARD_W, h: Math.min(CARD_H, Math.max(CARD_MIN_H, window.innerHeight - 16)),
+  });
+}
+
 /** The stored momentum setting as `[0, 1]`, with an unset value at the shipped middle. */
 function momentumOf(stored: unknown): number {
   const n = Number(stored);
@@ -179,11 +242,11 @@ function openRowOf(navigate: (to: string) => void, ref: string, action: SeaActio
 }
 
 /**
- * The sea: the tag wall, the camera body, the star, and the hover card.
+ * The sea: the tag wall, the camera body, the star, and its card.
  *
  * @param props.foreground whether the sea is the route in front; a route that draws its own
  *        panes keeps its own pointer, so the sea only takes it here
- * @returns the canvas host and the hover card
+ * @returns the canvas host and the card
  */
 export function SeaView({ foreground }: { foreground: boolean }) {
   const navigate = useNavigate();
@@ -197,7 +260,6 @@ export function SeaView({ foreground }: { foreground: boolean }) {
   const graphRef = useRef<TagGraph | null>(null);
   const relationsRef = useRef<SeaRelations>(NO_RELATIONS);
   const lockedRef = useRef<LockState | null>(null);
-  const openRef = useRef<(ref: string, action: SeaAction) => void>(() => {});
   const lockRef = useRef<(hit: SeaWallPick) => void>(() => {});
   const applyRef = useRef<() => void>(() => {});
   const spacingRef = useRef({ x: 1, y: 1 });
@@ -206,28 +268,50 @@ export function SeaView({ foreground }: { foreground: boolean }) {
   const [seedError, setSeedError] = useState<string | null>(null);
   const [seed, setSeed] = useState<PinGraphSeed | null>(null);
   const [hover, setHover] = useState<HoverState | null>(null);
+  const [sticky, setSticky] = useState<HoverState | null>(null);
   const [locked, setLocked] = useState<LockState | null>(null);
   const [lastPointer, setLastPointer] = useState(NO_POINTER);
+  const [cardBox, setCardBox] = useState<CardBox | null>(null);
+  const stickyRef = useRef<HoverState | null>(null);
+  const cardDragRef = useRef<CardDrag | null>(null);
 
-  /* The tagger row is the wall's only configuration: Setup decides the seed, and the
-     generated section is both the tag table and the relation lists the card reads. */
+  /* The row decides the seed and holds the overridable relation mapping; the generated
+     table and the seed it was read from are one `db.bins` record. */
   const taggerRow = useLiveQuery(async () => (await daRead(STAR_TAGGER_REF, 'md')) ?? null, [], null);
   const tagger = useMemo(
     () => (taggerRow === null ? null : parseStarTaggerDoc(taggerRow.txt)),
     [taggerRow?.txt],
   );
-  const doc = useMemo(
+  const cache = useLiveQuery(async () => (await readStarCache()) ?? null, [], null);
+  /* A row written by an older build still carries its `## Taxonomy`; that is what a first
+     mount opens on until the first seed writes the cache. */
+  const legacy = useMemo(
     () => (tagger === null ? { tags: [], relations: NO_RELATIONS } : parseTaxonomyDoc(tagger.taxonomy)),
     [tagger?.taxonomy],
   );
-  const tags = useMemo(() => seaTagPool(doc.tags, seed), [doc.tags, seed]);
+  const relations = useMemo<SeaRelations>(() => {
+    const mapping = tagger === null ? NO_RELATIONS : parseRelations(tagger.mapping);
+    const bursts = cache === null ? legacy.relations.bursts : parseRelations(cache.taxonomy).bursts;
+    const setup = tagger?.setup;
+    return {
+      web: setup?.noWeb === true ? [] : mapping.web,
+      themes: setup?.noTheme === true ? [] : mapping.themes,
+      bursts,
+      aliases: mapping.aliases,
+      synonyms: setup?.noSyn === true ? [] : mapping.synonyms,
+    };
+  }, [tagger?.mapping, tagger?.setup, cache, legacy]);
+  const tags = useMemo(
+    () => seaTagPool(cache === null ? legacy.tags : parseTaxonomy(cache.taxonomy), seed),
+    [cache, legacy.tags, seed],
+  );
   const rowsByTag = useMemo(
     () => (seed === null ? new Map<string, SeaRow[]>() : seaRowsByTag(seed)),
     [seed],
   );
   const graph = useMemo(
     () => {
-      const base = seed?.graph ?? graphFromTags(tags, doc.relations);
+      const base = seed?.graph ?? graphFromTags(tags, relations);
       /* The generated table is the durable reading, so a pinned reach there roots the wall
          even when the pin cards themselves are not readable in this profile. */
       const pinned = tags.filter((tag) => tag.reach === 'pinned').map((tag) => tag.tag);
@@ -236,7 +320,7 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       for (const tag of pinned) roots.add(tag);
       return { ...base, roots };
     },
-    [seed, tags, doc.relations],
+    [seed, tags, relations],
   );
   const wall = useMemo(
     () => (tags.length === 0
@@ -274,20 +358,28 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       })),
     [graph, tags, rowsByTag, seed],
   );
+  /** The tags the wall carries, so a relation chip can say whether its tag has a region. */
+  const regionTags = useMemo(
+    () => new Set((wall?.regions ?? []).map((region) => region.tag)),
+    [wall],
+  );
 
   useEffect(() => { rowsRef.current = rowsByTag; }, [rowsByTag]);
   useEffect(() => { graphRef.current = graph; }, [graph]);
-  useEffect(() => { relationsRef.current = doc.relations; }, [doc.relations]);
+  useEffect(() => { relationsRef.current = relations; }, [relations]);
   useEffect(() => { lockedRef.current = locked; }, [locked]);
   useEffect(() => {
-    if (!foreground) setHover(null);
+    if (!foreground) {
+      setHover(null);
+      setSticky(null);
+      stickyRef.current = null;
+    }
   }, [foreground]);
+  useEffect(() => { stickyRef.current = sticky; }, [sticky]);
 
   const openRow = useCallback((ref: string, action: SeaAction) => {
     openRowOf(navigate, ref, action);
   }, [navigate]);
-  useEffect(() => { openRef.current = openRow; }, [openRow]);
-
   /* The relations a region's hover shows, from the table's own relation lists. */
   const relationsFor = useCallback((region: WallRegion | undefined): TagRelation[] => {
     if (region === undefined) return [];
@@ -301,7 +393,24 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     });
   }, []);
 
+  /* Point the camera at one region and keep its relations lit: the lock a click on the wall
+     makes, shared with the hover card's relation chips. */
+  const lockRegion = useCallback((region: WallRegion): void => {
+    const next: LockState = {
+      tag: region.tag,
+      rise: ((region.rise0 + region.rise1) / 2) / DEG_PER_UNIT,
+      yaw: (-((region.lon0 + region.lon1) / 2) * Math.PI) / 180,
+      target: { region },
+    };
+    lockedRef.current = next;
+    setLocked(next);
+    rendererRef.current?.setHover(next.target, relationsFor(region));
+  }, [relationsFor]);
+
   const toggleLock = useCallback((hit: SeaWallPick) => {
+    setHover(null);
+    setSticky(null);
+    stickyRef.current = null;
     const region = hit.region;
     if (region === undefined) {
       lockedRef.current = null;
@@ -316,26 +425,30 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       rendererRef.current?.setHover(null, []);
       return;
     }
-    const next: LockState = {
-      tag: region.tag,
-      rise: ((region.rise0 + region.rise1) / 2) / DEG_PER_UNIT,
-      yaw: (-((region.lon0 + region.lon1) / 2) * Math.PI) / 180,
-      target: { region },
-    };
-    lockedRef.current = next;
-    setLocked(next);
-    rendererRef.current?.setHover(next.target, relationsFor(region));
-  }, [relationsFor]);
+    lockRegion(region);
+  }, [lockRegion]);
   useEffect(() => { lockRef.current = toggleLock; }, [toggleLock]);
 
-  /* Seed the row once so a fresh table has a place to write the trace. */
+  /* A relation chip walks the table: the camera locks the tag the chip names, exactly as a
+     click on its region does, so a hover card answers `where is that?` in place. */
+  const jumpToRegion = useCallback((tag: string): void => {
+    const region = wall?.regions.find((entry) => entry.tag === tag);
+    if (region === undefined) return;
+    setHover(null);
+    setSticky(null);
+    stickyRef.current = null;
+    lockRegion(region);
+  }, [wall, lockRegion]);
+
+  /* Seed the row once so a fresh table has a place to write the mapping. */
   useEffect(() => {
     void ensureStarTaggerRow().catch((error: unknown) => {
       console.debug('[star.tagger] seed skipped', error);
     });
   }, []);
 
-  /* Re-seed when Setup changes, or once for a `reset: yes`. */
+  /* Open on the cached seed while the table and Setup stand; re-seed when either changes,
+     or once for a `reset: yes`. */
   const lastSeed = useRef<string | null>(null);
   const resetSeen = useRef(false);
   useEffect(() => {
@@ -353,21 +466,30 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     const setup = tagger.setup;
     setSeedError(null);
     let live = true;
-    loadPinGraph(setup)
-      .then((loaded) => {
-        if (!live) return;
-        setSeed(loaded);
-        if (restTagStore.version === 0) {
-          restTagStore.set(loaded.reports, loaded.rows, loaded.pins);
-        }
-        void writeStarTaggerTrace(loaded, loaded.setup, loaded.timings).catch((error: unknown) => {
-          console.debug('[star.tagger] trace skipped', error);
-        });
-      })
-      .catch((error: unknown) => {
-        console.debug('[sea] seed skipped', error);
-        if (live) setSeedError(error instanceof Error ? error.message : String(error));
-      });
+    const publish = (loaded: PinGraphSeed) => {
+      if (!live) return;
+      setSeed(loaded);
+      /* The omnibox's suggestion zone reads the seed's own pass until the rest list runs. */
+      if (restTagStore.version === 0) {
+        restTagStore.set(loaded.reports, loaded.rows, loaded.pins);
+      }
+    };
+    void (async () => {
+      const stamp = await dasStamp();
+      const held = await readStarCache();
+      if (!setup.reset && held !== undefined
+        && held.fingerprint === key && sameStamp(held.stamp, stamp)) {
+        publish(held.seed);
+        return;
+      }
+      const loaded = await loadPinGraph(setup);
+      if (!live) return;
+      publish(loaded);
+      await saveStarSeed(loaded, loaded.setup, loaded.timings);
+    })().catch((error: unknown) => {
+      console.debug('[sea] seed skipped', error);
+      if (live) setSeedError(error instanceof Error ? error.message : String(error));
+    });
     return () => { live = false; };
   }, [taggerRow?.txt]);
 
@@ -379,6 +501,9 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     renderer.setContent(next);
     renderer.setSpacing(spacingRef.current.x, spacingRef.current.y);
     setHover(null);
+    setSticky(null);
+    stickyRef.current = null;
+    setCardBox(null);
     lockedRef.current = null;
     setLocked(null);
   }, [wall]);
@@ -446,7 +571,6 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     let yawSpeed = 0;
     let scrollSpeed = 0;
     let hoverAt = 0;
-    let clickTimer: number | null = null;
     let lastClickAt = 0;
     let lastClickX = 0;
     let lastClickY = 0;
@@ -486,8 +610,10 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       renderer.setPointer(clientX - rect.left, clientY - rect.top);
       if (hit === null) {
         applyHover(null, clientX, clientY);
+        const stay = stickyRef.current;
         const held = lockedRef.current;
-        if (held !== null) applyLock(held.target);
+        if (stay !== null) applyLock(stay.target);
+        else if (held !== null) applyLock(held.target);
         setCursor(false);
         return;
       }
@@ -510,6 +636,8 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       lockedRef.current = null;
       setLocked(null);
       setHover(null);
+      setSticky(null);
+      stickyRef.current = null;
       renderer.setHover(null, []);
     };
 
@@ -517,8 +645,8 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       event.preventDefault();
       const horizontalGesture = event.deltaX !== 0
         && Math.abs(event.deltaX) > Math.abs(event.deltaY);
-      if (event.ctrlKey || event.metaKey || horizontalGesture) {
-        /* Ctrl or ⌘ with the wheel changes the vertical spacing; Shift on the same gesture
+      if (event.ctrlKey || event.metaKey || event.shiftKey || horizontalGesture) {
+        /* Ctrl or ⌘ with the wheel changes the vertical spacing; Shift with the wheel
            changes the horizontal one, which is what pulls the rear tail into the front
            half. A horizontal wheel or pinch is the same horizontal gesture. Labels are
            fitted to the region at that spacing, so the text shrinks with its cell. */
@@ -540,7 +668,8 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     const onPointerDown = (event: PointerEvent) => {
       if (event.pointerType === 'mouse' && event.button !== 0) return;
       pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-      if (event.pointerType !== 'mouse') renderer.setStarTouch(true);
+      const rect = canvas.getBoundingClientRect();
+      renderer.setPointer(event.clientX - rect.left, event.clientY - rect.top);
       try {
         host.setPointerCapture(event.pointerId);
       } catch {
@@ -612,12 +741,14 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       rig.scrollTarget += dy * risePerPixel();
       yawSpeed = -(dx * yawPerPixel()) / (ms / 1000);
       scrollSpeed = (dy * risePerPixel()) / (ms / 1000);
-      if (moved > CLICK_SLOP) setHover(null);
+      if (moved > CLICK_SLOP) {
+        setHover(null);
+        if (stickyRef.current === null) renderer.setPointer(-1, -1);
+      }
     };
 
     const onPointerUp = (event: PointerEvent) => {
       pointers.delete(event.pointerId);
-      if (pointers.size === 0) renderer.setStarTouch(false);
       if (pointers.size < 2) pinch = null;
       if (host.hasPointerCapture(event.pointerId)) host.releasePointerCapture(event.pointerId);
       if (!dragging) return;
@@ -630,30 +761,39 @@ export function SeaView({ foreground }: { foreground: boolean }) {
         lastClickX = event.clientX;
         lastClickY = event.clientY;
         if (isDouble) {
-          if (clickTimer !== null) {
-            window.clearTimeout(clickTimer);
-            clickTimer = null;
-          }
           resetPose();
           return;
         }
         const rect = canvas.getBoundingClientRect();
-        const hit = renderer.pick(event.clientX - rect.left, event.clientY - rect.top);
-        if (clickTimer !== null) window.clearTimeout(clickTimer);
-        /* A single click waits out the double-click window: the same gesture must not both
-           open a link and carry the camera home. */
-        clickTimer = window.setTimeout(() => {
-          clickTimer = null;
-          if (hit === null) {
-            lockedRef.current = null;
-            setLocked(null);
-            renderer.setHover(null, []);
-          } else if (hit.point !== undefined) {
-            openRef.current(hit.point.ref, hit.point.action);
-          } else {
-            lockRef.current(hit);
-          }
-        }, 300);
+        const px = event.clientX - rect.left;
+        const py = event.clientY - rect.top;
+        const hit = renderer.pick(px, py);
+        renderer.setPointer(px, py);
+        if (hit === null) {
+          lockedRef.current = null;
+          setLocked(null);
+          setHover(null);
+          setSticky(null);
+          stickyRef.current = null;
+          renderer.setHover(null, []);
+          renderer.setPointer(-1, -1);
+        } else if (hit.point !== undefined) {
+          const target = { region: hit.region, point: hit.point };
+          const next = { target, x: event.clientX, y: event.clientY };
+          lockedRef.current = null;
+          setLocked(null);
+          setHover(null);
+          setSticky(next);
+          stickyRef.current = next;
+          setLastPointer({ x: event.clientX, y: event.clientY });
+          renderer.setHover(target, relationsFor(hit.region));
+        } else {
+          setHover(null);
+          setSticky(null);
+          stickyRef.current = null;
+          setLastPointer({ x: event.clientX, y: event.clientY });
+          lockRef.current(hit);
+        }
         return;
       }
       /* The release hands the drag's own speed to the coast, capped, so a flick carries. */
@@ -663,8 +803,7 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     };
 
     const onPointerLeave = () => {
-      renderer.setPointer(-1, -1);
-      renderer.setStarHover(false);
+      if (stickyRef.current === null) renderer.setPointer(-1, -1);
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -683,6 +822,8 @@ export function SeaView({ foreground }: { foreground: boolean }) {
       } else if (key === 'escape') {
         lockedRef.current = null;
         setLocked(null);
+        setSticky(null);
+        stickyRef.current = null;
         applyHover(null, 0, 0);
       }
     };
@@ -851,7 +992,6 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     return () => {
       renderer.setAnimationLoop(null);
       document.removeEventListener('visibilitychange', onVisible);
-      if (clickTimer !== null) window.clearTimeout(clickTimer);
       observer?.disconnect();
       window.removeEventListener('resize', size);
       reduced.removeEventListener('change', onReduced);
@@ -871,42 +1011,103 @@ export function SeaView({ foreground }: { foreground: boolean }) {
     };
   }, [relationsFor]);
 
-  /* The card follows the pointer, and stays on the locked tag when the pointer has left. */
-  const active = hover ?? (locked === null ? null : { target: locked.target, ...lastPointer });
+  /* The card follows the pointer, stays on a tapped star, and stays on a locked tag. */
+  const active = hover ?? sticky
+    ?? (locked === null ? null : { target: locked.target, ...lastPointer });
   const activeRegion = active?.target.region;
+  const shownBox = cardBox ?? (active === null ? null : defaultCardBox(active));
+  const boxRef = useRef<CardBox | null>(null);
+  boxRef.current = shownBox;
+  useEffect(() => { setCardBox(null); }, [activeRegion?.tag]);
+
+  const beginCardDrag = useCallback((event: React.PointerEvent<HTMLElement>,
+    mode: CardDrag['mode']): void => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const box = boxRef.current;
+    if (box === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    cardDragRef.current = { id: event.pointerId, mode, x: event.clientX, y: event.clientY, box };
+  }, []);
+  const moveCard = useCallback((event: React.PointerEvent<HTMLElement>): void => {
+    const drag = cardDragRef.current;
+    if (drag === null || drag.id !== event.pointerId) return;
+    event.preventDefault();
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    setCardBox(clampCard(drag.mode === 'move'
+      ? { ...drag.box, x: drag.box.x + dx, y: drag.box.y + dy }
+      : { ...drag.box, w: drag.box.w + dx, h: drag.box.h + dy }));
+  }, []);
+  const endCardDrag = useCallback((event: React.PointerEvent<HTMLElement>): void => {
+    const drag = cardDragRef.current;
+    if (drag === null || drag.id !== event.pointerId) return;
+    cardDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId))
+      event.currentTarget.releasePointerCapture(event.pointerId);
+  }, []);
   const activeRelations = useMemo(
     () => relationsFor(activeRegion),
     [activeRegion, relationsFor],
   );
 
   const card = useMemo(() => {
-    if (active === null || activeRegion === undefined || !foreground) return null;
-    const left = Math.max(8, Math.min(active.x + 18, window.innerWidth - 356));
-    const top = Math.max(8, Math.min(active.y + 18, window.innerHeight - 330));
+    if (active === null || activeRegion === undefined || !foreground
+      || shownBox === null) return null;
     const region = activeRegion;
     const nature = kindLabel(region.nature);
     const reach = kindLabel(region.reach);
     const point = active.target.point;
 
     return (
-      <div style={{ ...CARD, left, top }} role="group" aria-live="polite">
-        <div style={CARD_TAG}>{`#${region.tag}`}</div>
-        <div style={CARD_META}>
-          {`${reach.mark} ${reach.label} · ${nature.label} · ${region.weight} row(s)`}
-          {region.lambda === undefined ? '' : ` · λ ${region.lambda.toFixed(2)}`}
-          {region.top === undefined ? '' : ` · ${region.top}`}
-          {region.burst === undefined ? '' : ` · burst #${region.burst}`}
-          {region.trend === undefined ? '' : ` · trend ${region.trend.toFixed(2)}`}
+      <div
+        style={{
+          ...CARD, left: shownBox.x, top: shownBox.y,
+          width: shownBox.w, height: shownBox.h,
+        }}
+        role="group"
+        aria-live="polite"
+      >
+        <div
+          style={CARD_HEAD}
+          title="drag to move"
+          onPointerDown={(event) => beginCardDrag(event, 'move')}
+          onPointerMove={moveCard}
+          onPointerUp={endCardDrag}
+          onPointerCancel={endCardDrag}
+        >
+          <div style={CARD_TAG}>{`#${region.tag}`}</div>
+          <div style={CARD_META}>
+            {`${reach.mark} ${reach.label} · ${nature.label} · ${region.weight} row(s)`}
+            {region.lambda === undefined ? '' : ` · λ ${region.lambda.toFixed(2)}`}
+            {region.top === undefined ? '' : ` · ${region.top}`}
+            {region.burst === undefined ? '' : ` · burst #${region.burst}`}
+            {region.trend === undefined ? '' : ` · trend ${region.trend.toFixed(2)}`}
+          </div>
         </div>
+        <div style={CARD_BODY}>
         {activeRelations.length > 0 && (
           <>
             <div style={CARD_SECTION}>relations</div>
             <div style={CARD_REL}>
-              {activeRelations.slice(0, 10).map((relation) => (
-                <span key={`${relation.kind}:${relation.tag}`} style={relationStyle(relation.kind)}>
-                  {`${relation.kind} · ${relation.tag}`}
-                </span>
-              ))}
+              {activeRelations.slice(0, 10).map((relation) => {
+                const jumpable = regionTags.has(relation.tag);
+                return (
+                  <button
+                    key={`${relation.kind}:${relation.tag}`}
+                    type="button"
+                    style={relationStyle(relation.kind, jumpable)}
+                    title={jumpable
+                      ? `${relation.kind} ${relation.tag} — jump to its region`
+                      : `${relation.kind} ${relation.tag} — not on the wall`}
+                    aria-disabled={!jumpable}
+                    onClick={() => jumpToRegion(relation.tag)}
+                  >
+                    {`· ${relation.tag}`}
+                  </button>
+                );
+              })}
             </div>
           </>
         )}
@@ -947,9 +1148,21 @@ export function SeaView({ foreground }: { foreground: boolean }) {
             no links kept this tag
           </div>
         )}
+        </div>
+        <div
+          style={CARD_GRIP}
+          title="resize"
+          onPointerDown={(event) => beginCardDrag(event, 'resize')}
+          onPointerMove={moveCard}
+          onPointerUp={endCardDrag}
+          onPointerCancel={endCardDrag}
+        />
       </div>
     );
-  }, [active, activeRegion, activeRelations, foreground, openRow]);
+  }, [
+    active, activeRegion, activeRelations, beginCardDrag, endCardDrag, foreground,
+    jumpToRegion, moveCard, openRow, regionTags, shownBox,
+  ]);
 
   if (failure !== null) return <div style={NOTICE}>{failure}</div>;
 

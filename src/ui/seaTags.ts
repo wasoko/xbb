@@ -1,10 +1,12 @@
 /**
- * seaTags.ts — the sea's tag data: `star.tagger.md`'s generated `## Taxonomy` table, and the
- * rows a tag was kept by.
+ * seaTags.ts — the sea's tag data: the generated taxonomy table cached in `db.bins`, the
+ * overridable `## Mapping` relations, and the rows a tag was kept by.
  *
  * The table is the durable reading of the seed: one row per tag, with its reach, kind, score,
  * weight, lexical share and channel. It is read without touching the row table, so the world
- * opens on the last reading while `loadPinGraph` re-reads the newest rows.
+ * opens on the last reading while `loadPinGraph` re-reads the newest rows. The mapping is the
+ * part a reader edits in `star.tagger.md`; `starTaggerRun` writes it once and only `reset`
+ * rebuilds it.
  *
  * The rows themselves stay in `db.das`; `seaRowsByTag` folds the seed's reports into the same
  * canonical tag names the table uses. A row is a link when its ref is an address and an editor
@@ -12,6 +14,7 @@
  */
 
 import { daStamp, type Da } from '../sdb';
+import { isProvenanceTag } from '../rstag';
 import { pinHeadingRows } from '../srctag';
 import type { PinGraphSeed } from './seaPinGraph';
 import { recentStamp } from './seaTrend';
@@ -247,13 +250,16 @@ export function seaTagsFromSeed(seed: PinGraphSeed): SeaTag[] {
 /**
  * The tags the world draws: the generated table when it has rows, the seed's graph otherwise.
  *
+ * A provenance or maintenance tag (`dev_`, `suffix_`, `ref_`, `FIXME…`) is skipped whichever
+ * source it came from, so a table written before the filter existed cannot draw one.
+ *
  * @param taxonomy the parsed `## Taxonomy` table
  * @param seed the last pin reading, if one has landed
  * @returns the tags to draw
  */
 export function seaTagPool(taxonomy: readonly SeaTag[], seed: PinGraphSeed | null): SeaTag[] {
-  if (taxonomy.length > 0) return taxonomy as SeaTag[];
-  return seed === null ? [] : seaTagsFromSeed(seed);
+  const held = taxonomy.length > 0 ? taxonomy as SeaTag[] : (seed === null ? [] : seaTagsFromSeed(seed));
+  return held.filter((tag) => !isProvenanceTag(tag.tag));
 }
 
 /**

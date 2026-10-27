@@ -84,6 +84,17 @@ export async function binPut(key:string, bin: any) {
   return db.bins.put({ key, rec: { date: new Date().toLocaleString('zh-cn',{hour12:false}) }
       , bin: fc.encZip(bin) });
 }
+/** Read a value back out of `db.bins`, or `undefined` when nothing is stored under the key.
+ *  A payload that cannot be decoded is treated as absent, so a stale archive costs a rebuild
+ *  rather than the whole load.
+ * @param key archive name
+ * @returns the archived value */
+export async function binGet<T>(key: string): Promise<T | undefined> {
+  const row = await db.bins.get(key)
+  if (row === undefined) return undefined
+  try { return fc.decZip(row.bin) as T }
+  catch (error) { console.warn(`binGet ${key}: undecodable payload`, error); return undefined }
+}
 export class DDB extends Dexie {
   tree!: Dexie.Table<{ key: string, value: unknown }>;
   das!: Dexie.Table<Da>;
@@ -246,7 +257,7 @@ export function availableDas(tags: Da[]): CrumbItem[] {
     tag.tags?.forEach(s => {
       counts[s] = (counts[s] || 0) + 1;
       if (!tag.rec) return;
-      const mv = maxRecKey(tag.rec, 'visitTime', 'visitTIme');
+      const mv = maxRecKey(tag.rec, 'visitTime', 'visitTimes', 'visitTIme');
       if (mv !== undefined) maxVisit[s] = Math.max(maxVisit[s] ?? 0, mv);
       const ma = maxRecKey(tag.rec, 'access2discard');
       if (ma !== undefined) maxAccess[s] = Math.max(maxAccess[s] ?? 0, ma);

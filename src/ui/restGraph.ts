@@ -319,6 +319,8 @@ export function buildTagGraph(
        from the tag's shape. */
     const head = report?.tags[0];
     for (const t of report?.tags ?? []) {
+      /* A maintenance or capture tag is not a node, whichever half proposed it. */
+      if (isProvenanceTag(t.tag)) continue;
       const node = name(t.tag);
       tags.add(node);
       if (t.tag === head?.tag) mark(node, 'head');

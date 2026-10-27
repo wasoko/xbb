@@ -1,11 +1,10 @@
 // @vitest-environment happy-dom
 /**
- * starTaggerRun.test.ts — the row seed and the write-back around the pure
- * `## Taxonomy` builder.
+ * starTaggerRun.test.ts — the row seed, the mapping write and the one `db.bins` cache.
  *
- * fake-indexeddb supplies the store; qarf runs over a handful of tab/tag rows,
- * so the assertions cover which rows the seed reads, which row it excludes, and
- * what a second identical write leaves alone.
+ * fake-indexeddb supplies the store; qarf runs over a handful of tab/tag rows, so the
+ * assertions cover which rows the seed reads, which row it excludes, and what the cache
+ * stores and reuses.
  */
 
 import 'fake-indexeddb/auto';
@@ -15,7 +14,9 @@ import {
   STAR_TAGGER_DOC, STAR_TAGGER_REF, defaultStarSetup, parseStarTaggerDoc, setSetupValue,
 } from '../../src/starTagger';
 import { loadPinGraph } from '../../src/ui/seaPinGraph';
-import { ensureStarTaggerRow, writeStarTaggerTrace } from '../../src/ui/starTaggerRun';
+import {
+  STAR_CACHE_VERSION, dasStamp, ensureStarTaggerRow, readStarCache, sameStamp, saveStarSeed,
+} from '../../src/ui/starTaggerRun';
 
 const put = (row: Partial<Da> & Pick<Da, 'txt' | 'ref' | 'type'>): Promise<number> =>
   db.das.add({ tags: [], rec: {}, ...row } as Da);
@@ -25,6 +26,7 @@ const held = async (ref: string): Promise<Da | undefined> =>
 
 beforeEach(async () => {
   await db.das.clear();
+  await db.bins.clear();
 });
 
 afterEach(() => {
@@ -78,38 +80,79 @@ describe('loadPinGraph', () => {
   });
 });
 
-describe('writeStarTaggerTrace', () => {
-  it('writes the generated section, keeps Setup and Notes, and skips an unchanged rerun', async () => {
+describe('saveStarSeed', () => {
+  /** Two evidence rows, one pin card and the seeded tagger row. */
+  const seedOnce = async () => {
     await put({ tid: 1, ref: 'https://a.test/1', type: 'tab', txt: 'react hooks state' });
-    await put({ tid: 2, ref: 'pin/demo.md', type: 'md', txt: '## #react', tags: ['pin'] });
+    await put({ tid: 2, ref: 'https://a.test/2', type: 'tag', txt: 'react compiler' });
+    await put({ tid: 3, ref: 'pin/demo.md', type: 'md', txt: '## #react', tags: ['pin'] });
     await ensureStarTaggerRow();
-    const seed = await loadPinGraph({ ...defaultStarSetup(), base: 10 });
-    const at = new Date('2026-10-17T00:00:00Z');
+    return loadPinGraph({ ...defaultStarSetup(), base: 10 });
+  };
 
-    const first = await writeStarTaggerTrace(seed, seed.setup, seed.timings, at);
-    expect(first.wrote).toBe(true);
-    const row = await held(STAR_TAGGER_REF);
-    const doc = parseStarTaggerDoc(row?.txt ?? '');
-    expect(doc.taxonomy).toContain('| tag | reach | kind |');
+  it('caches the table, writes the mapping once and keeps the table out of the row', async () => {
+    const seed = await seedOnce();
+    const at = new Date('2026-10-17T00:00:00Z');
+    const cache = await saveStarSeed(seed, seed.setup, seed.timings, at);
+
+    expect(cache.v).toBe(STAR_CACHE_VERSION);
+    expect(cache.taxonomy).toContain('seeded 2026-10-17T00:00:00.000Z');
+    expect(cache.taxonomy).toContain('| tag | reach | kind |');
+    expect(cache.taxonomy).toContain('### Bursts');
+    expect(cache.seed.rows.map((r) => r.tid)).toEqual([2, 1]);
+
+    const stored = await readStarCache();
+    expect(stored?.taxonomy).toBe(cache.taxonomy);
+    expect(stored?.fingerprint).toBe(cache.fingerprint);
+    /* The graph's namer is a function, so the cache reopens it from the recorded maps. */
+    expect(stored?.seed.graph.name('react')).toBe('react');
+    for (const tag of stored!.seed.graph.weight.keys()) {
+      expect(stored!.seed.graph.name(tag)).toBe(tag);
+    }
+
+    const doc = parseStarTaggerDoc((await held(STAR_TAGGER_REF))?.txt ?? '');
+    expect(doc.taxonomy).toBe('');
+    expect(doc.mapping).toContain('### Web');
     expect(doc.notes).toContain('This row customizes');
     expect(doc.setup.reset).toBe(false);
-
-    const second = await writeStarTaggerTrace(
-      seed, seed.setup, seed.timings, new Date('2026-10-18T00:00:00Z'),
-    );
-    expect(second.wrote).toBe(false);
   });
 
-  it('clears a one-shot reset after rebuilding the trace', async () => {
-    await put({ tid: 1, ref: 'https://a.test/1', type: 'tab', txt: 'react hooks state' });
-    await ensureStarTaggerRow();
-    await db.das.update((await held(STAR_TAGGER_REF))!.tid!, {
-      txt: setSetupValue(STAR_TAGGER_DOC, 'reset', 'yes'),
-    });
-    const seed = await loadPinGraph({ ...defaultStarSetup(), base: 10 });
-    const report = await writeStarTaggerTrace(seed, { ...seed.setup, reset: true }, seed.timings);
+  it('keeps the stored table lines when a later seed reads the same table', async () => {
+    const seed = await seedOnce();
+    const first = await saveStarSeed(seed, seed.setup, seed.timings, new Date('2026-10-17T00:00:00Z'));
+    const second = await saveStarSeed(seed, seed.setup, seed.timings, new Date('2026-10-18T00:00:00Z'));
+    expect(second.taxonomy).toBe(first.taxonomy);
+    expect(second.taxonomy).toContain('seeded 2026-10-17T00:00:00.000Z');
+  });
 
-    expect(report.wrote).toBe(true);
-    expect(parseStarTaggerDoc((await held(STAR_TAGGER_REF))?.txt ?? '').setup.reset).toBe(false);
+  it('records a stamp that still matches the table it read', async () => {
+    const seed = await seedOnce();
+    const cache = await saveStarSeed(seed, seed.setup, seed.timings);
+    expect(sameStamp(cache.stamp, await dasStamp())).toBe(true);
+  });
+
+  it('reopens the graph namer for an explicit alias', async () => {
+    await put({ tid: 1, ref: 'https://a.test/1', type: 'tab', txt: 'js runtime' });
+    await put({ tid: 2, ref: 'pin/js.md', type: 'md', txt: '## #js', tags: ['pin'] });
+    const seed = await loadPinGraph({
+      ...defaultStarSetup(), base: 10, alias: { js: 'javascript' },
+    });
+    await saveStarSeed(seed, seed.setup, seed.timings);
+    const cached = await readStarCache();
+    expect(cached?.seed.graph.name('js')).toBe('javascript');
+  });
+
+  it('clears a one-shot reset and rewrites the mapping', async () => {
+    const seed = await seedOnce();
+    const row = await held(STAR_TAGGER_REF);
+    await db.das.update(row!.tid!, { txt: setSetupValue(STAR_TAGGER_DOC, 'reset', 'yes') });
+    const resetSeed = await loadPinGraph({ ...defaultStarSetup(), base: 10 });
+
+    await saveStarSeed(resetSeed, { ...resetSeed.setup, reset: true }, resetSeed.timings);
+
+    const doc = parseStarTaggerDoc((await held(STAR_TAGGER_REF))?.txt ?? '');
+    expect(doc.setup.reset).toBe(false);
+    expect(doc.mapping).toContain('### Web');
   });
 });
+

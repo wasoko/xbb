@@ -3,7 +3,7 @@
 `srcfeed` reads the dynamic rows a source entry declares and hands them back with
 `tid` unset. A feed item exists only on the wire, so nothing is written until a
 caller pins, tags or clicks a row; the feed document keeps only the items a read
-found. That is the same split [sTag.md](startag/sTag.md) keeps between scoring and
+found. That is the same split [tagger.md](2mod/tagger.md) keeps between scoring and
 writing.
 
 `srcfeed.md` declares every source once. A feed document — any `*.feed.md` — names
@@ -24,6 +24,7 @@ legacy: an installation that still holds them is read through the adapter in
 | Store port | `src/srcfeedStore.ts` | `daRead` / `daEdit` / `greet` behind `SrcFeedStore` |
 | Web walk | `src/srcfeedWeb.ts` | the `## Sources` dialect, strategies, backoff, payload readers, the row plan, the commit port, `globalThis.webfeed` |
 | Tab port | `src/srcfeedTab.ts` | the extension probe, tab match, `chrome.userScripts.execute`, the refusal catalogue |
+| Bilibili transport | `src/bbProxy.ts`, `src/bbProxyInstall.ts` | the webapp `cors_bb` client, QR calls, cookie/server-session storage |
 | Rows | `src/srcfeedRows.ts` | the seeded registry and bodies, `w.feed.md`, `y.feed.md`, `x.feed.md`, compiled twins |
 | Readout | `src/ui/FeedTip.tsx` | the hover preview the pin card's `{*.feed.md}` token shows |
 | Tokens | `src/ui/cs1Token.ts`, `src/ui/cs1.tsx` | `{ref}` and `#tag` tokens split out of a pin card heading |
@@ -84,6 +85,110 @@ A block with no `URL:` is skipped, and an unknown label is ignored, so a
 hand-edited document still parses. `## Fallback` defaults are the table's values
 above when the section is absent.
 
+### Bilibili sources (`bb-*`)
+
+The Bilibili entries are `Src:` rows that need the account. In the extension
+page they use the browser's `bilibili.com` cookies: every request uses
+`credentials: 'include'`, and nothing is stored in a row. The webapp has no
+Bilibili cookies and Bilibili sends no CORS headers, so `routes.tsx` installs
+the Supabase `cors_bb` function as a transport (`bbProxyInstall.ts`). A
+signed-out read returns `needsUser`; the feed preview shows a `bilibili QR
+login` button there, and the dialog calls `/qr` and `/poll`. With
+`BB_SESSION_TABLE` set, `/poll` stores the cookie on the function and the page
+only records that fact; otherwise the page keeps the cookie in `localStorage`
+and sends it with each `/api` call. The extension page keeps the passport link.
+A missing Supabase session is reported separately, because the QR call itself
+would be refused. `src/cors_bb.ts` carries the deploy steps and the optional
+table SQL. The client uses the `cors_bb` slug; a different function name changes
+`BASE_URL` in `src/bbProxyInstall.ts`.
+
+| Entry | Reads | `ref` |
+|---|---|---|
+| `bb-hist` | recent video history, newest watched first; `* Max:` defaults to 111, paged 30 at a time | `https://www.bilibili.com/video/<bvid>` |
+| `bb-lists` | created favorite folders and subscribed folders/collections; `collected/list?platform=web` is required for `type: 21` collections, and a subscribed row links to the collector's `favlist` page and appends the owner name; `* Max:` defaults to 5555 | `space.bilibili.com/<mid>/favlist?fid=...` or `...&ftype=collect&ctype=21` |
+| `bb-list` | the items of one list URL; the feed's `URL:`, `args.url`, or the entry's `* URL:`; `ctype=21` is read as a collection; `* Max:` defaults to 5555 | `https://www.bilibili.com/video/<bvid>` |
+| `bb-subs` | videos from every subscribed folder and UGC season; discovers them with `collected/list` and reads each through `bb-list`; `args.perList` caps one list (default 20, `0` uses the total cap); `* Max:` defaults to 5555 | `https://www.bilibili.com/video/<bvid>` |
+| `bb-feed` | the latest video from every folder/collection a space subscribes to; the space URL is the feed's `URL:`, `args.url`, or the entry's `* URL:`; `rec.list` holds that subscription's `favlist` URL; `* Max:` defaults to 5555 | `https://www.bilibili.com/video/<bvid>` |
+
+`bb-feed` answers a space URL directly:
+
+```md
+# bbf.feed
+
+## Setup
+sources: bb-feed
+URL: https://space.bilibili.com/486979785
+```
+
+The key is case-insensitive and reaches the source as `args.url`, so the same
+value can also be passed to `run_src`, or set on the `bb-feed` registry entry's
+`* URL:`. Each row is the first video of one subscribed folder or collection,
+prefixed with the subscription title and video count as `[title]（count）`. For
+example `.../favlist?fid=5292482&ftype=collect&ctype=21` yields
+`[AAAAA博物馆攻略]（50）泰特 英国全攻略 …`, and `rec.list` keeps the source list
+URL.
+
+`bb-lists` enumerates the lists themselves; `bb-subs` is the subscription video
+feed for the signed-in account. `bb-subs` adds `rec.sub` (the list title) to each row
+and sorts the combined rows by publish time, so a feed's boundary trim sees the
+newest item first. A list contributes at most 20 rows unless `args.perList` says
+otherwise.
+
+`bb-list` is the entry whose URL names one list per read: copy a `bb-lists` row's
+`ref` into this entry's `* URL:`, or pass it directly as `args.url` from `run_src`.
+History rows carry `view_at` as their `dt`; a favorite folder keeps its `order=mtime`
+order, and a season keeps the endpoint's order, whose first media is the list's
+featured/latest entry. A feed's `## Setup` may also carry `max: 111` to cap this read
+below the entry's `* Max:`; absent or `0` leaves the entry's cap.
+
+A personal history feed therefore opens as:
+
+```md
+# bbhist.feed
+
+## Setup
+freq: 1hr
+next:
+sources: bb-hist
+max: 111
+```
+
+The title follows the ref, `sources:` names the `bb-hist` entry, and `next:` is left
+empty for the first read to fill. `max:` is optional; the seeded `bb-hist` already
+carries `* Max: 111` in `srcfeed.md`.
+
+The first app boot after an existing `srcfeed.md` appends the five entries under
+`## Sources` once (`ensureBbSrcFeedEntries`): an edited block is left alone, and a
+tombstoned script row is not resurrected. The entries are never added to
+`w.feed.md`; a feed opts in by naming them in `sources:`.
+
+### Grok history (`gr`)
+
+`gr` reads a Grok tab: `chrome.userScripts` runs `extdom/gr` in the first tab
+`https://grok.com/*` matches, since Grok keeps no per-account `/u/<n>` paths. The
+adapter never clicks. When the **See all** popup is open, its list is the source:
+one `a[href^="/c/"]` per chat, the title in `aria-label`, grouped Today / Last 7
+Days / This Year / Older, and it is the whole history. With the popup closed the
+sidebar is read instead — only the newest chats, and no date — and the read notes
+that **See all** holds the rest. `* Item:` matches conversation links only, so
+`Create New Chat` and the menu's other tabs are never read. A read that finds
+neither list reports the entry's `* Prompt:`.
+
+A Grok feed opens as:
+
+```md
+# gr.feed
+
+## Setup
+freq: 2hr
+next:
+sources: gr
+```
+
+The first app boot after an existing `srcfeed.md` appends `### gr` once
+(`ensureGrSrcFeedEntry`) and writes the `extdom/gr` row; a tombstoned row is a
+deletion, so neither its entry nor its body is added back.
+
 ### Legacy registries (`webfeed.md`, `extsrc.md`)
 
 `srcfeed.md` is the only registry to write; a held `webfeed.md` or `extsrc.md` is a
@@ -142,6 +247,8 @@ the user's own prose
 | `freq:` | the span between reads, e.g. `2hr`, `30 min`, `2d`; no `freq` and no `next` means nothing reads on its own |
 | `next:` | when the next read is due; every read writes `last read + freq` |
 | `sources:` | entry names, separated by spaces or commas; **empty reads every entry without a `Src:` row** |
+| `max:` | rows kept per source for this read; absent or `0` leaves the entry's own cap |
+| `url:` | per-read URL forwarded to sources that take one (`bb-feed`, `bb-list`); case-insensitive |
 | other `key:` lines | kept and shown by the readout, never acted on |
 
 A tab source is never implicit: running one would execute in whichever tab matches
@@ -160,7 +267,7 @@ feed document from the first keystroke and nothing is persisted until the user
 saves it.
 
 `{srcfeed.md}` is the exception: opening it when no feed document exists at all runs
-`seedSrcFeedRows` first, so the registry, the site adapter, the two tab adapters and
+`seedSrcFeedRows` first, so the registry, the site adapter, the three tab adapters and
 the example feeds land in one step. An existing `webfeed.md` or `extsrc.md` is a
 registry too (read through the adapter), so the example is not written over it; a
 tombstoned registry is a deletion, not a missing one. The seed helper keeps any live
@@ -228,9 +335,9 @@ flowchart LR
 1. Read the feed document and the registry (`srcfeed.md`, else the legacy adapter).
 2. For each named entry, run its `Src:` row through `runsrc` — the row text, its
    compiled twin, or the tab runner — or walk the web strategies when it has none.
-   A missing seeded `Src:` row (`srcdom/sinaCNmedia`, `extdom/dsc`, `extdom/ge`) is
-   created from the seed catalogue before the row is read; a tombstoned one is left
-   deleted.
+   A missing seeded `Src:` row (`srcdom/sinaCNmedia`, `extdom/dsc`, `extdom/ge`,
+   `extdom/gr`) is created from the seed catalogue before the row is read; a
+   tombstoned one is left deleted.
 3. Normalize each row: `rec.feed` = entry name, `rec.strategy` = the path, a stamp,
    and the entry's tags.
 4. A `Src:` row's list is trimmed at the oldest post the last read stored for it —
@@ -460,6 +567,9 @@ the legacy document body, whose report names the strategy that answered each sou
 | `test/startagfeed/srcfeedRun.test.ts` | mixed web/`Src:`/tab/twin reads, trimming and the stored-key dedupe under a pinned head, `next:`, legacy `webfeed.md` |
 | `test/startagfeed/srcfeedDoc.test.ts` | the `*.feed.md` dialect and its write rules |
 | `test/startagfeed/srcfeedWeb.test.ts` | the strategy walk, payload readers, the legacy body, the live findings |
+| `test/startagfeed/srcfeedBb.test.ts` | the seeded `bb-*` bodies, the compiled twin, and the installed webapp transport |
+| `test/bb.test.ts` | Bilibili readers, caps, login/sign-in steps, and the transport seam |
+| `test/bbProxy.test.ts` | the webapp `/api` mapping and QR state handling |
 | `test/srcfeedTab.test.ts` | the tab body, the item-first sidebar check, the refusal catalogue, the environment probe |
 | `test/runsrc.test.ts` | `@requires tab` routing, the compiled twin registry |
 
@@ -484,7 +594,7 @@ readable copy is the `sina.cn` mirror. Both walls are 200s, which is why
 
 ## Related
 
-- `docs/startag/sTag.md` — the tag layer the extracted rows feed.
+- `docs/2mod/tagger.md` — the tag layer the extracted rows feed.
 - `docs/recr-agloop.md` — `run_src`, the `rwr` gate, and the `secret.md` dialect.
 - `docs/script-post.md` — the big picture, the CSP facts, the realm matrix, the ScriptCat prior art, the M1/M2 boundary, and the plan to M2.
 - `docs/extsrc-plan.md` — the plan that introduced the tab runner, with a status table mapping its historical names to the shipped files.

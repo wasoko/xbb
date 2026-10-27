@@ -58,8 +58,9 @@ const EPS = 1e-9;
  * A row's recency stamp: its browser visit time when it has one, otherwise its durable
  * `dt`/`modAt` stamp.
  *
- * `rowStamp` covers `rec.visitTime`, the historical typo, and the `access2discard` map, so
- * a row visited through any of the paths the rest list reads is ordered the same way here.
+ * `rowStamp` covers `rec.visitTime`, the `rec.visitTimes` map, the legacy misspelling, and
+ * the `access2discard` map, so a row visited through any of the paths the rest list reads is
+ * ordered the same way here.
  *
  * @param row a seed row
  * @returns epoch milliseconds, or the row's `tid` when neither clock says anything

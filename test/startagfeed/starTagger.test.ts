@@ -1,5 +1,6 @@
 /**
- * starTagger.test.ts — the `star.tagger.md` dialect and its generated table.
+ * starTagger.test.ts — the `star.tagger.md` dialect, its mapping section and its
+ * generated table.
  *
  * The document and the table are pure, so these tests read a document, resolve
  * aliases, and build the table from a graph without touching Dexie.
@@ -61,7 +62,10 @@ describe('parseStarTaggerDoc', () => {
     expect(doc.setup.recent).toBeUndefined();
     expect(doc.setup.minRecent).toBeUndefined();
     expect(doc.setup.minLift).toBeUndefined();
-    expect(doc.notes).toContain('Edit Setup and Notes');
+    expect(doc.setup.noSyn).toBe(false);
+    expect(doc.setup.noWeb).toBe(false);
+    expect(doc.mapping).toBe('');
+    expect(doc.notes).toContain('Edit Setup and Mapping');
   });
 
   it('reads the Setup keys and ignores comments and unusable values', () => {
@@ -76,12 +80,17 @@ recent: 300
 minRecent: 4
 minLift: 1.5
 alias: js = javascript, k8s = kubernetes
+noSyn: yes
+noTheme: no
+noWeb: yes
 reset: yes
 alpha: 2
 floor: 0.2
 ceil: nope
 
-## Taxonomy
+## Mapping
+### Web
+- a ↔ b ×2
 
 ## Notes
 mine
@@ -94,10 +103,14 @@ mine
     expect(doc.setup.minLift).toBe(1.5);
     expect(doc.setup.alias).toEqual({ js: 'javascript', k8s: 'kubernetes' });
     expect(doc.setup.reset).toBe(true);
+    expect(doc.setup.noSyn).toBe(true);
+    expect(doc.setup.noTheme).toBe(false);
+    expect(doc.setup.noWeb).toBe(true);
     expect(doc.setup.alpha).toBe(2);
     expect(doc.setup.floor).toBe(0.2);
     expect(doc.setup.ceil).toBeUndefined();
     expect(doc.setup.notes).toContain('ignored ceil: nope');
+    expect(doc.mapping).toBe('### Web\n- a ↔ b ×2');
     expect(doc.notes).toBe('mine');
   });
 });
@@ -134,9 +147,9 @@ describe('resolveAliases', () => {
 
 describe('document rewrite', () => {
   it('replaces only the named section', () => {
-    const md = setSection(STAR_TAGGER_DOC, 'Taxonomy', '| tag |\n|---|\n| react |');
+    const md = setSection(STAR_TAGGER_DOC, 'Mapping', '### Web\n- react ↔ hooks ×2');
     expect(md).toContain('## Setup');
-    expect(md).toContain('| react |');
+    expect(md).toContain('- react ↔ hooks ×2');
     expect(md).toContain('## Notes');
     expect(md).toContain('This row customizes the star');
   });
@@ -171,14 +184,26 @@ describe('buildStarTaxonomy', () => {
     const trace = buildStarTaxonomy(seed, setup, timing, new Date('2026-10-17T00:00:00Z'));
     expect(trace.text).toContain('seeded 2026-10-17T00:00:00.000Z');
     expect(trace.text).toContain('| tag | reach | kind | score | weight | freq | λ | burst | top | recent | base | lift | trend |');
-    expect(trace.text).toContain('### Aliases');
     expect(trace.text).toContain('### Bursts');
-    expect(trace.text).toContain('### Web');
+    expect(trace.mapping).toContain('### Aliases');
+    expect(trace.mapping).toContain('### Synonyms');
+    expect(trace.mapping).toContain('### Themes');
+    expect(trace.mapping).toContain('### Web');
     expect(trace.text).toContain('portfolioRisk');
     expect(trace.text).toContain('turnOver_Alpha');
     expect(trace.text).not.toContain('https://example.com/1');
     expect(trace.text).not.toContain('row 1');
     expect(trace.text).toContain('time: config 0ms');
+  });
+
+  it('skips a maintenance tag a report carries', () => {
+    const dirty = new Map([
+      [1, report(1, [tagged('portfolioRisk', 0.9, 'bm25'), tagged('FIXME_dup_ref', 0.8)])],
+    ]);
+    const dirtyGraph = buildTagGraph(pins, rows, dirty, { keepAliases: true, maxNodes: 1111 });
+    const trace = buildStarTaxonomy(seedOf(dirtyGraph, pins, rows, dirty), defaultStarSetup(), timing);
+    expect(trace.text).not.toContain('FIXME_dup_ref');
+    expect(trace.mapping).not.toContain('FIXME_dup_ref');
   });
 
   it('cuts the table at trace and leaves the relation sections in place', () => {
@@ -187,7 +212,7 @@ describe('buildStarTaxonomy', () => {
     const trace = buildStarTaxonomy(seed, setup, timing);
     expect(trace.nodes).toBe(1);
     expect(trace.text).toContain('trace cut at 1 of');
-    expect(trace.text).toContain('### Web');
+    expect(trace.mapping).toContain('### Web');
   });
 
   it('writes no table rows when trace is zero', () => {

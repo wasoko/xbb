@@ -11,9 +11,14 @@
  * All content is real: a region exists because the packing gave a tag that wall, a point exists
  * because a row carried it, and a line exists because the table lists the relation. Above sea
  * level the canvas is almost black, with the star's light glinting off it; below it is tinted
- * and readable. The star marks the split meridian, rests as a small mark, and opens to its
- * full glow only while it is hovered or touched; its ring marks the horizontal direction all
- * the way round the cylinder.
+ * and readable. The star marks the split meridian with a sharp vertical halo across two
+ * thirds of the screen, with a core as tall as twice its nominal ring; the ring is a
+ * one-pixel line with a ten-pixel glow and marks the horizontal direction all the way round
+ * the cylinder. Row stars rest as one-pixel marks, open only around the pointer or a tap,
+ * and the wall is cropped at the ±180 degree seam so a band cannot wrap over its neighbour.
+ *
+ * A hover lifts the hovered region's own fitted name, and draws its relations as arcs fainter
+ * than that name: the name glows, and the arcs only hint at the tags it reaches.
  */
 
 import * as THREE from 'three';
@@ -38,6 +43,8 @@ const DEG = 180 / Math.PI;
 /** Label bake sizes, in texture pixels: a region's name is drawn as large as its cell allows. */
 const LABEL_FONT_PIN = 112;
 const LABEL_FONT_CLOUD = 80;
+/** How much a region's fitted name is lifted while the pointer or a lock rests on it. */
+const LABEL_GLOW_GAIN = 2.2;
 
 /** Instances one atlas page may hold. */
 const PAGE_INSTANCES = 1024;
@@ -53,9 +60,19 @@ const SKY_BELOW = new THREE.Color(0x0a1620);
 const SKY_ABOVE = new THREE.Color(0x000000);
 const STAR_COLOR = new THREE.Color(0xffe6b0);
 
-/** The sea-level star's resting and hover-glow sizes, in CSS pixels. */
-const STAR_MIN_PX = 18;
-const STAR_GLOW_PX = 168;
+/** The nominal ring half-height used to size the star core, in world units; the drawn ring
+ *  is a one-pixel line. */
+const RING_CORE_HALF_WORLD = 0.18;
+/** The ring's glow depth, in CSS pixels. */
+const RING_DEPTH_PX = 10;
+/** Row stars at rest: a three-pixel quad holding a one-pixel core and its faint cross. */
+const STAR_REST_PX = 3;
+/** Radius, in CSS pixels, in which a hover, click or touch opens the row stars. */
+const STAR_LIFT_PX = 30;
+/** The star field's alpha at the oldest stamp on the wall. */
+const STAR_DIM_FLOOR = 0.05;
+/** The sea-level halo's full span, as a fraction of the viewport in each axis. */
+const STAR_HALO_SPAN = 2 / 3;
 
 /** How a reach is tinted on the wall. */
 const REACH_TINT: Record<string, [number, number, number]> = {
@@ -117,10 +134,18 @@ interface LabelPage {
   deg: Float32Array;
   cell: Float32Array;
   attrs: THREE.InstancedBufferAttribute[];
+  /** The tag each instance names, for the hover glow. */
+  tags: (string | undefined)[];
+  /** Each instance's rest alpha, restored when the hover leaves its region. */
+  baseAlpha: Float32Array;
+  /** The `iTint` attribute, rewritten when the hover moves. */
+  tintAttr: THREE.InstancedBufferAttribute;
 }
 
 /** One label instance, before it is grouped into its atlas page. */
 interface LabelEntry {
+  /** The tag the fitted name belongs to. */
+  tag: string;
   slot: AtlasSlot;
   lon: number;
   rise: number;
@@ -151,6 +176,12 @@ const LABEL_VERTEX = `
 
   void main() {
     float lon = iAnchor.x * uSpacing.x * ${RAD.toFixed(12)};
+    if (abs(lon) > ${Math.PI.toFixed(12)}) {
+      vUv = vec2(0.0);
+      vTint = vec4(0.0);
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      return;
+    }
     float rise = iAnchor.y * uSpacing.y;
     vec3 anchor = vec3(sin(lon) * ${WALL_RADIUS.toFixed(1)}, rise * ${UNIT.toFixed(12)}, cos(lon) * ${WALL_RADIUS.toFixed(1)});
     vec3 toCam = uCamLocal - anchor;
@@ -226,6 +257,7 @@ const FILL_FRAGMENT = `
   varying float vLon;
 
   void main() {
+    if (abs(vLon) > ${Math.PI.toFixed(12)}) discard;
     float edge = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
     float border = 1.0 - smoothstep(0.0, 0.05, edge);
     float star = pow(max(0.0, cos(vLon)), 8.0);
@@ -254,6 +286,7 @@ const POINT_VERTEX = `
 
   uniform vec2 uSpacing;
   uniform vec2 uPointer;
+  uniform vec2 uResolution;
   uniform float uDpr;
   uniform float uPxToWorld;
 
@@ -264,13 +297,21 @@ const POINT_VERTEX = `
 
   void main() {
     float lon = aAnchor.x * uSpacing.x * ${RAD.toFixed(12)};
+    if (abs(lon) > ${Math.PI.toFixed(12)}) {
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      gl_PointSize = 0.0;
+      return;
+    }
     float rise = aAnchor.y * uSpacing.y;
     vec3 p = vec3(sin(lon) * ${WALL_RADIUS.toFixed(1)}, rise * ${UNIT.toFixed(12)}, cos(lon) * ${WALL_RADIUS.toFixed(1)});
     vec4 mv = modelViewMatrix * vec4(p, 1.0);
     vec4 clip = projectionMatrix * mv;
     vec2 ndc = clip.w > 0.0 ? clip.xy / clip.w : vec2(2.0);
-    /* Only the pointer lifts a star; the field itself keeps its minimal mark. */
-    float lift = 1.0 - smoothstep(0.0, 0.018, distance(ndc, uPointer));
+    /* The pointer, a click or a touch opens every star within its own radius. */
+    vec2 screen = vec2((ndc.x * 0.5 + 0.5) * uResolution.x,
+      (0.5 - ndc.y * 0.5) * uResolution.y);
+    float lift = uPointer.x < 0.0 ? 0.0
+      : 1.0 - smoothstep(0.0, ${STAR_LIFT_PX.toFixed(1)}, distance(screen, uPointer));
     /* How far apart this region's own stars land on screen: its area in pixels divided over
        the points that fill it. Past the pointer's resolution the cell is a cloud, not a set
        of targets, so every star softens and spreads into one continuous glow. */
@@ -278,12 +319,13 @@ const POINT_VERTEX = `
     float cellPx = sqrt((aCell.x * ${RAD.toFixed(12)} * ${WALL_RADIUS.toFixed(1)}) * (aCell.y * ${UNIT.toFixed(12)})) / perPx;
     float spacingPx = cellPx / sqrt(max(1.0, aCount));
     float crowd = 1.0 - smoothstep(${(POINT_RESOLVE * 0.45).toFixed(1)}, ${POINT_RESOLVE.toFixed(1)}, spacingPx);
-    float sizePx = mix(aSize, clamp(spacingPx * 2.6, 3.0, 64.0), crowd);
-    gl_PointSize = sizePx * uDpr * (1.0 + lift * 1.4);
+    float starPx = mix(${STAR_REST_PX.toFixed(1)}, aSize, lift);
+    float sizePx = mix(starPx, clamp(spacingPx * 2.6, 3.0, 64.0), crowd);
+    gl_PointSize = sizePx * uDpr;
     vColor = aColor;
-    vAlpha = aAlpha * (0.75 + lift * 1.6) * mix(1.0, 0.45, crowd);
+    vAlpha = aAlpha * mix(0.55, 1.0, lift) * mix(1.0, 0.45, crowd);
     vCloud = crowd;
-    vDim = mix(0.22, 1.0, aRecency);
+    vDim = mix(${STAR_DIM_FLOOR.toFixed(3)}, 1.0, aRecency);
     gl_Position = clip;
   }
 `;
@@ -315,19 +357,17 @@ const POINT_FRAGMENT = `
 const STAR_VERTEX = `
   uniform vec3 uCamLocal;
   uniform float uPxToWorld;
-  uniform float uPx;
-  uniform float uPxMin;
-  uniform float uLift;
+  uniform float uPxX;
+  uniform float uPxY;
   varying vec2 vUv;
   void main() {
     vec3 anchor = vec3(0.0, 0.0, ${WALL_RADIUS.toFixed(1)});
     vec3 toCam = uCamLocal - anchor;
     vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), normalize(vec3(toCam.x, 0.0, toCam.z))));
     float dist = length(toCam);
-    float px = mix(uPxMin, uPx, uLift);
     vec3 world = anchor
-      + right * (position.x * px * uPxToWorld * dist)
-      - vec3(0.0, 1.0, 0.0) * (position.y * px * uPxToWorld * dist);
+      + right * (position.x * uPxX * uPxToWorld * dist)
+      - vec3(0.0, 1.0, 0.0) * (position.y * uPxY * uPxToWorld * dist);
     vUv = position.xy + 0.5;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
   }
@@ -336,17 +376,27 @@ const STAR_VERTEX = `
 const STAR_FRAGMENT = `
   uniform vec3 uColor;
   uniform float uRecency;
+  uniform float uPxX;
+  uniform float uPxY;
+  uniform float uCorePx;
   varying vec2 vUv;
   void main() {
-    vec2 d = vUv - 0.5;
-    float r = length(d) * 2.0;
-    float core = exp(-r * r * 42.0);
-    float halo = exp(-r * 5.0) * 0.55;
-    float rays = (exp(-abs(d.y) * 110.0) * exp(-abs(d.x) * 3.2)
-      + exp(-abs(d.x) * 110.0) * exp(-abs(d.y) * 3.2)) * 0.6;
-    float a = core + halo * 0.7 + rays;
+    vec2 d = vec2((vUv.x - 0.5) * uPxX, (vUv.y - 0.5) * uPxY);
+    float coreR = max(0.5, uCorePx * 0.5);
+    float cr = length(d) / coreR;
+    float core = exp(-cr * cr * 2.8);
+    /* h is the billboard in halves: (1, 1) is one third of the screen from the centre,
+       so the glow reaches two thirds of the viewport across. */
+    vec2 h = vec2(d.x / max(1.0, uPxX * 0.5), d.y / max(1.0, uPxY * 0.5));
+    /* Fade before the billboard edge, or the halo ends on a visible square. */
+    float edge = 1.0 - smoothstep(0.86, 1.0, max(abs(h.x), abs(h.y)));
+    float halo = exp(-length(h) * 6.0) * 0.05 * edge;
+    float vertical = exp(-abs(h.x) * 40.0) * exp(-abs(h.y) * 1.8) * 0.12 * edge;
+    float horizontal = exp(-abs(h.y) * 40.0) * exp(-abs(h.x) * 2.2) * 0.02 * edge;
+    float rays = vertical + horizontal;
+    float a = core + halo + rays;
     if (a < 0.004) discard;
-    float dim = mix(0.22, 1.0, uRecency);
+    float dim = mix(${STAR_DIM_FLOOR.toFixed(3)}, 1.0, uRecency);
     gl_FragColor = vec4(uColor * (core * 2.2 + halo + rays) * dim, min(1.0, a) * dim);
   }
 `;
@@ -369,7 +419,9 @@ const RELATION_FRAGMENT = `
   uniform float uPulse;
   varying vec3 vColor;
   void main() {
-    gl_FragColor = vec4(vColor, 0.38 + uPulse * 0.18);
+    /* Fainter than a region's fitted name (alpha 0.045 at rest): an arc answers a hover without
+       competing with the names it runs between. */
+    gl_FragColor = vec4(vColor, 0.03 + uPulse * 0.012);
   }
 `;
 
@@ -439,14 +491,12 @@ export class SeaRenderer {
   private readonly starMaterial: THREE.ShaderMaterial;
   private readonly fillMaterial: THREE.ShaderMaterial;
   private readonly relationMaterial: THREE.ShaderMaterial;
-  private readonly highlightMaterial: THREE.ShaderMaterial;
 
   private fill: THREE.Mesh | null = null;
   private points: THREE.Points | null = null;
   private pointsGeometry: THREE.BufferGeometry | null = null;
   private pointsMaterial: THREE.ShaderMaterial | null = null;
   private relations: THREE.LineSegments | null = null;
-  private highlight: THREE.LineSegments | null = null;
 
   private wall: SeaWall | null = null;
   private atlas: TextAtlas | null = null;
@@ -457,11 +507,8 @@ export class SeaRenderer {
   private view: SeaViewState = { camY: 0, phi: 0, pitch: 0, roll: 0, fov: 48 };
   private spacing = new THREE.Vector2(1, 1);
 
-  private hover: SeaHover | null = null;
-  /** Whether a touch is holding the star open. */
-  private starTouch = false;
-  /** Whether the pointer is on the star's own tag. */
-  private starHover = false;
+  /** The tag whose fitted name is lifted, so a hover that stays on one region writes nothing. */
+  private labelGlow: string | undefined;
   /** Bumped by every call that changes what the next frame would draw. */
   private sceneRevision = 0;
 
@@ -506,7 +553,6 @@ export class SeaRenderer {
           uStar: { value: STAR_COLOR.clone() },
           uCamLocal: { value: new THREE.Vector3() },
           uRingY: { value: 0 },
-          uStarLift: { value: 0 },
         },
         vertexShader: `
           varying vec3 vDir;
@@ -521,7 +567,6 @@ export class SeaRenderer {
           uniform vec3 uAbove;
           uniform vec3 uStar;
           uniform float uRingY;
-          uniform float uStarLift;
           varying vec3 vDir;
           void main() {
             float y = vDir.y;
@@ -532,7 +577,7 @@ export class SeaRenderer {
                horizon where the canvas is read. */
             float glow = pow(max(0.0, cos(lon)), 24.0);
             float halo = y > 0.0 ? exp(-y * 14.0) * 0.55 : exp(y * 45.0) * 0.06;
-            col += uStar * glow * halo * mix(0.04, 0.35, uStarLift);
+            col += uStar * glow * halo * 0.35;
             /* The sea-level ring. Every point of the circle is the same elevation from the
                camera on the axis, so the whole ring is one band of directions: uRingY is the
                sine of that elevation. A band here keeps a pixel footprint and a derivative
@@ -541,11 +586,11 @@ export class SeaRenderer {
             float d = y - uRingY;
             float cosE = sqrt(max(0.0, 1.0 - uRingY * uRingY));
             float aa = max(fwidth(d), 1e-5);
-            float ringHalf = ${(0.35 / WALL_RADIUS).toFixed(8)} * cosE;
-            float ring = 1.0 - smoothstep(ringHalf - aa, ringHalf + aa, abs(d));
+            float ring = 1.0 - smoothstep(0.0, aa, abs(d));
             float front = pow(max(0.0, cos(lon)), 16.0);
+            float depth = max(1e-5, ${(RING_DEPTH_PX * 0.5).toFixed(1)} * aa);
             col += uStar * (ring * (0.1 + front * 0.5)
-              + exp(-abs(d) / (${(4 / WALL_RADIUS).toFixed(8)} * cosE)) * (0.02 + front * 0.5));
+              + exp(-abs(d) / depth) * (0.02 + front * 0.5));
             gl_FragColor = vec4(col, 1.0);
           }
         `,
@@ -564,9 +609,9 @@ export class SeaRenderer {
       uniforms: {
         uCamLocal: { value: new THREE.Vector3() },
         uPxToWorld: { value: 0.002 },
-        uPx: { value: STAR_GLOW_PX },
-        uPxMin: { value: STAR_MIN_PX },
-        uLift: { value: 0 },
+        uPxX: { value: 24 },
+        uPxY: { value: 24 },
+        uCorePx: { value: 8 },
         uRecency: { value: 1 },
         uColor: { value: STAR_COLOR.clone() },
       },
@@ -604,32 +649,11 @@ export class SeaRenderer {
       toneMapped: false,
     });
 
-    this.highlightMaterial = new THREE.ShaderMaterial({
-      uniforms: { uSpacing: { value: this.spacing }, uPulse: { value: 0.5 } },
-      vertexShader: `
-        attribute vec3 aColor;
-        uniform vec2 uSpacing;
-        varying vec3 vColor;
-        void main() {
-          float lon = position.x * uSpacing.x * ${RAD.toFixed(12)};
-          float rise = position.y * uSpacing.y;
-          vec3 p = vec3(sin(lon) * ${WALL_RADIUS.toFixed(1)}, rise * ${UNIT.toFixed(12)}, cos(lon) * ${WALL_RADIUS.toFixed(1)});
-          vColor = aColor;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
-        }
-      `,
-      fragmentShader: `
-        varying vec3 vColor;
-        void main() { gl_FragColor = vec4(vColor, 0.7); }
-      `,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      depthTest: false,
-      toneMapped: false,
-    });
-
-    this.composer = new EffectComposer(this.renderer);
+    /* The scene draws into a multisampled target: a composer target carries no MSAA of its
+       own, and a relation arc is a one-pixel curve that would otherwise stair-step. */
+    this.composer = new EffectComposer(this.renderer, new THREE.WebGLRenderTarget(1, 1, {
+      type: THREE.HalfFloatType, samples: 4,
+    }));
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.post = new ShaderPass(PostShader);
     this.composer.addPass(this.post);
@@ -649,6 +673,8 @@ export class SeaRenderer {
     this.buildFills(wall);
     this.buildLabels(wall);
     this.buildPoints(wall);
+    /* A rebuilt wall carries no hover: the labels the old glow wrote are gone with the pages. */
+    this.setHover(null);
     this.markDirty();
   }
 
@@ -748,6 +774,7 @@ export class SeaRenderer {
       if (slot === undefined) continue;
       const curated = region.reach === 'pinned' || region.reach === 'alias';
       entries.push({
+        tag: region.tag,
         slot,
         lon: (region.lon0 + region.lon1) / 2,
         rise: (region.rise0 + region.rise1) / 2,
@@ -785,6 +812,10 @@ export class SeaRenderer {
     const tint = new Float32Array(PAGE_INSTANCES * 4);
     const deg = new Float32Array(PAGE_INSTANCES * 2);
     const cell = new Float32Array(PAGE_INSTANCES * 2);
+    /** The tag each instance names, read back when the hover moves. */
+    const tags: (string | undefined)[] = new Array(PAGE_INSTANCES);
+    /** Each instance's rest alpha, so a lifted name can be set back down. */
+    const baseAlpha = new Float32Array(PAGE_INSTANCES);
     const attrs: THREE.InstancedBufferAttribute[] = [];
     const attr = (array: Float32Array, size: number): THREE.InstancedBufferAttribute => {
       const a = new THREE.InstancedBufferAttribute(array, size);
@@ -794,12 +825,15 @@ export class SeaRenderer {
     };
     geometry.setAttribute('iAnchor', attr(anchor, 2));
     geometry.setAttribute('iUv', attr(uv, 4));
-    geometry.setAttribute('iTint', attr(tint, 4));
+    const tintAttr = attr(tint, 4);
+    geometry.setAttribute('iTint', tintAttr);
     geometry.setAttribute('iDeg', attr(deg, 2));
     geometry.setAttribute('iCell', attr(cell, 2));
 
     for (let i = 0; i < count; i++) {
       const item = entries[i];
+      tags[i] = item.tag;
+      baseAlpha[i] = item.alpha;
       anchor[i * 2] = item.lon;
       anchor[i * 2 + 1] = item.rise;
       uv[i * 4] = item.slot.u0;
@@ -838,6 +872,7 @@ export class SeaRenderer {
     this.content.add(mesh);
     this.pages.push({
       mesh, geometry, material, count, anchor, uv, tint, deg, cell, attrs,
+      tags, baseAlpha, tintAttr,
     });
   }
 
@@ -897,7 +932,8 @@ export class SeaRenderer {
     const material = new THREE.ShaderMaterial({
       uniforms: {
         uSpacing: { value: this.spacing },
-        uPointer: { value: new THREE.Vector2(2, 2) },
+        uPointer: { value: new THREE.Vector2(-1, -1) },
+        uResolution: { value: new THREE.Vector2(this.width, this.height) },
         uDpr: { value: 1 },
         uPxToWorld: { value: 0.002 },
       },
@@ -970,6 +1006,11 @@ export class SeaRenderer {
     }
     this.starMaterial.uniforms.uCamLocal.value.copy(this.camLocal);
     this.starMaterial.uniforms.uPxToWorld.value = pxToWorld;
+    const ringHeightPx = (2 * RING_CORE_HALF_WORLD) / (pxToWorld * WALL_RADIUS);
+    const corePx = Math.max(2, ringHeightPx * 2);
+    this.starMaterial.uniforms.uCorePx.value = corePx;
+    this.starMaterial.uniforms.uPxX.value = Math.max(9, this.width * STAR_HALO_SPAN);
+    this.starMaterial.uniforms.uPxY.value = Math.max(9, this.height * STAR_HALO_SPAN);
     const skyMaterial = this.sky.material as THREE.ShaderMaterial;
     skyMaterial.uniforms.uCamLocal.value.copy(this.camLocal);
     const ringY = view.camY * UNIT;
@@ -981,52 +1022,28 @@ export class SeaRenderer {
   }
 
   /**
-   * Highlight the tag or point under the pointer and draw its relations.
+   * Light the region under the pointer: its fitted name lifts, and its relations draw as
+   * arcs along the wall. No fill, ring or box marks the target; the name is the answer.
    *
    * @param hover what the pointer found, or `null`
    * @param relations the tags the table relates it to
    */
   setHover(hover: SeaHover | null, relations: readonly TagRelation[] = []): void {
-    this.hover = hover;
-    const starPin = this.wall?.star.pin ?? null;
-    this.starHover = hover !== null && starPin !== null
-      && (hover.point?.tag === starPin || hover.region?.tag === starPin);
     this.buildRelations(hover, relations);
-    this.buildHighlight(hover);
-    this.syncStarLift();
+    this.setLabelGlow(hover?.region?.tag);
     this.markDirty();
   }
 
-  /**
-   * Close the sea-level star when the pointer leaves the wall without closing the card.
-   *
-   * @param active whether the pointer is on the star's own tag
-   */
-  setStarHover(active: boolean): void {
-    if (this.starHover === active) return;
-    this.starHover = active;
-    this.syncStarLift();
-  }
-
-  /**
-   * Open the sea-level star while a touch holds the wall.
-   *
-   * @param active whether a touch is down
-   */
-  setStarTouch(active: boolean): void {
-    if (this.starTouch === active) return;
-    this.starTouch = active;
-    this.syncStarLift();
-  }
-
-  /** Keep the star at its minimal mark until the pointer or a touch asks for its glow. */
-  private syncStarLift(): void {
-    const lift = this.starTouch || this.starHover ? 1 : 0;
-    const uniform = this.starMaterial.uniforms.uLift;
-    if (uniform.value === lift) return;
-    uniform.value = lift;
-    (this.sky.material as THREE.ShaderMaterial).uniforms.uStarLift.value = lift;
-    this.markDirty();
+  /** Lift the one region's fitted name; every other name is set back to its rest alpha. */
+  private setLabelGlow(tag: string | undefined): void {
+    if (this.labelGlow === tag) return;
+    this.labelGlow = tag;
+    for (const page of this.pages) {
+      for (let i = 0; i < page.count; i++) {
+        page.tint[i * 4 + 3] = page.baseAlpha[i] * (page.tags[i] === tag ? LABEL_GLOW_GAIN : 1);
+      }
+      page.tintAttr.needsUpdate = true;
+    }
   }
 
   /** The hovered tag's relation arcs, drawn along the wall. */
@@ -1056,7 +1073,9 @@ export class SeaRenderer {
       if (dLon < -180) dLon += 360;
       const tint = RELATION_TINT[relation.kind];
       const bow = Math.min(18, Math.abs(dLon) * 0.12 + 3);
-      const steps = 16;
+      /* A sin bow is sampled finely enough that the quad it draws reads as a curve at every
+         spacing, which is what keeps a faint arc smooth rather than faceted. */
+      const steps = 32;
       for (let i = 0; i < steps; i++) {
         const t0 = i / steps;
         const t1 = (i + 1) / steps;
@@ -1080,62 +1099,6 @@ export class SeaRenderer {
     this.content.add(lines);
   }
 
-  /** A rectangle round the hovered region, or a small ring round a hovered point. */
-  private buildHighlight(hover: SeaHover | null): void {
-    if (this.highlight !== null) {
-      this.content.remove(this.highlight);
-      this.highlight.geometry.dispose();
-      this.highlight = null;
-    }
-    if (hover === null) return;
-    const positions: number[] = [];
-    const colors: number[] = [];
-    const push = (lon: number, rise: number, tint: [number, number, number]): void => {
-      positions.push(lon, rise, 0);
-      colors.push(tint[0], tint[1], tint[2]);
-    };
-
-    if (hover.point !== undefined) {
-      const point = hover.point;
-      const steps = 18;
-      const radius = 2.2;
-      for (let i = 0; i < steps; i++) {
-        const a0 = (i / steps) * Math.PI * 2;
-        const a1 = ((i + 1) / steps) * Math.PI * 2;
-        push(point.lon + Math.cos(a0) * radius, point.rise + Math.sin(a0) * radius, LINK_TINT);
-        push(point.lon + Math.cos(a1) * radius, point.rise + Math.sin(a1) * radius, LINK_TINT);
-      }
-    } else if (hover.region !== undefined) {
-      const region = hover.region;
-      const tint = reachTint(region.reach, region.tag);
-      const cols = 14;
-      for (let i = 0; i < cols; i++) {
-        const t0 = i / cols;
-        const t1 = (i + 1) / cols;
-        const lon0 = region.lon0 + (region.lon1 - region.lon0) * t0;
-        const lon1 = region.lon0 + (region.lon1 - region.lon0) * t1;
-        push(lon0, region.rise0, tint);
-        push(lon1, region.rise0, tint);
-        push(lon0, region.rise1, tint);
-        push(lon1, region.rise1, tint);
-      }
-      push(region.lon0, region.rise0, tint);
-      push(region.lon0, region.rise1, tint);
-      push(region.lon1, region.rise0, tint);
-      push(region.lon1, region.rise1, tint);
-    }
-
-    if (positions.length === 0) return;
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    geometry.setAttribute('aColor', new THREE.Float32BufferAttribute(colors, 3));
-    const line = new THREE.LineSegments(geometry, this.highlightMaterial);
-    line.frustumCulled = false;
-    line.renderOrder = 8;
-    this.highlight = line;
-    this.content.add(line);
-  }
-
   /**
    * Find the region or point under a pointer.
    *
@@ -1154,6 +1117,7 @@ export class SeaRenderer {
     let bestPoint: WallPoint | undefined;
     let bestDistance = 16 * 16;
     for (const point of this.wall.points) {
+      if (Math.abs(point.lon * this.spacing.x) > 180) continue;
       wallPoint(point.lon * this.spacing.x, point.rise * this.spacing.y, this.corner);
       this.corner.applyMatrix4(this.content.matrixWorld);
       this.cameraSpace.copy(this.corner).applyMatrix4(this.camera.matrixWorldInverse);
@@ -1190,7 +1154,8 @@ export class SeaRenderer {
     const lon = wrapLon((Math.atan2(this.hit.x, this.hit.z) * DEG) / this.spacing.x);
     const rise = (this.hit.y / UNIT) / this.spacing.y;
     const region = regionOnWall(this.wall.regions, lon, rise);
-    if (region === null) return null;
+    if (region === null || Math.abs(((region.lon0 + region.lon1) / 2) * this.spacing.x) > 180)
+      return null;
     return { region, distance: 0 };
   }
 
@@ -1203,10 +1168,10 @@ export class SeaRenderer {
   setPointer(x: number, y: number): void {
     if (this.pointsMaterial === null) return;
     const pointer = this.pointsMaterial.uniforms.uPointer.value as THREE.Vector2;
-    const nx = x < 0 ? 2 : (x / Math.max(1, this.width)) * 2 - 1;
-    const ny = x < 0 ? 2 : -(y / Math.max(1, this.height)) * 2 + 1;
-    if (pointer.x === nx && pointer.y === ny) return;
-    pointer.set(nx, ny);
+    const nextX = x < 0 ? -1 : x;
+    const nextY = x < 0 ? -1 : y;
+    if (pointer.x === nextX && pointer.y === nextY) return;
+    pointer.set(nextX, nextY);
     this.markDirty();
   }
 
@@ -1227,6 +1192,8 @@ export class SeaRenderer {
     (this.post.uniforms.uRes.value as THREE.Vector2).set(this.width, this.height);
     if (this.pointsMaterial !== null) {
       this.pointsMaterial.uniforms.uDpr.value = Math.min(2, window.devicePixelRatio || 1);
+      (this.pointsMaterial.uniforms.uResolution.value as THREE.Vector2)
+        .set(this.width, this.height);
     }
     this.markDirty();
   }
@@ -1275,13 +1242,8 @@ export class SeaRenderer {
       this.content.remove(this.relations);
       this.relations.geometry.dispose();
     }
-    if (this.highlight !== null) {
-      this.content.remove(this.highlight);
-      this.highlight.geometry.dispose();
-    }
     this.fillMaterial.dispose();
     this.relationMaterial.dispose();
-    this.highlightMaterial.dispose();
     this.starMaterial.dispose();
     this.sky.geometry.dispose();
     (this.sky.material as THREE.Material).dispose();

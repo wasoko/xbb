@@ -243,17 +243,27 @@ describe('the recent band', () => {
 });
 
 describe('recency', () => {
-  it('dims a row by where its stamp sits between the oldest and newest points', () => {
+  it('dims a row inside its own tag region, not against the whole wall', () => {
     const stamped = (tag: string): SeaRow[] => [
       { ...row(tag, 0), stamp: tag === 'one' ? 2_000 : 1_000 },
       { ...row(tag, 1), stamp: tag === 'one' ? 1_000 : 500 },
     ];
     const wall = buildWall(BAND_GRAPH, BAND_TAGS, stamped, { pinCol: 20 });
-    expect(wall.points.find((point) => point.tag === 'one' && point.stamp === 2_000)?.recency)
-      .toBeCloseTo(1, 9);
-    expect(wall.points.find((point) => point.tag === 'one' && point.stamp === 1_000)?.recency)
-      .toBeCloseTo(1 / 3, 9);
+    const at = (tag: string, stamp: number) =>
+      wall.points.find((point) => point.tag === tag && point.stamp === stamp)?.recency;
+    /* `one` holds the wall's newest row and `two` an older one; each reads its own span, so
+       an old tag is not a dim tag. */
+    expect(at('one', 2_000)).toBeCloseTo(1, 9);
+    expect(at('one', 1_000)).toBeCloseTo(0, 9);
+    expect(at('two', 1_000)).toBeCloseTo(1, 9);
+    expect(at('two', 500)).toBeCloseTo(0, 9);
     expect(wall.star.recency).toBeCloseTo(1, 9);
+  });
+
+  it('keeps a region of one stamped row at full strength', () => {
+    const wall = buildWall(BAND_GRAPH, BAND_TAGS,
+      (tag) => (tag === 'one' ? [{ ...row(tag, 0), stamp: 5_000 }] : BAND_ROWS(tag)), { pinCol: 20 });
+    expect(wall.points.find((point) => point.tag === 'one')?.recency).toBeCloseTo(1, 9);
   });
 
   it('leaves a star undimmed when its tag kept no row', () => {

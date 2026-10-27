@@ -43,6 +43,11 @@ describe('parseWFeedDoc', () => {
     expect(setup.sources).toEqual(['wallstreetcn', 'sina-fly51fly']);
   });
 
+  it('reads max: as a per-read cap and defaults it to no cap', () => {
+    expect(parseWFeedDoc(DOC).setup.max).toBe(0);
+    expect(parseWFeedDoc(DOC.replace('sources:', 'max: 111\nsources:')).setup.max).toBe(111);
+  });
+
   it('keeps the posts blocks in written order, with the headings own stamps', () => {
     const doc = parseWFeedDoc(`${DOC}\n## Posts as of 2026-10-16T07:00:00Z\n- newer\n`);
     expect(doc.posts).toHaveLength(2);

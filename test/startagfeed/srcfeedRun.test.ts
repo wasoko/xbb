@@ -16,7 +16,7 @@ import {
   installSrcFeedGlobal, parseSrcFeedDoc, parseWFeedDoc, readSource, reportLine, runSrcFeed,
   EXTSRC_EXTRACT_REF, SRCFEED_REF, type SrcFeedRunOptions,
 } from '../../src/srcfeed';
-import { EXTDOM_DSC_REF, SRCDOM_SINA_REF, SRCFEED_DOC } from '../../src/srcfeedRows';
+import { EXTDOM_DSC_REF, EXTDOM_GR_REF, SRCDOM_SINA_REF, SRCFEED_DOC } from '../../src/srcfeedRows';
 import { readOrSeedSrcFeed, sdbSrcFeedStore } from '../../src/srcfeedStore';
 
 /** One web entry, read by the `direct` strategy so no API or session is needed. */
@@ -508,14 +508,32 @@ describe('seeded registry', () => {
     const registry = parseSrcFeedDoc(SRCFEED_DOC);
 
     expect(registry.entries.map((entry) => entry.name))
-      .toEqual(['wallstreetcn', 'sina', 'dsc', 'ge']);
+      .toEqual(['wallstreetcn', 'sina', 'dsc', 'ge', 'gr', 'bb-hist', 'bb-lists', 'bb-list', 'bb-subs', 'bb-feed']);
     expect(registry.entries.find((entry) => entry.name === 'sina')?.src).toBe(SRCDOM_SINA_REF);
+    expect(registry.entries.find((entry) => entry.name === 'bb-hist')).toMatchObject({
+      src: 'bb-hist', max: 111,
+    });
+    expect(registry.entries.find((entry) => entry.name === 'bb-lists')).toMatchObject({
+      src: 'bb-lists', max: 5555,
+    });
+    expect(registry.entries.find((entry) => entry.name === 'bb-list')).toMatchObject({
+      src: 'bb-list', max: 5555,
+    });
+    expect(registry.entries.find((entry) => entry.name === 'bb-subs')).toMatchObject({
+      src: 'bb-subs', max: 5555,
+    });
+    expect(registry.entries.find((entry) => entry.name === 'bb-feed')).toMatchObject({
+      src: 'bb-feed', max: 5555,
+    });
     expect(registry.entries.find((entry) => entry.name === 'dsc')).toMatchObject({
       src: EXTDOM_DSC_REF, sidebar: '', item: 'a[href^="/a/chat"]', tabs: '', max: 0,
     });
     expect(registry.entries.find((entry) => entry.name === 'ge')).toMatchObject({
       src: 'extdom/ge', tabs: 'all', sidebar: '[data-test-id="chat-history-container"]',
       item: 'a[href*="/app/"]', max: 0,
+    });
+    expect(registry.entries.find((entry) => entry.name === 'gr')).toMatchObject({
+      src: EXTDOM_GR_REF, tabs: '', item: 'a[href^="/c/"]', max: 0,
     });
     expect(registry.entries.find((entry) => entry.name === 'wallstreetcn')?.src).toBe('');
     expect(registry.fallback.proxy).toBe('https://r.jina.ai/');

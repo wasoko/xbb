@@ -707,33 +707,45 @@ export function buildWall(
     entries.push(mirrored);
   }
 
-  /* A row's star dims by where its evidence sits between the oldest and newest rows on
-     the wall. A point with no stamp keeps full strength; the sea-level star does too when
-     its own tag kept no row. */
-  let oldest = Number.POSITIVE_INFINITY;
-  let newest = Number.NEGATIVE_INFINITY;
-  for (const point of points) {
-    if (point.stamp === undefined || !Number.isFinite(point.stamp) || point.stamp <= 0) continue;
-    if (point.stamp < oldest) oldest = point.stamp;
-    if (point.stamp > newest) newest = point.stamp;
-  }
-  const recencyOf = (stamp: number | undefined): number | undefined => {
-    if (stamp === undefined || !Number.isFinite(stamp) || stamp <= 0) return undefined;
-    if (!(newest > oldest)) return 1;
-    return clamp((stamp - oldest) / (newest - oldest), 0, 1);
+  /* A row's star dims by where its evidence sits inside its own tag's region: the newest
+     row a tag kept is full strength whatever the wall's own age, so an old tag reads as an
+     old tag rather than as a dim one. A point with no stamp keeps full strength. */
+  const recencyIn = (
+    stamps: readonly (number | undefined)[],
+  ): (stamp: number | undefined) => number | undefined => {
+    let oldest = Number.POSITIVE_INFINITY;
+    let newest = Number.NEGATIVE_INFINITY;
+    for (const stamp of stamps) {
+      if (stamp === undefined || !Number.isFinite(stamp) || stamp <= 0) continue;
+      if (stamp < oldest) oldest = stamp;
+      if (stamp > newest) newest = stamp;
+    }
+    return (stamp) => {
+      if (stamp === undefined || !Number.isFinite(stamp) || stamp <= 0) return undefined;
+      if (!(newest > oldest)) return 1;
+      return clamp((stamp - oldest) / (newest - oldest), 0, 1);
+    };
   };
-  for (const point of points) {
-    const recency = recencyOf(point.stamp);
-    if (recency !== undefined) point.recency = recency;
+  for (const region of entries) {
+    if (region.points.length === 0) continue;
+    const recencyOf = recencyIn(region.points.map((point) => point.stamp));
+    for (const point of region.points) {
+      const recency = recencyOf(point.stamp);
+      if (recency !== undefined) point.recency = recency;
+    }
   }
-  let starStamp: number | undefined;
+  /* The sea-level star is the newest evidence of its own tag, so it reads full strength
+     whenever that tag kept a stamped row. */
+  let starRecency: number | undefined;
   if (starTag !== null) {
-    for (const row of rowsOf(starTag)) {
+    const starRows = rowsOf(starTag);
+    let starStamp: number | undefined;
+    for (const row of starRows) {
       if (row.stamp === undefined || !Number.isFinite(row.stamp) || row.stamp <= 0) continue;
       if (starStamp === undefined || row.stamp > starStamp) starStamp = row.stamp;
     }
+    starRecency = recencyIn(starRows.map((row) => row.stamp))(starStamp);
   }
-  const starRecency = recencyOf(starStamp);
 
   return {
     regions: entries,

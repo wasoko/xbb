@@ -6,19 +6,26 @@
  *
  *   `srcfeed.md`           every source once: URL, `Src:` row, tags, retry budget
  *   `srcdom/sinaCNmedia`   a site adapter that reads a `sina.cn/media/<id>` page
- *   `extdom/dsc`, `extdom/ge`  tab adapters, run through `chrome.userScripts`
+ *   `extdom/dsc`, `extdom/ge`, `extdom/gr`  tab adapters, run through
+ *                          `chrome.userScripts`
  *   `w.feed.md`, `y.feed.md`, `x.feed.md`  the default feed and two examples
  *   `webfeed/extract.js`   the legacy body that reads a `webfeed.md`, kept working
  *
  * A `data:`-URL module has no base URL, so an adapter body cannot import the engine:
  * it calls `globalThis.srcfeed`, which `src/ui/routes.tsx` installs at boot.
  *
- * Nothing here is written automatically: {@link seedSrcFeedRows} is the caller's
- * step, and it keeps any live row the user already has.
+ * The full seed is the caller's step: {@link seedSrcFeedRows} writes every row and
+ * keeps any live row the user already has. The Bilibili entries are also appended
+ * once to an existing registry by `ensureBbSrcFeedEntries`, so a store seeded before
+ * them learns the five entries without a reseed.
  */
 
+import { bbFeed, bbHistory, bbList, bbLists, bbSubs } from './bb';
 import type { BodyTwin } from './runsrc';
-import { W_FEED_DOC, W_FEED_REF, EXTSRC_EXTRACT_REF, feedSourceOf, readSource } from './srcfeed';
+import {
+  W_FEED_DOC, W_FEED_REF, EXTSRC_EXTRACT_REF, feedSourceOf, readSource,
+  type SourceEntrySeed,
+} from './srcfeed';
 import {
   DEFAULT_FALLBACK, WEBFEED_REF, extractFromDoc, htmlPostItems,
   type FeedDb, type FeedDocResult, type FeedFallback,
@@ -28,9 +35,24 @@ import type { TagSeedRow, TagSeedTable } from './srctagRows';
 /** Row ref of the site adapter that reads a `sina.cn/media/<id>` page. */
 export const SRCDOM_SINA_REF = 'srcdom/sinaCNmedia';
 
-/** Row refs of the two tab adapters. Their body is the generic `extsrc` reader. */
+/** Row refs of the chat-history tab adapters. `dsc` and `ge` run the generic reader. */
 export const EXTDOM_DSC_REF = 'extdom/dsc';
 export const EXTDOM_GE_REF = 'extdom/ge';
+
+/**
+ * Row ref of the Grok adapter. Its body prefers an open `See all` popup, whose
+ * history carries the date each chat was last active, over the shorter sidebar.
+ */
+export const EXTDOM_GR_REF = 'extdom/gr';
+
+/** Row refs of the Bilibili readers; the same ref names their `srcfeed.md` entry. */
+export const BB_HIST_REF = 'bb-hist';
+export const BB_LISTS_REF = 'bb-lists';
+export const BB_LIST_REF = 'bb-list';
+/** Videos from every subscribed folder and UGC season. */
+export const BB_SUBS_REF = 'bb-subs';
+/** The latest video from every folder/collection a space subscribes to. */
+export const BB_FEED_REF = 'bb-feed';
 
 /**
  * The legacy `extsrc.md` document, kept for the adapter test.
@@ -97,6 +119,59 @@ if (rows.length === 0 && (src.prompt || (src.sidebar && !document.querySelector(
   return { rows: [], notes: [], needsUser: src.prompt || 'open the history sidebar in this tab' };
 }
 const notes = rows.length === 0 && src.item ? ['no element matched ' + src.item] : [];
+return { rows: rows, notes: notes };
+`;
+
+/**
+ * Body of `extdom/gr`: the Grok chat-history list.
+ *
+ * Grok's `See all` popup is a Radix command menu: one `a[href^="/c/"]` per chat,
+ * its title in `aria-label` with no text, and its group heading (Today, Last 7
+ * Days, This Year, Older) naming when it was last active. The sidebar lists only
+ * the newest chats and adds no date. The popup is read when it holds at least as
+ * many chats as the list outside every dialog; otherwise the sidebar is read and
+ * a note says what opening the popup would add. Nothing is clicked: the adapter
+ * reads the page the user already opened.
+ */
+export const GR_EXTRACT_BODY = `// @requires tab
+// @requires user-scripts
+const src = ctx.args.source || {};
+if (!src.url) throw new Error('srcfeed: ctx.args.source.url is missing');
+
+const item = src.item || 'a[href^="/c/"]';
+const count = function (el) { return el.querySelectorAll(item).length; };
+const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'))
+  .filter(function (el) { return count(el) > 0; })
+  .sort(function (a, b) { return count(b) - count(a); });
+const outside = Array.from(document.querySelectorAll(item)).filter(function (el) {
+  return !el.closest('[role="dialog"]');
+}).length;
+const popup = dialogs.filter(function (el) { return count(el) >= outside; })[0] || null;
+const scope = popup || document;
+
+const max = Math.max(1, Number(src.max) || 55555);
+const seen = new Set();
+const rows = [];
+const nodes = Array.from(scope.querySelectorAll(item)).filter(function (el) {
+  return popup ? true : !el.closest('[role="dialog"]');
+});
+for (const el of nodes.slice(0, max)) {
+  const href = el.href || el.getAttribute('href') || '';
+  if (!href || seen.has(href)) continue;
+  seen.add(href);
+  const label = el.getAttribute('aria-label') || el.textContent || el.getAttribute('title') || '';
+  const txt = label.replace(/\\s+/g, ' ').trim() || href;
+  const row = { txt: txt, ref: href, tags: [src.name].concat(src.tags || []) };
+  if (src.mode === 'html') row.rec = { html: (el.outerHTML || '').slice(0, 55555) };
+  rows.push(row);
+}
+
+if (rows.length === 0) {
+  const notes = src.item ? ['no element matched ' + item] : [];
+  if (src.prompt) return { rows: [], notes: [], needsUser: src.prompt };
+  return { rows: [], notes: notes };
+}
+const notes = popup ? [] : ['read the sidebar list; open "See all" for the full history'];
 return { rows: rows, notes: notes };
 `;
 
@@ -223,6 +298,109 @@ export function webFeedReport(out: FeedDocResult, args: Record<string, unknown>)
 }
 
 /**
+ * The Bilibili entries, in the order they are seeded and appended.
+ *
+ * `bb-hist` carries `* Max: 111`; `bb-lists`, `bb-list`, `bb-subs`, and `bb-feed`
+ * carry 5555. `bb-list`'s URL is a placeholder until the user copies a real list URL
+ * from a `bb-lists` row. `bb-subs` discovers the account's subscriptions itself, and
+ * `bb-feed` reads the latest video from each subscription of the space URL the user
+ * sets on that entry.
+ */
+export const BB_SOURCE_ENTRIES: readonly SourceEntrySeed[] = [
+  {
+    name: BB_HIST_REF,
+    block: `### bb-hist
+* URL: https://www.bilibili.com/history
+* Src: ${BB_HIST_REF}
+* Max: 111
+* Tags:
+  - bilibili
+  - history`,
+  },
+  {
+    name: BB_LISTS_REF,
+    block: `### bb-lists
+* URL: https://space.bilibili.com/
+* Src: ${BB_LISTS_REF}
+* Max: 5555
+* Tags:
+  - bilibili
+  - list`,
+  },
+  {
+    name: BB_LIST_REF,
+    block: `### bb-list
+* URL: https://www.bilibili.com/list/
+* Src: ${BB_LIST_REF}
+* Max: 5555
+* Tags:
+  - bilibili
+  - list`,
+  },
+  {
+    name: BB_SUBS_REF,
+    block: `### bb-subs
+* URL: https://space.bilibili.com/
+* Src: ${BB_SUBS_REF}
+* Max: 5555
+* Tags:
+  - bilibili
+  - list
+  - subscribed`,
+  },
+  {
+    name: BB_FEED_REF,
+    block: `### bb-feed
+* URL: https://space.bilibili.com/
+* Src: ${BB_FEED_REF}
+* Max: 5555
+* Tags:
+  - bilibili
+  - feed
+  - subscription`,
+  },
+];
+
+/** The five blocks as one string, for the fresh-install registry. */
+export const BB_SOURCE_BLOCKS = BB_SOURCE_ENTRIES.map((entry) => entry.block).join('\n\n');
+
+/**
+ * The first seeded `bb-list` block, kept so the 5555-cap migration replaces only
+ * that exact text. A block the user edited no longer matches and is left alone.
+ */
+export const BB_LIST_LEGACY_BLOCK = `### bb-list
+* URL: https://www.bilibili.com/list/
+* Src: ${BB_LIST_REF}
+* Max: 111
+* Tags:
+  - bilibili
+  - list`;
+
+/**
+ * The Grok entry, seeded fresh and appended once to a registry that predates it.
+ *
+ * `* Item:` matches conversation links only, so the command menu's other tabs and
+ * its `Create New Chat` row are never read.
+ */
+export const GR_SOURCE_ENTRIES: readonly SourceEntrySeed[] = [
+  {
+    name: 'gr',
+    block: `### gr
+* URL: https://grok.com/*
+* Src: ${EXTDOM_GR_REF}
+* Type: url
+* Item: a[href^="/c/"]
+* Prompt: open "See all" (history) or the sidebar in the Grok tab
+* Tags:
+  - grok
+  - chat`,
+  },
+];
+
+/** The Grok block as one string, for the fresh-install registry. */
+export const GR_SOURCE_BLOCKS = GR_SOURCE_ENTRIES.map((entry) => entry.block).join('\n\n');
+
+/**
  * The seeded registry.
  *
  * An entry without `Src:` is answered by a server and read by the built-in walk
@@ -277,6 +455,10 @@ reads it; a source without one is read by the built-in web walk (\`URL\`, then i
   - gemini
   - chat
 
+${GR_SOURCE_BLOCKS}
+
+${BB_SOURCE_BLOCKS}
+
 ## Fallback
 
 * Proxy URL: https://r.jina.ai/
@@ -304,6 +486,47 @@ if (out.strategy === null) {
   return { rows: [], notes: out.notes.length ? out.notes : ['no strategy answered'] };
 }
 return { rows: api.posts(out.body, source.url), notes: out.notes };`;
+
+/**
+ * Body of `bb-hist`: the account's recent Bilibili video history.
+ *
+ * The engine is reached through `globalThis.bbapi`; the row body cannot import it
+ * from a `data:` URL. The entry's `* Max:` arrives as `args.source.max`, so the
+ * seeded 111 is an editable registry value rather than a constant in this string.
+ */
+export const BB_HIST_BODY = `// The engine is reached through the global that routes.tsx installs; a data:-URL
+// body has no base URL, so no import from here could resolve.
+const api = (typeof globalThis !== 'undefined' && globalThis.bbapi) || null;
+if (!api) throw new Error('bb: global API missing (installBbApiGlobal() runs at boot)');
+return api.history(ctx.args || {});`;
+
+/** Body of `bb-lists`: the account's created and subscribed Bilibili lists. */
+export const BB_LISTS_BODY = `// The engine is reached through the global that routes.tsx installs; a data:-URL
+// body has no base URL, so no import from here could resolve.
+const api = (typeof globalThis !== 'undefined' && globalThis.bbapi) || null;
+if (!api) throw new Error('bb: global API missing (installBbApiGlobal() runs at boot)');
+return api.lists(ctx.args || {});`;
+
+/** Body of `bb-list`: the items of one favorite folder or UGC season URL. */
+export const BB_LIST_BODY = `// The engine is reached through the global that routes.tsx installs; a data:-URL
+// body has no base URL, so no import from here could resolve.
+const api = (typeof globalThis !== 'undefined' && globalThis.bbapi) || null;
+if (!api) throw new Error('bb: global API missing (installBbApiGlobal() runs at boot)');
+return api.list(ctx.args || {});`;
+
+/** Body of `bb-subs`: videos from every subscribed folder and UGC season. */
+export const BB_SUBS_BODY = `// The engine is reached through the global that routes.tsx installs; a data:-URL
+// body has no base URL, so no import from here could resolve.
+const api = (typeof globalThis !== 'undefined' && globalThis.bbapi) || null;
+if (!api) throw new Error('bb: global API missing (installBbApiGlobal() runs at boot)');
+return api.subs(ctx.args || {});`;
+
+/** Body of `bb-feed`: the latest video from each subscribed folder/collection. */
+export const BB_FEED_BODY = `// The engine is reached through the global that routes.tsx installs; a data:-URL
+// body has no base URL, so no import from here could resolve.
+const api = (typeof globalThis !== 'undefined' && globalThis.bbapi) || null;
+if (!api) throw new Error('bb: global API missing (installBbApiGlobal() runs at boot)');
+return api.feed(ctx.args || {});`;
 
 /** The feed a web source answers: two items, one schedule, no chat. */
 export const Y_FEED_DOC = `# y.feed
@@ -343,6 +566,11 @@ all of them and merges their chats. A tab source is never implicit, so an empty
  * and cannot silently run code other than the text it holds.
  */
 export const SRCFEED_BODY_TWINS: ReadonlyMap<string, BodyTwin> = new Map<string, BodyTwin>([
+  [BB_HIST_BODY, async (ctx) => bbHistory(asArgs(ctx.args))],
+  [BB_LISTS_BODY, async (ctx) => bbLists(asArgs(ctx.args))],
+  [BB_LIST_BODY, async (ctx) => bbList(asArgs(ctx.args))],
+  [BB_SUBS_BODY, async (ctx) => bbSubs(asArgs(ctx.args))],
+  [BB_FEED_BODY, async (ctx) => bbFeed(asArgs(ctx.args))],
   [SRCDOM_SINA_BODY, async (ctx) => {
     const args = asArgs(ctx.args);
     const source = feedSourceOf(args.source);
@@ -360,12 +588,23 @@ export const SRCFEED_BODY_TWINS: ReadonlyMap<string, BodyTwin> = new Map<string,
   }],
 ]);
 
+/** The five Bilibili rows, seeded or appended without touching any other entry. */
+export const BB_ROW_SEEDS: TagSeedRow[] = [
+  { ref: BB_HIST_REF, type: 'src', txt: BB_HIST_BODY, tags: ['srcfeed', 'bilibili'] },
+  { ref: BB_LISTS_REF, type: 'src', txt: BB_LISTS_BODY, tags: ['srcfeed', 'bilibili'] },
+  { ref: BB_LIST_REF, type: 'src', txt: BB_LIST_BODY, tags: ['srcfeed', 'bilibili'] },
+  { ref: BB_SUBS_REF, type: 'src', txt: BB_SUBS_BODY, tags: ['srcfeed', 'bilibili'] },
+  { ref: BB_FEED_REF, type: 'src', txt: BB_FEED_BODY, tags: ['srcfeed', 'bilibili'] },
+];
+
 /** Rows {@link seedSrcFeedRows} writes and {@link clearSrcFeedRows} removes. */
 export const SRCFEED_ROW_SEEDS: TagSeedRow[] = [
   { ref: 'srcfeed.md', type: 'md', txt: SRCFEED_DOC, tags: ['srcfeed'] },
   { ref: SRCDOM_SINA_REF, type: 'src', txt: SRCDOM_SINA_BODY, tags: ['srcfeed'] },
+  ...BB_ROW_SEEDS,
   { ref: EXTDOM_DSC_REF, type: 'src', txt: EXTSRC_EXTRACT_BODY, tags: ['srcfeed'] },
   { ref: EXTDOM_GE_REF, type: 'src', txt: EXTSRC_EXTRACT_BODY, tags: ['srcfeed'] },
+  { ref: EXTDOM_GR_REF, type: 'src', txt: GR_EXTRACT_BODY, tags: ['srcfeed'] },
   /* The legacy body an old `extsrc.md` names; `ensure` recreates it when missing. */
   { ref: EXTSRC_EXTRACT_REF, type: 'src', txt: EXTSRC_EXTRACT_BODY, tags: ['extsrc'] },
   { ref: W_FEED_REF, type: 'md', txt: W_FEED_DOC, tags: ['srcfeed'] },
@@ -416,4 +655,29 @@ export async function clearSrcFeedRows(table: TagSeedTable): Promise<number> {
     ...row, tags: [...new Set([...(row.tags ?? []), '[del]'])], modAt: new Date(),
   })));
   return rows.length;
+}
+
+/** One of the five Bilibili script rows. */
+const isBbRow = (row: TagSeedRow): boolean => BB_ROW_SEEDS.some((seed) => seed.ref === row.ref);
+
+/**
+ * Write the missing `bb-*` script rows, leaving a live or tombstoned row alone.
+ *
+ * The registry entries are appended separately by `ensureBbSrcFeedEntries`; this
+ * writes only the bodies a `Src:` entry needs.
+ *
+ * @param table store to write through
+ * @returns refs of the rows written
+ */
+export async function seedBbRows(table: TagSeedTable): Promise<string[]> {
+  const held: TagSeedRow[] = await table.filter(isBbRow).toArray();
+  const dead = new Set(held.filter((row) => (row.tags ?? []).includes('[del]')).map((row) => row.ref));
+  const live = new Set(held.filter((row) => !(row.tags ?? []).includes('[del]')).map((row) => row.ref));
+  const rows = BB_ROW_SEEDS
+    .filter((seed) => !live.has(seed.ref) && !dead.has(seed.ref))
+    .map((seed) => ({
+      ref: seed.ref, type: seed.type, txt: seed.txt, tags: [...seed.tags], rec: {}, modAt: new Date(),
+    }));
+  if (rows.length > 0) await table.bulkPut(rows);
+  return rows.map((row) => row.ref);
 }

@@ -1,19 +1,24 @@
 /**
- * starTagger.ts — the `star.tagger.md` document: the star's seed overrides and
- * the taxonomy section the sea writes back.
+ * starTagger.ts — the `star.tagger.md` document: the star's seed overrides, the
+ * overridable relation mapping, and the legacy taxonomy section an older build wrote.
  *
  * The dialect is deliberately small and local. It shares no parser with
  * `srcfeed.ts`: a `##` opens a section, `key: value` lines under `## Setup` are
- * the overrides, and `## Taxonomy` is generated. A missing key leaves the existing
- * qarf profile in force, so a fresh row changes nothing until the user adds a
- * line.
+ * the overrides, `## Mapping` is generated once and then left editable, and a
+ * `## Taxonomy` section written by an older build is still readable. A missing key
+ * leaves the existing qarf profile in force, so a fresh row changes nothing until
+ * the user adds a line.
+ *
+ * The generated taxonomy *table* is not in this document: it changes on every seed,
+ * so `ui/starTaggerRun.ts` caches it in `db.bins` with the seed it was read from.
  *
  * `## Setup` keys:
  *   base: 5000       tab/tag rows pulled for the qarf seed
- *   trace: 555       graph nodes written into `## Taxonomy`
- *   maxGraph: 1111   graph nodes built before the trace is cut
+ *   trace: 555       table rows cached with the seed
+ *   maxGraph: 1111   graph nodes built before the table is cut
  *   alias: js = javascript, k8s = kubernetes
- *   reset: no        `yes` rebuilds the taxonomy once, then becomes `no`
+ *   noSyn/noTheme/noWeb: yes  ignore that relation group when the sea reads the mapping
+ *   reset: no        `yes` rebuilds the taxonomy and the mapping once, then becomes `no`
  *   alpha/floor/ceil optional qarf overrides
  */
 
@@ -29,7 +34,7 @@ export const STAR_BASE_DEFAULT = 5000;
 /** Upper bound on a hand-written `base`, so one row cannot freeze the tab. */
 export const STAR_BASE_MAX = 50_000;
 
-/** `trace` default: nodes written into `## Taxonomy`. */
+/** `trace` default: table rows cached with the seed. */
 export const STAR_TRACE_DEFAULT = 555;
 
 /** Upper bound on a hand-written `trace`. */
@@ -63,7 +68,7 @@ export const STAR_MIN_LIFT_MAX = 100;
 export interface StarTaggerSetup {
   /** Tab/tag rows pulled for the seed; absent reads {@link STAR_BASE_DEFAULT}. */
   base?: number;
-  /** Graph nodes written into `## Taxonomy`; absent reads {@link STAR_TRACE_DEFAULT}. */
+  /** Table rows cached with the seed; absent reads {@link STAR_TRACE_DEFAULT}. */
   trace?: number;
   /** Graph nodes built before the trace is cut; absent reads {@link STAR_GRAPH_DEFAULT}. */
   maxGraph?: number;
@@ -75,7 +80,13 @@ export interface StarTaggerSetup {
   minLift?: number;
   /** Alias -> canonical tag, as written in `alias:` lines. */
   alias: Record<string, string>;
-  /** `reset: yes` asks for one forced trace rebuild. */
+  /** Ignore the generated `### Synonyms` relations whichever copy is read. */
+  noSyn: boolean;
+  /** Ignore the generated `### Themes` relations whichever copy is read. */
+  noTheme: boolean;
+  /** Ignore the generated `### Web` relations whichever copy is read. */
+  noWeb: boolean;
+  /** `reset: yes` asks for one forced taxonomy and mapping rebuild. */
   reset: boolean;
   /** Optional qarf steepness override. */
   alpha?: number;
@@ -87,20 +98,24 @@ export interface StarTaggerSetup {
   notes: string[];
 }
 
-/** The document split into its head and its three sections. */
+/** The document split into its head and its sections. */
 export interface StarTaggerDoc {
   /** Text before the first `##` section. */
   head: string;
   /** Parsed `## Setup` overrides. */
   setup: StarTaggerSetup;
-  /** Generated `## Taxonomy` body, as written. */
+  /** Overridable `## Mapping` body: aliases, synonyms, themes and web relations. */
+  mapping: string;
+  /** A generated `## Taxonomy` body an older build wrote; kept as the first-mount fallback. */
   taxonomy: string;
   /** User-authored `## Notes` body. */
   notes: string;
 }
 
 /** A fresh setup: no overrides, no aliases, no reset. */
-export const DEFAULT_STAR_SETUP: StarTaggerSetup = { alias: {}, reset: false, notes: [] };
+export const DEFAULT_STAR_SETUP: StarTaggerSetup = {
+  alias: {}, noSyn: false, noTheme: false, noWeb: false, reset: false, notes: [],
+};
 
 /** A fresh setup object, safe for a caller that may mutate it. */
 export const defaultStarSetup = (): StarTaggerSetup => ({ ...DEFAULT_STAR_SETUP, alias: {}, notes: [] });
@@ -116,10 +131,12 @@ export const STAR_TAGGER_DOC = `# star.tagger
 # minRecent: 3
 # minLift: 2
 # alias: js = javascript, k8s = kubernetes
+# noSyn: no
+# noTheme: no
+# noWeb: no
 # reset: no
 
-## Taxonomy
-the sea writes this section on each seed.
+## Mapping
 
 ## Notes
 This row customizes the star's taxonomy. Uncomment a Setup line to override the
@@ -132,10 +149,13 @@ default; a missing key leaves the qarf profile in force.
 - minRecent: recent rows a tag needs before the sea may draw it as emerging.
 - minLift: how many times its older rate a tag's recent rate must reach.
 - alias: another spelling of the same tag, e.g. js = javascript.
-- reset: write yes to rebuild the table once; it clears itself back to no.
+- noSyn/noTheme/noWeb: write yes to ignore that relation group.
+- reset: write yes to rebuild the table and mapping once; it clears itself back to no.
 - alpha/floor/ceil: optional qarf weighting overrides.
 
-Edit Setup and Notes. \`## Taxonomy\` is generated and will be replaced.
+The generated table is cached in this browser's \`db.bins\`, not written here.
+Edit Setup and Mapping. \`## Taxonomy\` is a section an older build wrote and is no
+longer read while the cache exists.
 `;
 
 /** `## <name>` that opens a section. */
@@ -224,8 +244,12 @@ function parseSetup(body: string[]): StarTaggerSetup {
       Object.assign(setup.alias, parseAliases(value));
       continue;
     }
-    if (key === 'reset') {
-      setup.reset = /^(yes|true|1|on)$/i.test(value);
+    if (key === 'reset' || key === 'nosyn' || key === 'notheme' || key === 'noweb') {
+      const on = /^(yes|true|1|on)$/i.test(value);
+      if (key === 'reset') setup.reset = on;
+      else if (key === 'nosyn') setup.noSyn = on;
+      else if (key === 'notheme') setup.noTheme = on;
+      else setup.noWeb = on;
       continue;
     }
     const limits = key === 'alpha'
@@ -261,13 +285,15 @@ function parseSetup(body: string[]): StarTaggerSetup {
  * Read a `star.tagger.md`.
  *
  * @param md document text
- * @returns the head, the Setup overrides, and the generated and user sections
+ * @returns the head, the Setup overrides, the overridable mapping, and the legacy and
+ *          user sections
  */
 export function parseStarTaggerDoc(md: string): StarTaggerDoc {
   const { head, sections } = splitSections(md);
   return {
     head,
     setup: parseSetup(sectionBody(sections, 'Setup')),
+    mapping: sectionBody(sections, 'Mapping').join('\n').trim(),
     taxonomy: sectionBody(sections, 'Taxonomy').join('\n').trim(),
     notes: sectionBody(sections, 'Notes').join('\n').trim(),
   };
@@ -421,7 +447,14 @@ export function starLimits(setup: StarTaggerSetup): StarLimits {
   return { base, trace, maxGraph, recent, minRecent, minLift };
 }
 
-/** A stable dependency key for the Setup block, with `reset` left out. */
+/**
+ * A stable dependency key for the Setup block: `reset` is left out so clearing it does not
+ * seed twice, and the `noSyn`/`noTheme`/`noWeb` filters are left out because they change how
+ * the stored mapping is read rather than what the seed produces.
+ *
+ * @param setup parsed Setup
+ * @returns the key the sea re-seeds on
+ */
 export function starSetupFingerprint(setup: StarTaggerSetup): string {
   const alias = Object.entries(setup.alias).sort(([a], [b]) => a.localeCompare(b));
   return JSON.stringify({

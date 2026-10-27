@@ -15,6 +15,10 @@ import { startPerfWatch } from '../perfWatch';
 import { installSrctagGlobal } from '../srctag';
 import { installWebfeedGlobal } from '../srcfeedWeb';
 import { installSrcFeedGlobal } from '../srcfeed';
+import { ensureBbListMax, ensureBbSrcFeedEntries, ensureGrSrcFeedEntry } from '../srcfeedStore';
+import { installBbApiGlobal } from '../bb';
+import { installBbProxy } from '../bbProxyInstall';
+import { BbLoginDialog } from './BbLoginDialog';
 import { registerBodyTwins } from '../runsrc';
 import { SRCFEED_BODY_TWINS } from '../srcfeedRows';
 import { installSrcFeedTabRunner } from '../srcfeedTab';
@@ -107,7 +111,19 @@ installWebfeedGlobal();
 
 // And `srcdom/*` adapters read their site through this one.
 installSrcFeedGlobal();
+// `bb-*` rows read Bilibili through this one; the extension page's cookies are the session.
+installBbApiGlobal();
+// The webapp has no Bilibili cookies, so it reaches `cors_bb` through the proxy.
+installBbProxy();
 
+// A registry seeded before the Bilibili entries existed gains them once; a
+// tombstoned row is a deletion, not a missing seed.
+void ensureBbSrcFeedEntries()
+  .then(() => ensureBbListMax())
+  .then(() => ensureGrSrcFeedEntry())
+  .catch((error: unknown) => {
+    console.error('srcfeed: cannot append the seeded entries', error);
+  });
 // A realm that forbids eval — the extension page — runs a seeded body through this
 // compiled counterpart instead; an edited row no longer matches, so it refuses.
 registerBodyTwins(SRCFEED_BODY_TWINS);
@@ -127,6 +143,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <RouterProvider router={router} />
     <Toaster position="top-right" richColors />
+    <BbLoginDialog />
   </React.StrictMode>
 );
 

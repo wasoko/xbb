@@ -1,12 +1,16 @@
 /**
- * starTaggerTrace.ts — the generated `## Taxonomy` table and relation web.
+ * starTaggerTrace.ts — the generated taxonomy table, the burst reading, and the
+ * overridable relation mapping.
  *
- * The build is pure: it reads a sea seed and the stage timings, and writes text.
- * The row that stores that text and the Dexie write live in `starTaggerRun.ts`,
- * so this module can be read and tested without a store or a DOM.
+ * The build is pure: it reads a sea seed and the stage timings, and writes text. The
+ * table and bursts change on every seed, so they are cached in `db.bins`; the mapping
+ * (aliases, synonyms, themes, web) is written into `star.tagger.md` once and left
+ * editable. The row and the store live in `starTaggerRun.ts`, so this module can be
+ * read and tested without a store or a DOM.
  */
 
 import { DEFAULT_QARF } from './qarf';
+import { isProvenanceTag } from './rstag';
 import type { RowTagReport, TagExplanation } from './srctag';
 import { headingTags, type GraphNodeKind, type GraphReach } from './ui/restGraph';
 import type { PinGraphSeed, StarTiming } from './ui/seaPinGraph';
@@ -39,10 +43,12 @@ export interface StarTaxonomyRow {
   trend?: number;
 }
 
-/** The generated section and the facts a caller may want to assert on. */
+/** The generated table body and the mapping that is written into the row. */
 export interface StarTaxonomy {
-  /** The `## Taxonomy` body, heading excluded. */
+  /** The dynamic body: header, timing, the table and `### Bursts`. Cached in `db.bins`. */
   text: string;
+  /** The overridable body: `### Aliases`, `### Synonyms`, `### Themes` and `### Web`. */
+  mapping: string;
   /** Rows written, after the `trace` cap. */
   nodes: number;
   /** Every row the table considered, before the cap. */
@@ -97,17 +103,18 @@ function topEdges(seed: PinGraphSeed, limit = 40): { a: string; b: string; w: nu
 }
 
 /**
- * Build the `## Taxonomy` section from one seed.
+ * Build the generated table and the overridable mapping from one seed.
  *
  * The table is cut to `trace` nodes; the relation sections are not cut by that
- * setting, so the alias/synonym/theme/burst web stays complete even when the
- * table is short.
+ * setting, so the alias/synonym/theme/web mapping stays complete even when the
+ * table is short. Bursts travel with the table because they are read from the same
+ * seed and change with it; the mapping is the part a reader edits.
  *
  * @param seed the sea's seed
  * @param setup its overrides
  * @param timings stage timings from {@link PinGraphSeed.timings}
  * @param now seed stamp, injectable for a deterministic test
- * @returns the generated body and the rows it lists
+ * @returns the generated body, the mapping, and the rows the table lists
  */
 export function buildStarTaxonomy(
   seed: PinGraphSeed, setup: StarTaggerSetup, timings: StarTiming, now: Date = new Date(),
@@ -120,6 +127,9 @@ export function buildStarTaxonomy(
   const bursts = new Map<number, BurstStat>();
 
   const add = (raw: string, score = 0, report?: RowTagReport, explanation?: TagExplanation): void => {
+    /* A maintenance or capture tag is not a topic: the row's `FIXME…`, `dev_` and
+       `suffix_` families describe how it was stored, not what it is about. */
+    if (isProvenanceTag(raw)) return;
     if (graph.folded?.has(raw) === true) bumpCount(foldCount, raw);
     if (graph.merged?.has(raw) === true) bumpCount(mergeCount, raw);
     const tag = graph.name(raw);
@@ -140,6 +150,7 @@ export function buildStarTaxonomy(
     const burst = bursts.get(report.cluster) ?? { rows: 0, tags: new Map<string, number>() };
     burst.rows++;
     for (const tag of report.tags) {
+      if (isProvenanceTag(tag.tag)) continue;
       add(tag.tag, tag.score, report, tag);
       const node = graph.name(tag.tag);
       burst.tags.set(node, Math.max(burst.tags.get(node) ?? 0, tag.score));
@@ -238,15 +249,16 @@ export function buildStarTaxonomy(
     '',
     ...rows,
     '',
+    ...list('Bursts', burstLines),
+  ].join('\n');
+  const mapping = [
     ...list('Aliases', aliases),
     '',
     ...list('Synonyms', synonyms),
     '',
     ...list('Themes', themes),
     '',
-    ...list('Bursts', burstLines),
-    '',
     ...list('Web', web),
   ].join('\n');
-  return { text, nodes: Math.min(limits.trace, table.length), table };
+  return { text, mapping, nodes: Math.min(limits.trace, table.length), table };
 }

@@ -279,11 +279,12 @@ describe('pin cards', () => {
 });
 
 describe('adjacency', () => {
-  it('reads tid, the later of dt and modAt, and both visit-time spellings', () => {
+  it('reads tid, the later of dt and modAt, the visit map, and its legacy spelling', () => {
     expect(rowStamp(row(7, 't'), 'tid')).toBe(7);
     const times = row(1, 't', { dt: '2024-01-01T00:00:00Z', modAt: '2024-06-01T00:00:00Z' });
     expect(rowStamp(times, 'dt')).toBe(Date.parse('2024-06-01T00:00:00Z'));
     expect(rowStamp(row(1, 't', { rec: { visitTime: 500 } }), 'visitTime')).toBe(500);
+    expect(rowStamp(row(1, 't', { rec: { visitTimes: { 800: {} } } }), 'visitTime')).toBe(800);
     expect(rowStamp(row(1, 't', { rec: { visitTIme: { 900: {} } } }), 'visitTime')).toBe(900);
     expect(rowStamp(row(1, 't', { rec: { access2discard: { 1200: true } } }), 'visitTime')).toBe(1200);
     expect(rowStamp(row(1, 't'), 'visitTime')).toBe(0);
